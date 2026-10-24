@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+# Fixtures (binary traces, ETL hex dumps stay text) live in Git LFS.
+tests/fixtures/**/*.tachyon filter=lfs diff=lfs merge=lfs -text
+tests/fixtures/**/*.tachyon-inst filter=lfs diff=lfs merge=lfs -text
+tests/fixtures/**/*.etl filter=lfs diff=lfs merge=lfs -text
+tests/fixtures/**/*.bin filter=lfs diff=lfs merge=lfs -text

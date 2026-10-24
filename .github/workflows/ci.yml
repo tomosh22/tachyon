@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "wp/**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [linux-release, linux-asan]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev clang-format-18 \
+            libdw-dev libelf-dev libcurl4-openssl-dev libsdl2-dev libgl-dev xvfb
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+      - uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/dependencies.cmake') }}
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+      - name: clang-format check
+        if: matrix.preset == 'linux-release'
+        run: |
+          files=$(git ls-files '*.h' '*.hpp' '*.c' '*.cpp' | grep -v '^third_party/' || true)
+          [ -z "$files" ] || clang-format-18 --dry-run --Werror $files
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/dependencies.cmake') }}
+      - name: Configure
+        run: cmake --preset windows-release
+      - name: Build
+        run: cmake --build --preset windows-release
+      - name: Test
+        run: ctest --preset windows-release

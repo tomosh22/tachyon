@@ -1,0 +1,4 @@
+<!-- Orchestrator-owned copy of IMPLEMENTATION_PLAN.md Part 3.9. Keep in sync with the plan and the matching header. Changes only via orchestrator. -->
+
+### 3.9 Timeline level-of-detail (`libs/analysis/lod.h`)
+For each thread, precompute at load: (a) state bands at levels L0..Lk where level L buckets have width `2^L × 64 ticks`, storing per bucket the fraction of Running/Ready/Waiting and the dominant wait reason; (b) sample "mipmaps": for each level and bucket, the most frequent callstack id and its share, so the collapsed row can draw a representative color; (c) for expanded flame charts, per-depth run-length encoded spans built from consecutive samples sharing the same callstack prefix, merged when narrower than one pixel at the current zoom. Target: render any zoom level of a 10-minute, 64-thread capture in under 4 ms of CPU per frame.

@@ -1,0 +1,10 @@
+/build/
+/out/
+/.cache/
+compile_commands.json
+*.etl
+!tests/fixtures/**/*.etl
+imgui.ini
+.vs/
+.vscode/
+.idea/

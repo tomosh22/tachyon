@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.25)
+project(tachyon VERSION 0.1.0 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
+
+option(TACHYON_BUILD_VIEWER "Build the ImGui viewer (needs SDL2 + OpenGL)" ON)
+option(TACHYON_BUILD_TESTS "Build unit and perf tests" ON)
+option(TACHYON_ENABLE_DIA "Build the DIA symbol provider (Windows only)" ${WIN32})
+option(TACHYON_ENABLE_LIBDW "Build the libdw DWARF symbol provider (Linux only)" OFF)
+
+if(TACHYON_ENABLE_DIA AND NOT WIN32)
+  message(FATAL_ERROR "TACHYON_ENABLE_DIA requires Windows")
+endif()
+
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+include(warnings)
+include(tachyon_helpers)
+
+if(TACHYON_BUILD_TESTS)
+  enable_testing()
+  include(GoogleTest)
+endif()
+
+include(dependencies)
+
+tachyon_add_subdirectories(${PROJECT_SOURCE_DIR}/libs)
+if(EXISTS ${PROJECT_SOURCE_DIR}/sdk/CMakeLists.txt)
+  add_subdirectory(sdk)
+endif()
+tachyon_add_subdirectories(${PROJECT_SOURCE_DIR}/apps)
+tachyon_add_subdirectories(${PROJECT_SOURCE_DIR}/tools)
+if(TACHYON_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
