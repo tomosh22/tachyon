@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -30,7 +31,9 @@ namespace {
 #endif
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
+#if defined(__clang__)
 #pragma GCC diagnostic ignored "-Wgnu-label-as-value"
+#endif
 
 struct Bounds {
   const void* lo;
