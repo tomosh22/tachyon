@@ -6,10 +6,10 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 
 | WP | Title | Lane | Status | Branch | Date |
 |---|---|---|---|---|---|
-| WP-00 | Repository skeleton and CI | — | merged (Linux verified; Windows CI job pending first run) | main | 2026-10-24 |
+| WP-00 | Repository skeleton and CI | — | merged (CI green: linux-release, linux-asan, windows-release) | main | 2026-10-24 |
 | WP-01 | ETW spike tool `etlstat` | A | not started | wp/01-etlstat | |
-| WP-02 | Profiler testbed | — | not started | wp/02-testbed | |
-| WP-03 | Trace format library | — | not started | wp/03-trace | |
+| WP-02 | Profiler testbed | — | in progress | wp/02-testbed | 2026-10-24 |
+| WP-03 | Trace format library | — | in progress | wp/03-trace | 2026-10-24 |
 | WP-04 | Synthetic trace generator `tracegen` | C | not started | wp/04-tracegen | |
 | WP-10 | Agent skeleton and control protocol | A | not started | wp/10-agent | |
 | WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
@@ -35,7 +35,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-46 | Thread interaction | D | not started | wp/46-thread-interaction | |
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
-| WP-50 | Public SDK header and loader | E | not started | wp/50-sdk-header | |
+| WP-50 | Public SDK header and loader | E | in progress | wp/50-sdk-header | 2026-10-24 |
 | WP-51 | Client runtime | E | not started | wp/51-sdk-runtime | |
 | WP-52 | Agent-side ingestion and merge | — | not started | wp/52-ingestion | |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
