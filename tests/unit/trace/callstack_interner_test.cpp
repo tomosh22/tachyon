@@ -89,7 +89,7 @@ TEST(CallstackInterner, RandomStacksMatchOracle) {
   std::map<std::pair<uint32_t, uint32_t>, uint32_t> seen;
   for (size_t i = 1; i < in.size(); ++i) {
     auto n = in.node(CallstackIdx(static_cast<uint32_t>(i)));
-    ASSERT_TRUE(seen.emplace(std::make_pair(n.parent.get(), n.frame.get()), i).second);
+    ASSERT_TRUE(seen.emplace(std::make_pair(n.parent.get(), n.frame.get()), static_cast<uint32_t>(i)).second);
   }
 }
 

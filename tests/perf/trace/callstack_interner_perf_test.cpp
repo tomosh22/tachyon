@@ -79,6 +79,7 @@ BenchResult runBenchmark(bool skewed) {
   for (size_t n = 0; n < kStacks; ++n) checksum += in.internStack(stacks[picks[n]]).get();
   const double seconds = core::ticksToSeconds(core::nowTicks() - t0, core::ticksFrequency());
 
+  std::printf("[trace perf] %s intern_seconds=%.2f\n", skewed ? "skewed" : "uniform", seconds);
   const double endBytesPerNode = in.bytesPerNode();
   const size_t nodeCapBytes = in.nodeCapacityBytes();
   const size_t tableBytes = in.hashTableBytes();
