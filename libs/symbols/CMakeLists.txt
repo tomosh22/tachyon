@@ -10,8 +10,13 @@ if(WIN32 AND TACHYON_ENABLE_DIA)
   tachyon_find_dia_sdk()
   list(APPEND TACHYON_SYMBOLS_DIA_SOURCES dia/dia_com_session.cpp)
 endif()
+# ELF reader: always built (the locator reads .gnu_debuglink with it); the libdw provider only on Linux.
+set(TACHYON_SYMBOLS_DWARF_SOURCES dwarf/elf_reader.cpp)
+if(TACHYON_ENABLE_LIBDW)
+  list(APPEND TACHYON_SYMBOLS_DWARF_SOURCES dwarf/dwarf_provider.cpp dwarf/elf_symbol_table.cpp dwarf/libdw_session.cpp)
+endif()
 tachyon_add_library(symbols
-  SOURCES ${TACHYON_SYMBOLS_DIA_SOURCES} demangle.cpp function_key.cpp http_client.cpp json_symbol_provider.cpp range_table.cpp
+  SOURCES ${TACHYON_SYMBOLS_DIA_SOURCES} ${TACHYON_SYMBOLS_DWARF_SOURCES} demangle.cpp function_key.cpp http_client.cpp json_symbol_provider.cpp range_table.cpp
           symbol_keys.cpp symbol_locator.cpp symbol_provider.cpp symbol_service.cpp symbol_strings.cpp
           ${TACHYON_SYMBOLS_HTTP_SOURCES}
   PUBLIC_DEPS tachyon::core tachyon::trace tachyon::model Threads::Threads
@@ -26,4 +31,8 @@ if(WIN32)
   endif()
 else()
   target_link_libraries(tachyon_symbols PRIVATE CURL::libcurl)
+endif()
+if(TACHYON_ENABLE_LIBDW)
+  target_compile_definitions(tachyon_symbols PUBLIC TACHYON_HAVE_LIBDW=1)
+  target_link_libraries(tachyon_symbols PRIVATE PkgConfig::TACHYON_LIBDW)
 endif()

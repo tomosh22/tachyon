@@ -213,3 +213,10 @@ function(tachyon_copy_dia_dll target)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TACHYON_DIA_DLL}" "$<TARGET_FILE_DIR:${target}>"
     VERBATIM)
 endfunction()
+
+# --- elfutils libdw / libelf (Linux only, LGPL, dynamically linked) ------------------------------------------
+# Used by the DWARF symbol provider (libs/symbols/dwarf). Discovery through pkg-config only.
+if(TACHYON_ENABLE_LIBDW)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(TACHYON_LIBDW REQUIRED IMPORTED_TARGET GLOBAL libdw libelf)
+endif()

@@ -5,6 +5,7 @@
 #include "core/log.h"
 #include "core/platform.h"
 #include "symbols/dia/dia_provider.h"
+#include "symbols/dwarf/dwarf_provider.h"
 #include "viewer/builtin_panels.h"
 #include "viewer/paths.h"
 #include "viewer/theme.h"
@@ -190,6 +191,10 @@ void App::startSymbolResolution(Document& document) {
   auto service = std::make_shared<symbols::SymbolService>(m_settings.symbolServers, cacheDir);
 #if TACHYON_PLATFORM_WINDOWS && TACHYON_HAVE_DIA
   symbols::registerDiaProvider(*service);  // PDBs through DIA; .symbols.json sidecars keep working
+#endif
+#if TACHYON_PLATFORM_LINUX && TACHYON_HAVE_LIBDW
+  symbols::registerDwarfProvider(
+      *service);  // ELF debug files through libdw; .symbols.json sidecars keep working
 #endif
   // Developer convenience (and the test fixtures): a "<trace>.symbols.json" next to the trace is registered
   // as the symbol file of the modules it describes, ahead of the locator.
