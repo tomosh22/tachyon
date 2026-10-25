@@ -3,6 +3,7 @@
 // load errors. The carrier ELF files are the fixture binaries (their real symbol tables feed the fallback);
 // the DWARF part is supplied by the fake in DWARF address space.
 #include "dwarf_test_util.h"
+#include "symbols/demangle.h"
 #include "symbols/symbol_service.h"
 
 #include <unistd.h>
@@ -218,8 +219,9 @@ TEST(DwarfProviderLogic, SplitFunctionIdentityIsTheEntryPc) {
   ASSERT_TRUE(bHot.ok() && bCold.ok());
   EXPECT_EQ(bHot.value().startRva, 0x20100u);
   EXPECT_EQ(bHot.value().size, 0x80u);
-  EXPECT_EQ(bCold.value().startRva, 0x20100u);
-  EXPECT_EQ(bCold.value().size, 0x80u);  // the piece holding the entry
+  EXPECT_EQ(bCold.value().startRva, 0x20000u);  // the piece that contains the address, not the entry
+  EXPECT_EQ(bCold.value().size, 0x30u);
+  EXPECT_EQ(bCold.value().name, bHot.value().name);
 
   auto lines = e.provider->linesForFunction(0x20100);
   ASSERT_TRUE(lines.ok());
@@ -295,12 +297,12 @@ TEST(DwarfProviderLogic, NamesAreDemangledAndCachedPerFunction) {
   ASSERT_TRUE(e.status.ok());
   for (int i = 0; i < 50; ++i) {
     const ResolvedAddress r = e.provider->resolve(0x40000 + static_cast<uint64_t>(i));
-    EXPECT_EQ(e.name(r.function), "ns::Foo::bar(int)");
+    EXPECT_EQ(e.name(r.function), "ns::Foo::bar");
   }
   EXPECT_EQ(e.session.nameCalls, 1);  // name resolved once per function
   const ResolvedAddress in = e.provider->resolve(0x40014);
   ASSERT_EQ(in.inlines.size(), 1u);
-  EXPECT_EQ(e.name(in.inlines[0].function), "helper()");
+  EXPECT_EQ(e.name(in.inlines[0].function), "helper");
   EXPECT_EQ(e.provider->functionBounds(0x40000).value().size, 0x100u);
 }
 
@@ -498,7 +500,7 @@ TEST(DwarfServiceIntegration, ResolvesFramesThroughTheService) {
   EXPECT_NE(leaf.line, 0u);
   const ResolvedAddress& caller = svc.lookupCaller(FrameIdx(1));  // non-leaf: rva - 1
   ASSERT_TRUE(caller.resolved);
-  EXPECT_EQ(svc.symbolStrings().get(caller.function), "fx::Widget::work(int)");
+  EXPECT_EQ(svc.symbolStrings().get(caller.function), "fx::Widget::work");
   EXPECT_FALSE(svc.lookup(FrameIdx(2)).resolved);
   ASSERT_NE(svc.provider(ModuleIdx(0)), nullptr);
   EXPECT_TRUE(svc.provider(ModuleIdx(0))->functionBounds(hot).ok());
@@ -533,6 +535,67 @@ TEST(DwarfServiceIntegration, WrongBuildIdIsNotFoundAndJsonStillWorks) {
   svc2.waitAll(m);
   EXPECT_EQ(m.modules[0].state, model::SymbolState::Failed);
   std::filesystem::remove(junk);
+}
+
+TEST(StripParameterList, RemovesTheTrailingParameterListOnly) {
+  EXPECT_EQ(stripParameterList("ns::Foo::bar(int, char const*)"), "ns::Foo::bar");
+  EXPECT_EQ(stripParameterList("ns::Foo::bar()"), "ns::Foo::bar");
+  EXPECT_EQ(stripParameterList("Foo::bar(int) const"), "Foo::bar");
+  EXPECT_EQ(stripParameterList("Foo::bar(int) volatile"), "Foo::bar");
+  EXPECT_EQ(stripParameterList("Foo::bar(int) const volatile &&"), "Foo::bar");
+  EXPECT_EQ(stripParameterList("Foo::bar(int) &"), "Foo::bar");
+  EXPECT_EQ(stripParameterList("Foo::bar(int) const noexcept"), "Foo::bar");
+  EXPECT_EQ(stripParameterList("foo(int) [clone .cold]"), "foo");
+  EXPECT_EQ(stripParameterList("foo(int) [clone .isra.0] [clone .constprop.1]"), "foo");
+  EXPECT_EQ(stripParameterList("foo(int) const [clone .part.0]"), "foo");
+}
+
+TEST(StripParameterList, HandlesNestedParenthesesAndTemplates) {
+  EXPECT_EQ(stripParameterList("void (*foo(int (*)(char)))(long)"), "void (*foo(int (*)(char)))");
+  EXPECT_EQ(stripParameterList("std::function<void (int)>::operator()(int) const"),
+            "std::function<void (int)>::operator()");
+  EXPECT_EQ(stripParameterList("ns::f<int (*)(int)>(int (*)(int))"), "ns::f<int (*)(int)>");
+  EXPECT_EQ(stripParameterList("(anonymous namespace)::helper(int)"), "(anonymous namespace)::helper");
+  EXPECT_EQ(stripParameterList("A::operator()()"), "A::operator()");
+  EXPECT_EQ(stripParameterList("A::operator std::shared_ptr<B>() const"), "A::operator std::shared_ptr<B>");
+  EXPECT_EQ(stripParameterList("A::operator&(A&)"), "A::operator&");
+  EXPECT_EQ(stripParameterList("ns::foo[abi:cxx11](int)"), "ns::foo[abi:cxx11]");
+}
+
+TEST(StripParameterList, LeavesNamesWithoutAParameterListAlone) {
+  for (const char* n : {"hot_c", "ns::Foo::bar", "", "_start", "std::vector<int>::push_back", "A::operator&",
+                        "(unbalanced", "unbalanced)", "(onlyparens)"}) {
+    EXPECT_EQ(stripParameterList(n), n) << n;
+  }
+}
+
+TEST(StripParameterList, OverloadsDisplayAlike) {
+  EXPECT_EQ(stripParameterList(demangleItanium("_ZN2ns3fooEi")),
+            stripParameterList(demangleItanium("_ZN2ns3fooEPKc")));
+  EXPECT_EQ(stripParameterList(demangleItanium("_ZNK2ns3Foo3barEv")), "ns::Foo::bar");
+}
+
+TEST(DwarfProviderLogic, SymbolTableNamesHaveNoParameterLists) {
+  const auto file = fixture("dwarf_fixture_nodebug");
+  Loaded l(file);
+  ASSERT_TRUE(l.status.ok());
+  EXPECT_EQ(l.name(l.provider->resolve(*symbolRva(file, "_ZN2fx6Widget4workEi")).function),
+            "fx::Widget::work");
+  EXPECT_EQ(l.name(l.provider->resolve(*symbolRva(file, "_Z7cold_fni")).function), "cold_fn");
+}
+
+TEST(DwarfProviderLogic, SourceNameIsPreferredOverTheLinkageName) {
+  Env e(uint64_t{0}, [](FakeSession& s, uint64_t) {
+    FakeFunction f;
+    f.id = 1;
+    f.entry = 0x70000;
+    f.ranges = {{0x70000, 0x70100}};
+    f.name = "_ZN2ns3Foo3barEi";
+    f.source = "ns::Foo::bar";
+    s.functions.push_back(f);
+  });
+  ASSERT_TRUE(e.status.ok());
+  EXPECT_EQ(e.name(e.provider->resolve(0x70010).function), "ns::Foo::bar");
 }
 
 }  // namespace

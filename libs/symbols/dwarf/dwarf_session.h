@@ -52,10 +52,19 @@ struct DwarfLineRow {
   uint32_t line = 0;
 };
 
+// Counters of a session (for tests and diagnostics).
+struct DwarfSessionStats {
+  uint64_t lineBytes = 0;      // bytes of line rows currently cached
+  uint64_t lineLoads = 0;      // line tables decoded (a CU evicted and needed again counts again)
+  uint64_t lineEvictions = 0;  // line tables dropped to stay within the budget
+};
+
 // One open ELF/DWARF object. NOT thread-safe: DwarfSymbolProvider serializes every call with its mutex.
 class IDwarfSession {
  public:
   virtual ~IDwarfSession() = default;
+  // Cache counters; zero for sessions without a cache.
+  virtual DwarfSessionStats stats() const { return {}; }
   // The innermost function with code containing addr.
   virtual std::optional<DwarfFunction> findFunction(uint64_t addr) = 0;
   // Raw name of a function: the linkage name when present (the provider demangles it), else a qualified
@@ -86,7 +95,12 @@ class IDwarfOpener {
   virtual Result<std::unique_ptr<IDwarfSession>> open(const ElfFile& elf) = 0;
 };
 
-// Thread-safe. The libdw-backed opener, or nullptr when libdw is not compiled in.
-std::shared_ptr<IDwarfOpener> makeLibdwOpener();
+// Default byte budget of the per-session cache of decoded line tables.
+constexpr uint64_t kDefaultLineCacheBytes = 64ull * 1024 * 1024;
+
+// Thread-safe. The libdw-backed opener; every session it opens keeps at most `lineCacheBytes` of flattened
+// line rows (least recently used compilation units are dropped and decoded again on demand; the CU being
+// queried is always kept, so a budget smaller than one table still works).
+std::shared_ptr<IDwarfOpener> makeLibdwOpener(uint64_t lineCacheBytes = kDefaultLineCacheBytes);
 
 }  // namespace tachyon::symbols

@@ -16,6 +16,12 @@ std::string demangleMsvc(std::string_view mangled);
 // unchanged when it is not a mangled name, cannot be demangled, or cxxabi is unavailable.
 std::string demangleItanium(std::string_view mangled);
 
+// Thread-safe: pure function. Removes the trailing parameter list from a demangled C++ name:
+// "ns::Foo::bar(int, char const*) const" -> "ns::Foo::bar". Balanced-parenthesis scan from the end; trailing
+// const / volatile / & / && / noexcept qualifiers and " [clone ...]" suffixes are dropped as well. A name
+// that does not end in a parameter list is returned unchanged.
+std::string stripParameterList(std::string_view demangled);
+
 // Thread-safe: pure function. Picks the scheme by prefix: "?" is MSVC, "_Z" is Itanium, anything else is
 // returned unchanged.
 std::string demangle(std::string_view name);

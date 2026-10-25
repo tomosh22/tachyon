@@ -14,13 +14,18 @@
 // inside one of the ranges, else the low_pc of the FIRST range in DWARF order (compilers list the hot part
 // first). Every piece resolves to that same functionStartRva. Code not covered by DWARF falls back to the ELF
 // symbol table (bounded by st_size; st_size 0 is bounded by the next symbol and the section end).
-// functionBounds() of any address of a split function reports startRva = entry and the size of the piece that
-// holds the entry; linesForFunction() covers all pieces.
+// functionBounds(rva) reports the contiguous PIECE that contains rva (3.6: "bounds of the function containing
+// rva"), so for the cold piece of a split function FunctionBounds::startRva differs from
+// ResolvedAddress::functionStartRva (the entry); for every other address they are equal.
+// linesForFunction(entry) covers all pieces.
 //
-// NAMES: the linkage name is demangled (Itanium, abi::__cxa_demangle), so C++ functions show their parameter
-// list ("fx::Widget::work(int)"); functions without a linkage name show their (qualified) source name. When a
-// linkage name cannot be demangled (libstdc++ rejects clang's C++20 constraint manglings) the qualified
-// source name from the DIE is used instead of the raw "_Z..." text.
+// NAMES (same style as DIA: qualified, no parameter list): the qualified source name of the DIE
+// ("fx::Widget::work", "std::vector<int>::push_back"). Code without DWARF names comes from the symbol table:
+// the Itanium-demangled name with its trailing parameter list stripped (stripParameterList), so overloads
+// display alike. Names that cannot be demangled stay raw.
+//
+// LINE CACHE: flattened per-CU line rows are kept in an LRU bounded by a byte budget (default 64 MiB, see
+// makeLibdwOpener). libdw keeps its own copy of each line table it decoded; the budget bounds ours.
 //
 // INLINES: innermost first. inlines[0] carries the line-table position of the address; each outer frame
 // carries the call-site position (DW_AT_call_file/call_line) of the frame inside it. A frame without a
@@ -76,13 +81,17 @@ class DwarfSymbolProvider final : public ISymbolProvider {
 
   // Thread-safe after load(). The DWARF address of rva 0 (see RVA MAPPING).
   uint64_t loadBias() const { return m_bias; }
+  // Thread-safe after load(). Line-cache counters of the DWARF session (zeros without DWARF).
+  DwarfSessionStats sessionStats() const;
   // Thread-safe after load(). True when debug info (DWARF) is in use, false for symbol-table-only modules.
   bool hasDwarf() const { return m_session != nullptr; }
 
  private:
   struct FunctionView {
     uint64_t startRva = 0;
-    uint64_t size = 0;  // size of the piece holding the entry (DWARF) / st_size-or-bounded (symtab)
+    uint64_t size = 0;     // symtab functions: st_size-or-bounded (used for lines)
+    uint64_t pieceLo = 0;  // the contiguous piece containing the queried rva (functionBounds)
+    uint64_t pieceSize = 0;
     StringIdx name;
     bool fromDwarf = false;
     uint64_t id = 0;
