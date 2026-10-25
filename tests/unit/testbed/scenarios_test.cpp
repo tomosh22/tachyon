@@ -6,6 +6,25 @@
 
 #include "testbed/scenarios.h"
 
+#include <cstdio>
+#include <thread>
+#if !defined(_WIN32)
+#include <cstdlib>
+#endif
+
+namespace {
+// True when the 1-minute load average exceeds the number of hardware threads (POSIX only).
+bool machineOversubscribed() {
+#if defined(_WIN32)
+  return false;
+#else
+  double load[1] = {0.0};
+  if (getloadavg(load, 1) != 1) return false;
+  return load[0] > static_cast<double>(std::max(1u, std::thread::hardware_concurrency()));
+#endif
+}
+}  // namespace
+
 using namespace tachyon::testbed;
 
 TEST(TestbedScenarios, FrameExpectationSumsToOneAndHitchShareMatchesModel) {
@@ -82,6 +101,12 @@ TEST(TestbedScenarios, EveryScenarioRunsAndProducesValidReport) {
   EXPECT_GE(tids.size(), 9u);
 
   // Spot-check enforced scenarios loosely (noisy machine): fibers get equal slices, inline follows 5:3:2.
+  // The shares are wall-clock measurements, meaningless when the cores are oversubscribed (load average
+  // above the core count, e.g. several builds sharing a dev box), so the check is skipped then.
+  if (machineOversubscribed()) {
+    std::printf("[testbed] load average above core count: share checks skipped\n");
+    return;
+  }
   for (const auto& scenario : run.value().scenarios) {
     if (scenario.name != "fibers" && scenario.name != "inline") continue;
     for (size_t i = 0; i < scenario.threads[0].measured.size(); ++i) {

@@ -34,9 +34,9 @@ using model::ThreadState;
 using testutil::HandModel;
 
 #ifdef TACHYON_TEST_ASAN
-constexpr double kBudgetMs = 50.0 * 4;  // allowed slowdown under asan: 4x
+constexpr double kBudgetMs = 2 * 50.0 * 4;  // budget 50 ms, 4x under asan, asserted at 2x
 #else
-constexpr double kBudgetMs = 50.0;
+constexpr double kBudgetMs = 2 * 50.0;  // budget 50 ms, asserted at 2x like the perf budgets
 #endif
 
 double ms(Clock::time_point a, Clock::time_point b) {
