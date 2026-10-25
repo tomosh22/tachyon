@@ -57,7 +57,8 @@ class WinHttpClient final : public RetryingHttpClient {
 
  protected:
   Result<int> transfer(const std::string& url, const std::filesystem::path& partPath,
-                       const std::atomic<bool>* cancel, const HttpProgressFn& progress) override {
+                       const std::atomic<bool>* cancel, const HttpProgressFn& progress,
+                       uint64_t maxBytes) override {
     if (!m_session.h) return makeError(ErrorCode::Internal, "WinHttpOpen failed");
     const std::wstring wurl = widen(url);
 
@@ -70,6 +71,9 @@ class WinHttpClient final : public RetryingHttpClient {
     if (!WinHttpCrackUrl(wurl.c_str(), static_cast<DWORD>(wurl.size()), 0, &parts)) {
       return makeError(ErrorCode::InvalidArgument, "bad URL");
     }
+    if (parts.nScheme != INTERNET_SCHEME_HTTP && parts.nScheme != INTERNET_SCHEME_HTTPS) {
+      return makeError(ErrorCode::InvalidArgument, "only http and https URLs are supported");
+    }
     const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
     std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
     if (parts.dwExtraInfoLength) path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
@@ -81,10 +85,25 @@ class WinHttpClient final : public RetryingHttpClient {
     InternetHandle request(WinHttpOpenRequest(connection.h, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                               WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
     if (!request.h) return winError("WinHttpOpenRequest", GetLastError());
+    const auto started = std::chrono::steady_clock::now();
+    const auto budget = std::chrono::milliseconds(options().totalTimeoutMs);
+    {
+      // Explicit per-request timeouts (resolve, connect, send, receive).
+      const int connect = static_cast<int>(options().connectTimeoutMs);
+      const int total = static_cast<int>(options().totalTimeoutMs);
+      WinHttpSetTimeouts(request.h, connect, connect, total, total);
+    }
 
     if (!WinHttpSendRequest(request.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(request.h, nullptr)) {
-      return winError("WinHTTP request", GetLastError());
+      const DWORD err = GetLastError();
+      if (std::chrono::steady_clock::now() - started >= budget) {
+        return makeError(ErrorCode::Timeout, "request timed out, error " + std::to_string(err));
+      }
+      return winError("WinHTTP request", err);
+    }
+    if (std::chrono::steady_clock::now() - started > budget) {
+      return makeError(ErrorCode::Timeout, "response headers arrived after the total timeout");
     }
     DWORD status = 0;
     DWORD statusSize = sizeof(status);
@@ -100,11 +119,14 @@ class WinHttpClient final : public RetryingHttpClient {
                             WINHTTP_NO_HEADER_INDEX)) {
       total = lengthValue;
     }
+    if (maxBytes != 0 && total > maxBytes) {
+      return makeError(ErrorCode::Unsupported,
+                       "response exceeds limit of " + std::to_string(maxBytes) + " bytes");
+    }
 
     std::ofstream out(partPath, std::ios::binary | std::ios::trunc);
     if (!out) return makeError(ErrorCode::IoError, "cannot create " + partPath.string());
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(options().totalTimeoutMs);
+    const auto deadline = started + budget;
     std::vector<char> buffer(64 * 1024);
     uint64_t received = 0;
     for (;;) {
@@ -119,9 +141,17 @@ class WinHttpClient final : public RetryingHttpClient {
       out.write(buffer.data(), static_cast<std::streamsize>(got));
       if (!out) return makeError(ErrorCode::IoError, "write failed: " + partPath.string());
       received += got;
+      if (maxBytes != 0 && received > maxBytes) {
+        return makeError(ErrorCode::Unsupported,
+                         "response exceeds limit of " + std::to_string(maxBytes) + " bytes");
+      }
       if (progress && !progress(received, total)) return makeError(ErrorCode::Cancelled, "aborted");
     }
     out.close();
+    if (total != 0 && received < total) {
+      return makeError(ErrorCode::IoError, "truncated body: " + std::to_string(received) + " of " +
+                                               std::to_string(total) + " bytes");
+    }
     if (!out) return makeError(ErrorCode::IoError, "write failed: " + partPath.string());
     return static_cast<int>(status);
   }

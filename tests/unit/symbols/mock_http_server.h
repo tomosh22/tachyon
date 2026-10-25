@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -98,6 +99,11 @@ class MockHttpServer {
     std::lock_guard lock(m_mutex);
     m_delays[path] = ms;
   }
+  // Requests for `path` answer 302 with this Location header.
+  void redirect(const std::string& path, const std::string& location) {
+    std::lock_guard lock(m_mutex);
+    m_redirects[path] = location;
+  }
   // Requests for `path` announce the full length but send only half of the body.
   void truncate(const std::string& path) {
     std::lock_guard lock(m_mutex);
@@ -150,6 +156,20 @@ class MockHttpServer {
     }
   }
 
+  static std::string percentDecode(const std::string& in) {
+    std::string out;
+    for (size_t i = 0; i < in.size(); ++i) {
+      if (in[i] == '%' && i + 2 < in.size() + 0 && std::isxdigit(static_cast<unsigned char>(in[i + 1])) &&
+          std::isxdigit(static_cast<unsigned char>(in[i + 2]))) {
+        out += static_cast<char>(std::stoi(in.substr(i + 1, 2), nullptr, 16));
+        i += 2;
+      } else {
+        out += in[i];
+      }
+    }
+    return out;
+  }
+
   void respond(SocketHandle s, int status, const std::string& body, size_t announce, size_t sendBytes) {
     const char* reason = status == 200 ? "OK" : (status == 404 ? "Not Found" : "Error");
     std::ostringstream head;
@@ -175,6 +195,7 @@ class MockHttpServer {
 
     int delayMs = 0;
     int failStatus = 0;
+    std::string location;
     bool truncated = false;
     {
       std::lock_guard lock(m_mutex);
@@ -186,6 +207,7 @@ class MockHttpServer {
         --it->second.first;
         failStatus = it->second.second;
       }
+      if (auto it = m_redirects.find(path); it != m_redirects.end()) location = it->second;
       for (const std::string& t : m_truncated) truncated = truncated || t == path;
     }
     const int now = ++m_concurrent;
@@ -195,11 +217,15 @@ class MockHttpServer {
     for (int waited = 0; waited < delayMs && !m_stop; waited += 10) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    if (failStatus != 0) {
+    if (!location.empty()) {
+      const std::string head = "HTTP/1.1 302 Found\r\nLocation: " + location +
+                               "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+      sendAll(s, head.data(), head.size());
+    } else if (failStatus != 0) {
       respond(s, failStatus, "server error", 12, 12);
     } else {
       std::filesystem::path file = m_root;
-      std::string rel = path;
+      std::string rel = percentDecode(path);
       if (!rel.empty() && rel.front() == '/') rel.erase(0, 1);
       file /= rel;
       std::error_code ec;
@@ -230,6 +256,7 @@ class MockHttpServer {
   std::map<std::string, std::pair<int, int>> m_failures;
   std::map<std::string, int> m_delays;
   std::vector<std::string> m_truncated;
+  std::map<std::string, std::string> m_redirects;
   std::string m_lastAuth;
   std::atomic<int> m_concurrent{0};
   std::atomic<int> m_maxConcurrent{0};

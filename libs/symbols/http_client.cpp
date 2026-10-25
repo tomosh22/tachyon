@@ -35,6 +35,23 @@ std::string redactUrl(std::string_view url) {
   return out;
 }
 
+std::string urlEncodeComponent(std::string_view component) {
+  static const char* kHex = "0123456789ABCDEF";
+  std::string out;
+  for (const char ch : component) {
+    const auto c = static_cast<unsigned char>(ch);
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.' ||
+        c == '_' || c == '~') {
+      out += ch;
+    } else {
+      out += '%';
+      out += kHex[c >> 4];
+      out += kHex[c & 15];
+    }
+  }
+  return out;
+}
+
 namespace {
 
 bool isCancelled(const std::atomic<bool>* cancel) {
@@ -61,7 +78,8 @@ void removeQuiet(const std::filesystem::path& p) {
 }  // namespace
 
 Result<HttpStatus> RetryingHttpClient::get(const std::string& url, const std::filesystem::path& destination,
-                                           const std::atomic<bool>* cancel, const HttpProgressFn& progress) {
+                                           const std::atomic<bool>* cancel, const HttpProgressFn& progress,
+                                           uint64_t maxBytes) {
   std::error_code ec;
   if (destination.has_parent_path()) {
     std::filesystem::create_directories(destination.parent_path(), ec);
@@ -91,10 +109,11 @@ Result<HttpStatus> RetryingHttpClient::get(const std::string& url, const std::fi
       return makeError(ErrorCode::Cancelled, "cancelled: " + shown);
     }
 
-    Result<int> r = transfer(url, part, cancel, progress);
+    Result<int> r = transfer(url, part, cancel, progress, maxBytes);
     if (!r.ok()) {
       removeQuiet(part);
-      if (r.error().code == ErrorCode::Cancelled) return r.error();
+      if (r.error().code == ErrorCode::Cancelled || r.error().code == ErrorCode::Unsupported)
+        return r.error();
       last = r.error();
       continue;  // Timeout / IoError: retry
     }

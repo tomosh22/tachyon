@@ -35,12 +35,15 @@ using HttpProgressFn = std::function<bool(uint64_t received, uint64_t total)>;
 class IHttpClient {
  public:
   virtual ~IHttpClient() = default;
-  // Implementations are thread-safe. Downloads `url` to `destination` through `<destination>.part` and an
+  // Implementations are thread-safe. `maxBytes` (0 = unlimited) caps the response body while streaming: a
+  // larger response is aborted, its part file deleted, and Unsupported ("exceeds limit") returned without
+  // retries. Downloads `url` to `destination` through `<destination>.part` and an
   // atomic rename; the part file is removed on every failure. 404 -> NotFound immediately; other 4xx ->
   // IoError; 5xx, timeouts and transport errors are retried with backoff and then reported as IoError /
   // Timeout. `cancel` (optional) is polled; progress (optional) may abort.
   virtual Result<HttpStatus> get(const std::string& url, const std::filesystem::path& destination,
-                                 const std::atomic<bool>* cancel, const HttpProgressFn& progress) = 0;
+                                 const std::atomic<bool>* cancel, const HttpProgressFn& progress,
+                                 uint64_t maxBytes = 0) = 0;
 };
 
 // Shared retry / backoff / `.part` handling; backends implement one transfer attempt.
@@ -48,7 +51,8 @@ class RetryingHttpClient : public IHttpClient {
  public:
   // Thread-safe.
   Result<HttpStatus> get(const std::string& url, const std::filesystem::path& destination,
-                         const std::atomic<bool>* cancel, const HttpProgressFn& progress) final;
+                         const std::atomic<bool>* cancel, const HttpProgressFn& progress,
+                         uint64_t maxBytes = 0) final;
 
   const HttpOptions& options() const { return m_options; }
 
@@ -56,12 +60,17 @@ class RetryingHttpClient : public IHttpClient {
   explicit RetryingHttpClient(HttpOptions options) : m_options(options) {}
   // One attempt: truncate-write the body to `partPath` and return the HTTP status code (any status is a
   // success of the transport). Transport failures return Timeout / IoError, aborts return Cancelled.
+  // A body larger than `maxBytes` (0 = unlimited) aborts the attempt with Unsupported.
   virtual Result<int> transfer(const std::string& url, const std::filesystem::path& partPath,
-                               const std::atomic<bool>* cancel, const HttpProgressFn& progress) = 0;
+                               const std::atomic<bool>* cancel, const HttpProgressFn& progress,
+                               uint64_t maxBytes) = 0;
 
  private:
   HttpOptions m_options;
 };
+
+// Thread-safe: pure function. Percent-encodes a URL path component (everything but A-Za-z0-9 - . _ ~).
+std::string urlEncodeComponent(std::string_view component);
 
 // Thread-safe: pure function. Removes `user:pass@` from the authority of a URL for logging.
 std::string redactUrl(std::string_view url);

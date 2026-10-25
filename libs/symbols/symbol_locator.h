@@ -33,6 +33,8 @@ struct SymbolLocatorConfig {
   uint64_t cacheMaxBytes = 0;
   // Upper bound on simultaneous HTTP transfers across all threads using this locator.
   unsigned maxConcurrentDownloads = 4;
+  // Largest response body accepted from a server (streamed check; the part file is deleted on overflow).
+  uint64_t maxDownloadBytes = 2ull * 1024 * 1024 * 1024;
   // Extra roots probed for `.build-id/xx/rest.debug` (ELF build-ids). Default: /usr/lib/debug on POSIX.
   std::vector<std::filesystem::path> debugDirs;
   bool useSystemDebugDirs = true;

@@ -266,10 +266,12 @@ TEST_F(LocatorTest, HttpMissIsNotFoundWithoutRetries) {
 }
 
 TEST_F(LocatorTest, HttpFilePtrRedirect) {
-  const fs::path target = m_root / "elsewhere" / "game.pdb";
+  const fs::path target = m_root / "elsewhere" / "redirected.pdb";
   writeFile(target, "ptr-target");
   writeFile(m_serverRoot / "game.pdb" / kPdbKey / "file.ptr", "PATH:" + target.string());
-  SymbolLocator loc(httpConfig());
+  SymbolLocatorConfig c = httpConfig();
+  c.searchPaths = {m_root / "elsewhere"};
+  SymbolLocator loc(c);
   auto r = loc.locate(pdbModule());
   ASSERT_TRUE(r.ok()) << r.error().toString();
   EXPECT_EQ(r.value(), target);
@@ -464,7 +466,7 @@ TEST_F(LocatorTest, PeImageIsFetchedByBinaryKey) {
 class FakeHttp final : public IHttpClient {
  public:
   Result<HttpStatus> get(const std::string& url, const fs::path& dest, const std::atomic<bool>*,
-                         const HttpProgressFn&) override {
+                         const HttpProgressFn&, uint64_t) override {
     urls.push_back(url);
     if (url.find("hit") == std::string::npos) return makeError(ErrorCode::NotFound, "404");
     fs::create_directories(dest.parent_path());
@@ -492,6 +494,141 @@ TEST_F(LocatorTest, MakeDefaultLocateWorksAsLocateFn) {
   LocateFn fn = makeDefaultLocate(SymbolLocatorConfig{});
   auto r = fn(pdbModule((m_root / "bin" / "game.exe").string()));
   ASSERT_TRUE(r.ok()) << r.error().toString();
+}
+
+// --- hardening --------------------------------------------------------------------------------------------
+
+TEST_F(LocatorTest, HttpTwoTierServer) {
+  writeFile(m_serverRoot / "index2.txt", "");
+  writeFile(m_serverRoot / "ga" / "game.pdb" / kPdbKey / "game.pdb", "two-tier-server");
+  SymbolLocator loc(httpConfig());
+  auto r = loc.locate(pdbModule());
+  ASSERT_TRUE(r.ok()) << r.error().toString();
+  EXPECT_EQ(readFile(r.value()), "two-tier-server");
+  EXPECT_EQ(server().requestCount("/index2.txt"), 1);
+
+  // The index2.txt answer is cached per server: another module does not ask again.
+  writeFile(m_serverRoot / "ot" / "other.pdb" / kPdbKey / "other.pdb", "second");
+  auto r2 = loc.locate(pdbModule("C:\\bin\\other.dll"));
+  ASSERT_TRUE(r2.ok()) << r2.error().toString();
+  EXPECT_EQ(server().requestCount("/index2.txt"), 1);
+}
+
+TEST_F(LocatorTest, HttpFlatServerWithoutIndex2IsAskedOnceAndStaysMissing) {
+  SymbolLocator loc(httpConfig());
+  EXPECT_FALSE(loc.locate(pdbModule()).ok());
+  EXPECT_FALSE(loc.locate(pdbModule("C:\\bin\\other.dll")).ok());
+  EXPECT_EQ(server().requestCount("/index2.txt"), 1);
+}
+
+TEST_F(LocatorTest, RemoteFilePtrPathOutsideConfiguredRootsIsIgnored) {
+  const fs::path secret = m_root / "secret" / "game.pdb";
+  writeFile(secret, "must not be served");
+  writeFile(m_serverRoot / "game.pdb" / kPdbKey / "file.ptr", "PATH:" + secret.string());
+  SymbolLocator loc(httpConfig());
+  auto r = loc.locate(pdbModule());
+  ASSERT_FALSE(r.ok());
+  EXPECT_EQ(r.error().code, ErrorCode::NotFound);
+  EXPECT_NE(r.error().message.find("file.ptr PATH from remote server ignored"), std::string::npos)
+      << r.error().message;
+}
+
+TEST_F(LocatorTest, RemoteFilePtrPathUnderASearchPathIsFollowed) {
+  const fs::path target = m_root / "trusted" / "sub" / "redirected.bin";
+  writeFile(target, "ok");
+  writeFile(m_serverRoot / "game.pdb" / kPdbKey / "file.ptr", "PATH:" + target.string());
+  SymbolLocatorConfig c = httpConfig();
+  c.searchPaths = {m_root / "trusted"};
+  SymbolLocator loc(c);
+  auto r = loc.locate(pdbModule());
+  ASSERT_TRUE(r.ok()) << r.error().toString();
+  EXPECT_EQ(r.value(), target);
+}
+
+TEST_F(LocatorTest, RemoteFilePtrDotDotEscapeIsIgnored) {
+  writeFile(m_root / "secret" / "x.pdb", "secret");
+  writeFile(m_root / "trusted" / "keep", "k");
+  const fs::path escape = m_root / "trusted" / ".." / "secret" / "x.pdb";
+  writeFile(m_serverRoot / "game.pdb" / kPdbKey / "file.ptr", "PATH:" + escape.string());
+  SymbolLocatorConfig c = httpConfig();
+  c.searchPaths = {m_root / "trusted"};
+  SymbolLocator loc(c);
+  EXPECT_FALSE(loc.locate(pdbModule()).ok());
+}
+
+TEST_F(LocatorTest, OversizedFilePtrIsNotRead) {
+  const fs::path target = m_root / "trusted" / "t.bin";
+  writeFile(target, "ok");
+  writeFile(m_serverRoot / "game.pdb" / kPdbKey / "file.ptr",
+            "PATH:" + target.string() + std::string(20000, ' '));
+  SymbolLocatorConfig c = httpConfig();
+  c.searchPaths = {m_root / "trusted"};
+  c.httpOptions.maxRetries = 0;
+  SymbolLocator loc(c);
+  EXPECT_FALSE(loc.locate(pdbModule()).ok());
+}
+
+TEST_F(LocatorTest, LocalCacheFilePtrIsStillFollowedAnywhere) {
+  const fs::path target = m_root / "anywhere" / "game.pdb";
+  writeFile(target, "x");
+  writeFile(m_cache / "game.pdb" / kPdbKey / "file.ptr", "PATH:" + target.string());
+  SymbolLocator loc({}, m_cache);
+  auto r = loc.locate(pdbModule());
+  ASSERT_TRUE(r.ok()) << r.error().toString();
+  EXPECT_EQ(r.value(), target);
+}
+
+TEST_F(LocatorTest, DownloadSizeCapAbortsAndLeavesNothingBehind) {
+  const std::string path = std::string("/game.pdb/") + kPdbKey + "/game.pdb";
+  writeFile(m_serverRoot / path.substr(1), std::string(5000, 'x'));
+  SymbolLocatorConfig c = httpConfig();
+  c.maxDownloadBytes = 1000;
+  SymbolLocator loc(c);
+  auto r = loc.locate(pdbModule());
+  ASSERT_FALSE(r.ok());
+  EXPECT_NE(r.error().message.find("exceeds limit"), std::string::npos) << r.error().message;
+  EXPECT_EQ(server().requestCount(path), 1) << "an oversized response is not retried";
+  EXPECT_EQ(countFiles(m_cache), 0u);
+}
+
+TEST_F(LocatorTest, DownloadSizeCapAppliesWithoutContentLengthToo) {
+  // Direct client call: a body above maxBytes is rejected and removed.
+  writeFile(m_serverRoot / "big.bin", std::string(8000, 'x'));
+  auto client = makeDefaultHttpClient(httpConfig().httpOptions);
+  auto r = client->get(server().url() + "/big.bin", m_root / "d" / "big.bin", nullptr, nullptr, 100);
+  ASSERT_FALSE(r.ok());
+  EXPECT_EQ(r.error().code, ErrorCode::Unsupported);
+  EXPECT_FALSE(fs::exists(m_root / "d" / "big.bin"));
+  EXPECT_FALSE(fs::exists(m_root / "d" / "big.bin.part"));
+}
+
+TEST_F(LocatorTest, RedirectToNonHttpProtocolIsRefused) {
+  const fs::path secret = m_root / "secret.pdb";
+  writeFile(secret, "secret");
+  const std::string path = std::string("/game.pdb/") + kPdbKey + "/game.pdb";
+  server().redirect(path, "file://" + (secret.generic_string().front() == '/' ? "" : std::string("/")) +
+                              secret.generic_string());
+  SymbolLocatorConfig c = httpConfig();
+  c.httpOptions.maxRetries = 0;
+  SymbolLocator loc(c);
+  auto r = loc.locate(pdbModule());
+  ASSERT_FALSE(r.ok());
+  EXPECT_EQ(countFiles(m_cache), 0u);
+}
+
+TEST_F(LocatorTest, UrlPathComponentsArePercentEncoded) {
+  EXPECT_EQ(urlEncodeComponent("my lib#1.pdb"), "my%20lib%231.pdb");
+  EXPECT_EQ(urlEncodeComponent("a-b_c.d~e"), "a-b_c.d~e");
+  EXPECT_EQ(urlEncodeComponent("100%/x?y"), "100%25%2Fx%3Fy");
+
+  model::Module m = pdbModule("C:\\bin\\my lib#1.dll");
+  const std::string rel = std::string("my lib#1.pdb/") + kPdbKey + "/my lib#1.pdb";
+  writeFile(m_serverRoot / rel, "encoded");
+  SymbolLocator loc(httpConfig());
+  auto r = loc.locate(m);
+  ASSERT_TRUE(r.ok()) << r.error().toString();
+  EXPECT_EQ(readFile(r.value()), "encoded");
+  EXPECT_EQ(server().requestCount(std::string("/my%20lib%231.pdb/") + kPdbKey + "/my%20lib%231.pdb"), 1);
 }
 
 // --- eviction ---------------------------------------------------------------------------------------------

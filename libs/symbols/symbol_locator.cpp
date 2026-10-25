@@ -8,6 +8,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -47,6 +48,8 @@ fs::path normalizedAbsolute(const fs::path& p) {
   return (ec ? p : abs).lexically_normal();
 }
 
+constexpr size_t kMaxPtrBytes = 4096;
+
 // "PATH:<path>" / "MSG:<text>" content of a file.ptr.
 struct PtrContent {
   std::optional<fs::path> path;
@@ -55,10 +58,11 @@ struct PtrContent {
 
 PtrContent parsePtr(const fs::path& file) {
   PtrContent out;
+  // file.ptr bodies are tiny; never read more than kMaxPtrBytes.
   std::ifstream in(file, std::ios::binary);
-  std::stringstream ss;
-  ss << in.rdbuf();
-  std::string text = ss.str();
+  std::string text(kMaxPtrBytes, '\0');
+  in.read(text.data(), static_cast<std::streamsize>(text.size()));
+  text.resize(static_cast<size_t>(in.gcount()));
   while (!text.empty() &&
          (text.back() == '\r' || text.back() == '\n' || text.back() == ' ' || text.back() == '\0')) {
     text.pop_back();
@@ -140,6 +144,9 @@ struct SymbolLocator::Impl {
 
   std::mutex pinMutex;
   std::map<std::string, int> pins;
+
+  std::mutex tierMutex;
+  std::map<std::string, bool> serverTier;
 
   std::mutex evictMutex;
   std::atomic<uint64_t> scratchCounter{0};
@@ -365,15 +372,15 @@ struct SymbolLocator::Impl {
     bool m_held = false;
   };
 
-  // One bounded HTTP GET.
+  // One bounded HTTP GET (concurrency gate, response size cap; maxBytes 0 = config.maxDownloadBytes).
   Result<HttpStatus> boundedGet(const std::string& url, const fs::path& dest, const std::atomic<bool>* cancel,
-                                const HttpProgressFn& progress) {
+                                const HttpProgressFn& progress, uint64_t maxBytes = 0) {
     if (!gate.acquire(cancel)) return makeError(ErrorCode::Cancelled, "cancelled");
     struct Release {
       Gate& g;
       ~Release() { g.release(); }
     } release{gate};
-    return http().get(url, dest, cancel, progress);
+    return http().get(url, dest, cancel, progress, maxBytes != 0 ? maxBytes : config.maxDownloadBytes);
   }
 
   fs::path scratchFile(const fs::path& dir, const char* tag) {
@@ -403,17 +410,64 @@ struct SymbolLocator::Impl {
     }
   }
 
-  // Tries one HTTP server for `key`. On a miss appends the reason; returns the file on a hit.
-  Result<std::optional<fs::path>> tryHttpServer(const std::string& server, const SymbolKey& key,
-                                                std::vector<std::string>& reasons,
-                                                const std::atomic<bool>* cancel) {
+  // True when `target` lies under an explicit search path or a local-directory server.
+  bool isUnderTrustedRoot(const fs::path& target) const {
+    std::vector<fs::path> roots = config.searchPaths;
+    for (const std::string& server : config.servers) {
+      if (!isHttpUrl(server)) roots.emplace_back(server);
+    }
+    const fs::path t = normalizedAbsolute(target);
+    for (const fs::path& root : roots) {
+      const fs::path r = normalizedAbsolute(root);
+      auto it = std::mismatch(r.begin(), r.end(), t.begin(), t.end());
+      // Every component of the root matched (a trailing empty component from "dir/" is allowed).
+      if (it.first == r.end() || (std::next(it.first) == r.end() && it.first->empty())) {
+        if (it.second != t.end()) return true;
+      }
+    }
+    return false;
+  }
+
+  // Whether `server` publishes a two-tier store (<server>/index2.txt exists). Definitive answers are cached.
+  bool serverIsTwoTier(const std::string& server, const std::atomic<bool>* cancel) {
+    {
+      std::lock_guard lock(tierMutex);
+      auto it = serverTier.find(server);
+      if (it != serverTier.end()) return it->second;
+    }
+    const fs::path root = cacheRoot();
+    const fs::path scratch = scratchFile(root, "index2");
+    Result<HttpStatus> r = boundedGet(joinUrl(server, "index2.txt"), scratch, cancel, nullptr, 1u << 20);
+    std::error_code ec;
+    fs::remove(scratch, ec);
+    pruneEmpty(root);
+    if (!r.ok() && r.error().code != ErrorCode::NotFound) return false;  // transient: ask again next time
+    std::lock_guard lock(tierMutex);
+    serverTier[server] = r.ok();
+    return r.ok();
+  }
+
+  static std::string urlName(const SymbolKey& key, bool twoTier) {
+    const std::string name = urlEncodeComponent(key.name);
+    return (twoTier ? urlEncodeComponent(key.name.substr(0, 2)) + "/" : std::string()) + name + "/" + key.key;
+  }
+
+  // Probes one layout of one HTTP server: the file, then file.ptr, then the compressed variant.
+  Result<std::optional<fs::path>> probeServerLayout(const std::string& server, const SymbolKey& key,
+                                                    bool twoTier, std::vector<std::string>& reasons,
+                                                    const std::atomic<bool>* cancel, bool& missOnly) {
     const std::string shown = redactUrl(server);
     const fs::path dest = cacheFile(key);
-    const std::string url = joinUrl(server, key.relativePath());
-    Result<fs::path> got = download(url, dest, cancel);
+    missOnly = true;
+    const std::string dirUrl = joinUrl(server, urlName(key, twoTier));
+    const std::string fileUrl = key.scheme == SymbolKey::Scheme::DebugInfod
+                                    ? joinUrl(server, key.relativePath())
+                                    : dirUrl + "/" + urlEncodeComponent(key.name);
+    Result<fs::path> got = download(fileUrl, dest, cancel);
     if (got.ok()) return std::optional<fs::path>(got.value());
     if (got.error().code == ErrorCode::Cancelled) return got.error();
     if (got.error().code != ErrorCode::NotFound) {
+      missOnly = false;
       reasons.push_back(shown + ": " + got.error().toString());
       return std::optional<fs::path>();
     }
@@ -424,15 +478,26 @@ struct SymbolLocator::Impl {
     }
 
     // file.ptr redirection.
-    const std::string dirUrl = joinUrl(server, key.name + "/" + key.key);
     const fs::path scratch = scratchFile(dest.parent_path(), "file.ptr");
-    Result<HttpStatus> ptr = boundedGet(dirUrl + "/file.ptr", scratch, cancel, nullptr);
+    Result<HttpStatus> ptr = boundedGet(dirUrl + "/file.ptr", scratch, cancel, nullptr, kMaxPtrBytes);
     if (ptr.ok()) {
       PtrContent content = parsePtr(scratch);
       std::error_code ec;
       fs::remove(scratch, ec);
       pruneEmpty(dest.parent_path());
-      if (content.path && fileExists(*content.path)) return std::optional<fs::path>(*content.path);
+      if (content.path) {
+        // The target comes from a remote server: only follow it into locations the user configured.
+        bool allowed = isUnderTrustedRoot(*content.path);
+#ifdef _WIN32
+        const std::string raw = content.path->string();
+        if (raw.rfind("\\\\", 0) == 0 || raw.rfind("//", 0) == 0) allowed = false;  // never UNC
+#endif
+        if (!allowed) {
+          reasons.push_back(shown + ": file.ptr PATH from remote server ignored");
+          return std::optional<fs::path>();
+        }
+        if (fileExists(*content.path)) return std::optional<fs::path>(*content.path);
+      }
       reasons.push_back(
           shown + ": file.ptr " +
           (content.path ? "points to missing " + content.path->string() : "message: " + content.message));
@@ -444,10 +509,12 @@ struct SymbolLocator::Impl {
     std::string compressed = key.name;
     compressed.back() = '_';
     const fs::path probe = scratchFile(dest.parent_path(), "probe");
-    Result<HttpStatus> cab = boundedGet(dirUrl + "/" + compressed, probe, cancel, nullptr);
+    Result<HttpStatus> cab =
+        boundedGet(dirUrl + "/" + urlEncodeComponent(compressed), probe, cancel, nullptr);
     std::error_code ec;
     fs::remove(probe, ec);
     if (cab.ok()) {
+      missOnly = false;
       reasons.push_back(shown + ": compressed CAB not supported (" + compressed + ")");
     } else if (cab.error().code == ErrorCode::Cancelled) {
       return cab.error();
@@ -456,6 +523,18 @@ struct SymbolLocator::Impl {
     }
     pruneEmpty(dest.parent_path());
     return std::optional<fs::path>();
+  }
+
+  // Tries one HTTP server for `key`: flat layout first, then the two-tier layout if the server has
+  // index2.txt. On a miss appends the reasons; returns the file on a hit.
+  Result<std::optional<fs::path>> tryHttpServer(const std::string& server, const SymbolKey& key,
+                                                std::vector<std::string>& reasons,
+                                                const std::atomic<bool>* cancel) {
+    bool missOnly = true;
+    Result<std::optional<fs::path>> r = probeServerLayout(server, key, false, reasons, cancel, missOnly);
+    if (!r.ok() || r.value() || key.scheme != SymbolKey::Scheme::SymStore || !missOnly) return r;
+    if (!serverIsTwoTier(server, cancel)) return r;
+    return probeServerLayout(server, key, true, reasons, cancel, missOnly);
   }
 
   Result<fs::path> locate(const Module& module, const std::atomic<bool>* cancel) {
