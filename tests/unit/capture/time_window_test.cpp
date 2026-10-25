@@ -1,6 +1,7 @@
 // "Keep the last N seconds" conversion used by flush, driven from the WP-01 hex fixture.
 #include "capture/windows_etw/time_window.h"
 
+#include "core/platform.h"
 #include "etlconvert/hex_events.h"
 #include "trace/trace_reader.h"
 

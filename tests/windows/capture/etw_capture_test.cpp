@@ -549,10 +549,10 @@ class ForeignSession {
   bool m_stopped = false;
 };
 
-etw::SessionConfig sessionConfigNamed(const std::string& name, const fs::path& etl) {
+etw::SessionConfig sessionConfigNamed(const std::string& name, const fs::path& etl, uint32_t counter) {
   CaptureOptions o = systemOptions(etl);
-  auto cfg = etw::makeSessionConfig(o, name, etw::makeSessionGuid(etw::EtwSession::currentPid(), 777, 3), etl,
-                                    etw::EtwSession::logicalCoreCount());
+  auto cfg = etw::makeSessionConfig(o, name, etw::makeSessionGuid(etw::EtwSession::currentPid(), counter, 3),
+                                    etl, etw::EtwSession::logicalCoreCount());
   EXPECT_TRUE(cfg.ok());
   return cfg.ok() ? *cfg : etw::SessionConfig{};
 }
@@ -566,11 +566,11 @@ TEST_F(EtwCaptureTest, OrphanCleanupStopsOnlyTachyonSessionsOfDeadProcesses) {
   // 1. A "crashed agent": a Tachyon session whose pid is dead. The object is leaked on purpose (released
   //    without stop) the way a crash would leave it.
   const std::string orphanName = etw::makeSessionName(dead, 0);
-  auto orphan = etw::EtwSession::start(sessionConfigNamed(orphanName, dir() / "orphan.etl"));
+  auto orphan = etw::EtwSession::start(sessionConfigNamed(orphanName, dir() / "orphan.etl", 701));
   ASSERT_TRUE(orphan.ok()) << orphan.error().toString();
   // 2. A live sibling: a Tachyon session of this (running) process.
   const std::string liveName = etw::makeSessionName(etw::EtwSession::currentPid(), 4242);
-  auto live = etw::EtwSession::start(sessionConfigNamed(liveName, dir() / "live.etl"));
+  auto live = etw::EtwSession::start(sessionConfigNamed(liveName, dir() / "live.etl", 702));
   ASSERT_TRUE(live.ok()) << live.error().toString();
   // 3. Somebody else's session with a dead pid in its name.
   const std::wstring foreignName = L"Contoso " + std::to_wstring(dead);
@@ -614,7 +614,7 @@ TEST_F(EtwCaptureTest, BackendRestartsAfterACrashedAgentLeftASessionBehind) {
   ASSERT_NE(dead, 0u);
   // Simulated crashed agent: a live kernel session named like ours, owned by a dead pid.
   const std::string orphanName = etw::makeSessionName(dead, 0);
-  auto orphan = etw::EtwSession::start(sessionConfigNamed(orphanName, dir() / "crashed.etl"));
+  auto orphan = etw::EtwSession::start(sessionConfigNamed(orphanName, dir() / "crashed.etl", 703));
   ASSERT_TRUE(orphan.ok()) << orphan.error().toString();
 
   WindowsEtwBackend backend;  // cleanupOrphans defaults to true
@@ -694,6 +694,14 @@ TEST_F(EtwCaptureTest, AgentDrivesTheEtwBackendOverTheControlPipe) {
   EXPECT_GT(facts->samples, 1000u);
   server.stop();
   core.shutdown();
+}
+
+// TEMPORARY: prints the summary through a failing assertion so CI logs show the numbers.
+TEST(ZzSummary, DumpNumbers) {
+  std::ifstream f(fs::path(TACHYON_BINARY_DIR) / "etw_capture_summary.txt");
+  std::stringstream ss;
+  ss << f.rdbuf();
+  FAIL() << "\nSUMMARY-BEGIN\n" << ss.str() << "SUMMARY-END";
 }
 
 }  // namespace
