@@ -64,3 +64,16 @@ class TraceWriter { public: static Result<TraceWriter> open(path, FileHeader); S
 class TraceReader { public: static Result<TraceReader> open(path); const FileHeader& header(); std::span<const FooterRec> chunks(); Result<void> readChunk(const FooterRec&, std::vector<std::byte>& out); /* typed helpers per chunk type */ };
 class CallstackInterner { /* flat std::vector<CallstackNodeRec> nodes; open-addressing hash of (parent,frame)->idx storing only indices; see Part 3.2 */ };
 ```
+
+## Orchestrator clarifications (binding; merged with WP-03, 2026-10-25)
+Header: `libs/trace/trace_format.h` (namespace `tachyon::trace`), now orchestrator-owned.
+- `FileHeader.footer_offset` and `FooterRec.offset` are absolute file offsets of the respective `ChunkHeader`. The footer is a chunk of type `Footer` (0xFFFF), uncompressed, whose payload is `FooterRec[]` for every preceding chunk (not itself); `FooterRec.version` is that chunk's schema version.
+- Callstack node 0 is the root `{parent = kInvalidIdx, frame = kInvalidIdx}` and is written as record 0 of the first CallstackNodes chunk. `internCallstack(leafToRoot)` returns the leaf node index; an empty span returns 0. String 0 is "" and is record 0 of the first Strings chunk. Both are always present.
+- Partial scheme: the writer writes the header with flags bit2 set and `footer_offset = 0` at open and rewrites it at `finish()` with bit2 cleared. The reader scans from offset 64 when `footer_offset == 0` or the footer is invalid, stops at the first truncated or invalid chunk, and reports bit2 in `header().flags`.
+- Samples SoA = 20 bytes/sample on disk (u64 ts, u32 tid, u32 callstack, u16 cpu, u16 flags). In memory (3.2) the tid column is dropped: 16 bytes/sample.
+- `ThreadNames` chunk record: `ThreadNameRec { uint64_t ts; uint32_t tid; StringIdx name; }` (16 bytes).
+- `CaptureInfo` payload is raw UTF-8 JSON, record_count 1.
+- Packed sizes: FileHeader 64, ChunkHeader 32, ProcessRec 32, ThreadRec 32, ModuleRec 78, FrameRec 12, CallstackNodeRec 8, ContextSwitchRec 32, ReadyRec 28, ScopeEventRec 36, FiberEventRec 32, FrameMarkRec 24, MarkerRec 24, PlotSampleRec 20, ClockCalibrationRec 20, ThreadNameRec 16, FooterRec 24.
+- Readers must reject (not throw on) `record_count > 1,048,576`, `record_count` inconsistent with payload size, payloads over 1 GiB, and zstd frames whose content size differs from `uncompressed_size`.
+- Writers must split every chunk type, including Strings/Frames/CallstackNodes, at 1,048,576 records.
+- `CallstackInterner` memory budget (WP-03): ≤ 16 bytes/node measured after `compact()`; growth policy is doubling at load ≤ 0.7, so the as-grown peak is ~22–23 bytes/node.

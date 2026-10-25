@@ -9,7 +9,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-00 | Repository skeleton and CI | — | merged (CI green: linux-release, linux-asan, windows-release) | main | 2026-10-24 |
 | WP-01 | ETW spike tool `etlstat` | A | in review | wp/01-etlstat | 2026-10-25 |
 | WP-02 | Profiler testbed | — | merged (CI green incl. windows-release; Windows timing splits to confirm, see queue) | wp/02-testbed | 2026-10-25 |
-| WP-03 | Trace format library | — | in progress (rework: MSVC build, interning speed) | wp/03-trace | 2026-10-25 |
+| WP-03 | Trace format library | — | merged (CI green incl. windows; interning-time target split to WP-03b) | wp/03-trace | 2026-10-25 |
+| WP-03b | Callstack interning throughput (10 s target) | — | not started (split from WP-03) | wp/03b-intern-speed | |
 | WP-04 | Synthetic trace generator `tracegen` | C | not started | wp/04-tracegen | |
 | WP-10 | Agent skeleton and control protocol | A | not started | wp/10-agent | |
 | WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
@@ -57,6 +58,15 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | Gate | Result | Date | Notes |
 |---|---|---|---|
 | M0 | not run | | |
+
+## WP-03 measured numbers (GitHub ubuntu-24.04 runner)
+
+| Metric | Budget | Measured | Note |
+|---|---|---|---|
+| Intern 20 M stacks, depth 30, 4% unique (skewed picks) | < 10 s (CI gate < 20 s) | 11.4 s test wall incl. ~1 s setup | target missed → WP-03b |
+| Same, uniform picks | < 10 s (CI gate < 20 s) | 13.4 s test wall | target missed → WP-03b |
+| Bytes/node after `compact()` | ≤ 16 | 13.7 | met |
+| Bytes/node as grown / worst after resize | (info) | 22.4 / 22.9 | |
 
 ## Windows / privileged verification queue
 

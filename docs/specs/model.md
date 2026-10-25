@@ -21,4 +21,4 @@ struct TraceModel {
   uint64_t sampleIntervalTicks;                               // from CaptureInfo sampling_hz
 };
 ```
-Memory budget: resident size ≤ 3× the compressed `.tachyon` size for a 10-minute 8 kHz capture. Callstack node = 8 bytes. Sample = 18 bytes.
+Memory budget: resident size ≤ 3× the compressed `.tachyon` size for a 10-minute 8 kHz capture. Callstack node = 8 bytes. Sample = 16 bytes in memory (per-thread `SampleColumns`; tid implicit) and 20 bytes on disk (3.1 SoA columns). [Corrected 2026-10-25 by orchestrator; was "18 bytes", which matched neither layout.]
