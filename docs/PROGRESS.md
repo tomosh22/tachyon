@@ -18,7 +18,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-13 | Launch, attach, process tree, CLI | A | in progress | wp/13-launch-cli | 2026-10-25 |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | merged (oracle 0/929 mismatches; cold resolve 11.5 ms, memo 2.2 ns on CI) | wp/20-symbol-core | 2026-10-25 |
-| WP-21 | Symbol locator and HTTP client | B | not started | wp/21-symbol-locator | |
+| WP-21 | Symbol locator and HTTP client | B | in progress | wp/21-symbol-locator | 2026-10-25 |
 | WP-22 | DIA symbol provider | B | not started | wp/22-dia | |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
