@@ -85,7 +85,12 @@ bool App::init(std::string& error) {
 
   m_panels.add(makeTraceInfoPanel());
   m_panels.add(makeThreadsTimelinePanel());
+  m_panels.add(makeThreadInteractionPanel());
   m_selectionSub = m_selection.subscribe([this](const SelectionState& state, SelectionField field) {
+    // WP-46: a panel asked for another panel to be shown (the panel itself takes the focus).
+    if (field == SelectionField::PanelRequest) {
+      if (PanelEntry* p = m_panels.find(state.panelRequest.name)) p->open = true;
+    }
     const PanelContext context = panelContext();
     for (PanelEntry& e : m_panels.entries()) e.panel->onSelectionChanged(context, state, field);
   });

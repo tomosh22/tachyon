@@ -37,13 +37,13 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-43 | Call graph panel | D | not started | wp/43-call-graph | |
 | WP-44 | Function list and butterfly | D | not started | wp/44-function-list | |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
-| WP-46 | Thread interaction | D | in progress | wp/46-thread-interaction | 2026-10-25 |
+| WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
 | WP-51 | Client runtime | E | merged (CI green incl. windows; connected overhead 46.9 ns Linux / 68 ns Windows vs 40 ns target, under 80 ns gate; disabled 4.7 / 16 ns) | wp/51-sdk-runtime | 2026-10-25 |
 | WP-51b | SDK runtime fixes (flaky AgentLossFallsBack test, sidecar truncation, perf flake) | E | merged (root cause: fake-agent race; 20× ctest repeats green under load) | wp/51b-sdk-fixes | 2026-10-25 |
-| WP-52 | Agent-side ingestion and merge | A | in progress | wp/52-ingestion | 2026-10-25 |
+| WP-52 | Agent-side ingestion and merge | A | merged (Windows CI ran a real ETW + --instrument capture) | wp/52-ingestion | 2026-10-25 |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
 | WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
@@ -130,9 +130,24 @@ Merged after the verifier FAIL was fixed in 71a9d73 (lost wakeup in waitIdle, ra
 
 API additions in query.h: `FunctionRegistry` (`ctx.functionIdx(key)`), `QueryCacheConfig`, the `*Shared` queries, `QueryExecutor` with `GenerationToken`, and `setExecutor`. Subtree root 0 now means no subtree. `Filter::function` tests the stack after the subtree cut. A FunctionIdx from another context is not detected (documented).
 
+## WP-46 notes
+
+Verifier PASS. Wait episodes were checked against brute force on 4 fixtures; the Waiting and Ready pieces form one episode, nothing is double-counted, and the scan is ASan-clean on document close. Longest-waits scan on medium: 0.46–0.50 ms (N=50), 2.6 ms (N=5000), budget 50 ms. The timeline frame medians over 5 ms come from machine load; main's binary shows the same spread. Low follow-ups: a ReadyRec at the switch-out ts is labelled "Preempted"; arrow clipping is done in float, so it misplaces markers beyond about 1e8 px (clip in double).
+
+## WP-52 notes
+
+The first verifier pass FAILed on agent robustness: a crash when thread creation failed, no caps on pids, connections or disk, and ThreadName clipping. All were fixed (6b2d2d6), and a state race (capture_done seen while the state was still `done`) was fixed in d75f549. Caps per capture: 256 pids, 16 connections per pid, 1 GiB spool per pid, 4 GiB in total. inst_hello is restricted to capture pids, and the peer pid is verified with SO_PEERCRED or GetNamedPipeClientProcessId. Merging is a full rewrite through a temp file and atomic rename, about 0.8 s per 18 MB. The raw-chunk copy for multi-GB merges is a follow-up and needs a TraceWriter raw-append API. With follow_children, descendant pids are accepted without enumeration.
+
+| Stage | Measured |
+|---|---|
+| spool | about 1 GB/s |
+| decode | 4.5–6.3 M records/s |
+| merge | 8.8–11.9 M events/s |
+| merging a 310 MB sidecar | 4.7 s, peak RSS 768 MB (about 2.5× the sidecar) |
+
 ## Queued follow-ups
 
-- WP-02b: make TestbedScenarios.EveryScenarioRunsAndProducesValidReport load-tolerant (fails under ctest -j).
+- WP-02b: done by the orchestrator. testbed_tests are RUN_SERIAL (the CPU-share checks failed when ctest -j oversubscribed the cores; the verifier reproduced this on pre-existing binaries). LocatorTest.ConcurrentDownloadsAreBounded now asserts only the bound (≤ 2), not that the limit is reached. CancellationTest.TwentyMillion measured 42.6 ms against 50 ms under load average 10; watch it.
 - WP-21b: make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.
 - WP-36b: 64-row LOD frame under 4 ms.
 - `SymbolService::resolveAllAsync` should take `const TraceModel&` (the viewer const_casts today).

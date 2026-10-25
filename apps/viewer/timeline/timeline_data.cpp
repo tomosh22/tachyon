@@ -2,6 +2,7 @@
 
 #include "analysis/thread_states.h"
 #include "analysis/wait_reasons.h"
+#include "viewer/interaction/interaction_model.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -209,6 +210,13 @@ std::vector<std::string> tooltipLines(const TooltipInput& in) {
                         static_cast<double>(in.share) * 100.0));
   } else {
     lines.push_back("No samples");
+  }
+  if (in.showInteraction) {
+    if (const auto episode = interaction::episodeAt(model, in.thread, in.ts)) {
+      lines.push_back("-- Thread interaction --");
+      for (std::string& l : interaction::interactionTooltipLines(model, in.symbols, *episode, in.clockHz, 8))
+        lines.push_back(std::move(l));
+    }
   }
   return lines;
 }

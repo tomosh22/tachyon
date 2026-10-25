@@ -9,6 +9,8 @@
 // pointer) changes.
 #pragma once
 
+#include "viewer/interaction/arrow_geometry.h"
+#include "viewer/interaction/interaction_model.h"
 #include "viewer/panel.h"
 #include "viewer/timeline/timeline_colors.h"
 #include "viewer/timeline/timeline_data.h"
@@ -49,6 +51,14 @@ struct TimelineFrameStats {
   uint32_t rects = 0;
   uint32_t flameSpans = 0;
   uint32_t frameMarksDrawn = 0;
+};
+
+// One wake-up arrow drawn in the last frame (WP-46; tests).
+struct WakeArrowInfo {
+  interaction::WaitEpisode episode;
+  interaction::ArrowGeometry geometry;
+  bool selected = false;   // the persistent arrow of SelectionState::selectedWait (else the hover arrow)
+  std::string wakerLabel;  // text next to the edge marker
 };
 
 // Where the widget put things on screen in the last frame (tests aim the mouse with it).
@@ -108,6 +118,10 @@ class TimelineWidget {
   // Frame numbers whose label was drawn in the last frame.
   const std::vector<uint64_t>& lastFrameLabels() const { return m_frameLabels; }
   const TimelineScreenGeometry& screenGeometry() const { return m_geometry; }
+  // Wake-up arrows drawn in the last frame: the hovered wait's and the selected wait's (WP-46).
+  const std::vector<WakeArrowInfo>& lastArrows() const { return m_arrows; }
+  // Screen y of the centre of the state band of `thread`'s row in the last frame (nullopt: no such row).
+  std::optional<float> bandCenterY(ThreadIdx thread) const;
   // Block until the background build is done, pumping nothing (only valid with buildInline or after the job
   // completed); test helper.
   const std::string& lodError() const;
@@ -139,6 +153,10 @@ class TimelineWidget {
   void drawTooltip(const PanelContext& context, const Hit& hit);
   void publishHover(const PanelContext& context, const Hit& hit);
   void applyClick(const PanelContext& context, const Hit& hit);
+  void applyNavigation();
+  void drawWakeArrows(ImDrawList* dl, const PanelContext& context, const Hit& hit);
+  void drawWakeArrow(ImDrawList* dl, const PanelContext& context, const interaction::WaitEpisode& episode,
+                     bool selected);
   void drawRangeOverlays(ImDrawList* dl, const PanelContext& context, float y0, float y1);
   uint32_t flameDepthFor(ThreadIdx thread) const;
 
@@ -170,6 +188,10 @@ class TimelineWidget {
   bool m_anyHovered = false;
   ThreadIdx m_contextThread;
   float m_pendingScrollY = -1.0f;
+  std::vector<WakeArrowInfo> m_arrows;
+  std::optional<NavigationRequest> m_pendingNav;  // WP-46: applied at the start of the next draw
+  uint64_t m_lastNavSerial = 0;
+  ThreadIdx m_scrollToThread;  // row to bring into view once the layout is known
 };
 
 }  // namespace tachyon::viewer::timeline

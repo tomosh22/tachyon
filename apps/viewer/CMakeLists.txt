@@ -13,6 +13,10 @@ add_library(tachyon_viewer_core STATIC
   command_registry.cpp
   document.cpp
   file_browser.cpp
+  interaction/arrow_geometry.cpp
+  interaction/interaction_model.cpp
+  interaction/interaction_panel.cpp
+  interaction/longest_waits_runner.cpp
   job_queue.cpp
   null_renderer.cpp
   panel_registry.cpp

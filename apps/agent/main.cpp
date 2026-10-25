@@ -75,9 +75,14 @@ void printUsage() {
       "                     [--log-level trace|debug|info|warn|error]\n"
       "                     [--mock-fixture FILE] [--mock-duration-ms N] [--mock-steps N] "
       "[--etw-delete-raw]\n"
+      "                     [--inst-spool-mb N] [--inst-spool-dir DIR] [--keep-inst-spool]\n"
       "The address defaults to $TACHYON_AGENT_PIPE or the platform default. The mock backend copies\n"
       "$TACHYON_MOCK_FIXTURE (or --mock-fixture) to the requested output path. The etw backend keeps the\n"
-      "raw <out>.etl next to the trace unless --etw-delete-raw is given.\n");
+      "raw <out>.etl next to the trace unless --etw-delete-raw is given. Instrumentation from SDK clients "
+      "is\n"
+      "spooled per process (default cap 1024 MiB, --inst-spool-mb) in <out>.inst/ (or under "
+      "--inst-spool-dir)\n"
+      "and merged into the trace when the capture ends; --keep-inst-spool keeps the spool files.\n");
 }
 
 struct Options {
@@ -88,6 +93,9 @@ struct Options {
   long mockDurationMs = 0;
   long mockSteps = 4;
   bool etwDeleteRaw = false;
+  long instSpoolMb = 1024;
+  std::string instSpoolDir;
+  bool keepInstSpool = false;
   bool help = false;
 };
 
@@ -111,6 +119,14 @@ bool parseArgs(int argc, char** argv, Options& o) {
       if (!value(o.logLevel)) return false;
     } else if (a == "--etw-delete-raw") {
       o.etwDeleteRaw = true;
+    } else if (a == "--inst-spool-mb") {
+      if (!value(tmp)) return false;
+      o.instSpoolMb = std::strtol(tmp.c_str(), nullptr, 10);
+      if (o.instSpoolMb <= 0) return false;
+    } else if (a == "--inst-spool-dir") {
+      if (!value(o.instSpoolDir)) return false;
+    } else if (a == "--keep-inst-spool") {
+      o.keepInstSpool = true;
     } else if (a == "--mock-fixture") {
       if (!value(o.mockFixture)) return false;
     } else if (a == "--mock-duration-ms") {
@@ -213,6 +229,9 @@ int main(int argc, char** argv) {
   cfg.backendName = opt.backend;
   cfg.agentAddress = address;
   cfg.elevated = elevated;
+  cfg.maxInstSpoolBytes = static_cast<uint64_t>(opt.instSpoolMb) << 20;
+  cfg.instSpoolRoot = opt.instSpoolDir;
+  cfg.keepInstSpool = opt.keepInstSpool;
   agent::Agent agentCore(std::move(backend), cfg);
   control::Server server(std::move(*listener), agentCore);
   agentCore.setEventSink([&server](const control::Event& e) { server.broadcast(e); });

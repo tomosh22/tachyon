@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "testbed/calibration.h"
+#include "testbed/hooks.h"
 #include "testbed/report.h"
 #include "testbed/scenarios.h"
 
@@ -17,10 +18,13 @@ void printUsage() {
   std::fputs(
       "usage: tachyon-testbed [--scenario <name[,name...]|all>] [--duration <seconds>] [--hitch-interval-ms "
       "<ms>]\n"
-      "                       [--pretty] [--list] [--help]\n"
+      "                       [--instrument] [--pretty] [--list] [--help]\n"
       "  Scenarios run one after another; with several, --duration is split across them (frames gets 4x "
       "weight).\n"
-      "  The expected/measured split is printed as JSON on stdout; diagnostics go to stderr.\n",
+      "  The expected/measured split is printed as JSON on stdout; diagnostics go to stderr.\n"
+      "  --instrument emits Tachyon SDK events (scopes, thread names, frame marks, markers, plots, lock "
+      "waits,\n"
+      "  fiber switches) to the agent named by $TACHYON_AGENT_PIPE, or to a sidecar .tachyon-inst file.\n",
       stderr);
 }
 
@@ -44,6 +48,7 @@ int main(int argc, char** argv) {
   double duration = 5.0;
   double hitchIntervalMs = 0.0;  // 0 = default (2000 ms; scaled to fit when several scenarios run)
   bool pretty = false;
+  bool instrument = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto needValue = [&](const char* flag) -> const char* {
@@ -67,6 +72,8 @@ int main(int argc, char** argv) {
       hitchIntervalMs = std::atof(value);
     } else if (arg == "--pretty") {
       pretty = true;
+    } else if (arg == "--instrument") {
+      instrument = true;
     } else if (arg == "--list") {
       for (const auto& name : scenarioNames()) std::printf("%s\n", name.c_str());
       return 0;
@@ -88,6 +95,13 @@ int main(int argc, char** argv) {
   if (names.empty()) {
     std::fputs("no scenario selected\n", stderr);
     return 2;
+  }
+
+  if (instrument) {
+    setInstrumentation(true);
+    Tachyon_SetCurrentThreadName(
+        "tachyon-testbed");  // first SDK call: starts the runtime and the agent connection
+    std::fputs("tachyon-testbed: instrumentation on\n", stderr);
   }
 
   const Calibration cal = calibrate();

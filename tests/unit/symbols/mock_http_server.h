@@ -217,6 +217,9 @@ class MockHttpServer {
     for (int waited = 0; waited < delayMs && !m_stop; waited += 10) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    // Stop counting before the response goes out: the client can only finish (and start its next request)
+    // after receiving it, so the count never includes a request whose client has already moved on.
+    --m_concurrent;
     if (!location.empty()) {
       const std::string head = "HTTP/1.1 302 Found\r\nLocation: " + location +
                                "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -239,7 +242,6 @@ class MockHttpServer {
         respond(s, 200, body, body.size(), truncated ? body.size() / 2 : body.size());
       }
     }
-    --m_concurrent;
     closeSocket(s);
   }
 

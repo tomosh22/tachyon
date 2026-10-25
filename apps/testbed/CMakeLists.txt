@@ -8,7 +8,7 @@ add_library(tachyon_testbed_core STATIC
   testbed/scenarios.cpp)
 add_library(tachyon::testbed_core ALIAS tachyon_testbed_core)
 target_include_directories(tachyon_testbed_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(tachyon_testbed_core PUBLIC tachyon::core nlohmann_json::nlohmann_json Threads::Threads)
+target_link_libraries(tachyon_testbed_core PUBLIC tachyon::core tachyon::sdk nlohmann_json::nlohmann_json Threads::Threads)
 target_compile_features(tachyon_testbed_core PUBLIC cxx_std_20)
 tachyon_set_warnings(tachyon_testbed_core)
 
