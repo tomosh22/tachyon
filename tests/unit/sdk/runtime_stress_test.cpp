@@ -43,6 +43,29 @@ class StreamValidator {
 
   void feed(const uint8_t* data, size_t size) { m_splitter.feed(data, size); }
 
+  // Parses exactly "t<digits>-<digits>".
+  static bool parseData(const std::string& s, int& threadIndex, unsigned long long& seq) {
+    size_t i = 0;
+    if (s.empty() || s[i++] != 't') return false;
+    size_t digits = 0;
+    int ti = 0;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+      ti = ti * 10 + (s[i++] - '0');
+      ++digits;
+    }
+    if (digits == 0 || i >= s.size() || s[i++] != '-') return false;
+    unsigned long long sq = 0;
+    digits = 0;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+      sq = sq * 10 + static_cast<unsigned long long>(s[i++] - '0');
+      ++digits;
+    }
+    if (digits == 0 || i != s.size()) return false;
+    threadIndex = ti;
+    seq = sq;
+    return true;
+  }
+
   void fail(const std::string& what) {
     if (m_errors.size() < 10) m_errors.push_back(what);
   }
@@ -75,9 +98,7 @@ class StreamValidator {
         const std::string data(reinterpret_cast<const char*>(p + sizeof(b)), b.data_len);
         int threadIndex = -1;
         unsigned long long seq = 0;
-        char extra = 0;
-        if (std::sscanf(data.c_str(), "t%d-%llu%c", &threadIndex, &seq, &extra) != 2)
-          return fail("corrupt data: " + data);
+        if (!parseData(data, threadIndex, seq)) return fail("corrupt data: " + data);
         if (t.threadIndex == -1) t.threadIndex = threadIndex;
         if (t.threadIndex != threadIndex) fail("records from two threads share a tid");
         if (t.haveSeq && seq <= t.lastSeq) fail("sequence not increasing");
