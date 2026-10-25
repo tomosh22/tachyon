@@ -8,8 +8,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 |---|---|---|---|---|---|
 | WP-00 | Repository skeleton and CI | — | merged (CI green: linux-release, linux-asan, windows-release) | main | 2026-10-24 |
 | WP-01 | ETW spike tool `etlstat` | A | in progress | wp/01-etlstat | 2026-10-25 |
-| WP-02 | Profiler testbed | — | in review | wp/02-testbed | 2026-10-25 |
-| WP-03 | Trace format library | — | in progress | wp/03-trace | 2026-10-24 |
+| WP-02 | Profiler testbed | — | merged (CI green incl. windows-release; Windows timing splits to confirm, see queue) | wp/02-testbed | 2026-10-25 |
+| WP-03 | Trace format library | — | in progress (rework: MSVC build, interning speed) | wp/03-trace | 2026-10-25 |
 | WP-04 | Synthetic trace generator `tracegen` | C | not started | wp/04-tracegen | |
 | WP-10 | Agent skeleton and control protocol | A | not started | wp/10-agent | |
 | WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
@@ -70,6 +70,15 @@ ctest --preset windows-release
 ```
 (Run from a "x64 Native Tools Command Prompt for VS 2022". The GitHub Actions `windows` job runs the same.)
 
+### WP-02
+CI already builds and runs the testbed tests on Windows. Remaining manual checks on a Windows dev box:
+```
+cmake --preset windows-release && cmake --build --preset windows-release
+build\windows-release\bin\tachyon-testbed.exe --scenario all --duration 5 --pretty
+build\windows-release\bin\tachyon-testbed.exe --scenario sleep --duration 5 --pretty
+```
+Confirm the `sleep` split is within ±0.05 of 0.70/0.30 (Windows timer granularity may need `timeBeginPeriod(1)`), the fibers split is ~0.25 each, and thread names show in a debugger or Task Manager.
+
 ## Open questions (Part 7) and assumed defaults
 
 1. Platform order Windows → Linux, consoles only with SDK access — assumed yes.
@@ -84,6 +93,7 @@ ctest --preset windows-release
 ## Plan concerns raised
 
 - WP-03 bytes/node budget: with 8-byte nodes and 4-byte hash slots at load factor ≤ 0.7 and doubling growth, worst case right after a resize is ≈ 8 + 4/0.35 ≈ 19.4 bytes/node. Proposed: assert ≤ 20 bytes/node at worst-case table size, or allow a non-doubling growth factor. Proceeding with the plan as written; the WP-03 report must state the measured worst case.
+  - Measured in WP-03: as-grown 22.4 bytes/node, worst after resize 22.9 (std::vector slack adds to the hash overhead). Orchestrator decision: the ≤ 16 bytes/node budget is measured after `CallstackInterner::compact()` (13.7 bytes/node), because the interner only lives during conversion. Awaiting user confirmation.
 
 ## Environment notes
 
