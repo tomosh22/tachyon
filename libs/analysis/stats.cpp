@@ -63,6 +63,7 @@ QueryKey timeThreadKey(const ResolvedFilter& f, QueryKind kind, uint64_t arg) {
   k.filter.t0 = f.canonical.t0;
   k.filter.t1 = f.canonical.t1;
   k.filter.threads = f.canonical.threads;
+  k.options = f.options;
   return k;
 }
 

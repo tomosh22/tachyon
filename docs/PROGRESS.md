@@ -44,7 +44,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-51 | Client runtime | E | merged (CI green incl. windows; connected overhead 46.9 ns Linux / 68 ns Windows vs 40 ns target, under 80 ns gate; disabled 4.7 / 16 ns) | wp/51-sdk-runtime | 2026-10-25 |
 | WP-51b | SDK runtime fixes (flaky AgentLossFallsBack test, sidecar truncation, perf flake) | E | merged (root cause: fake-agent race; 20× ctest repeats green under load) | wp/51b-sdk-fixes | 2026-10-25 |
 | WP-52 | Agent-side ingestion and merge | A | merged (Windows CI ran a real ETW + --instrument capture) | wp/52-ingestion | 2026-10-25 |
-| WP-53 | Scope pairing, blending, fibers | C | in progress | wp/53-scope-blending | 2026-10-25 |
+| WP-53 | Scope pairing, blending, fibers | C | merged (WP-53b follow-up) | wp/53-scope-blending | 2026-10-25 |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
 | WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
 | WP-60 | Flight recorder mode | — | not started | wp/60-flight-recorder | |
@@ -166,7 +166,13 @@ Shared helpers moved to libs/analysis/detail/query_support.h (pure move). `libs/
 
 Verifier PASS. Rows match bottomUpFunctions. The Butterfly matches analysis::butterfly for all 401 medium functions, with 0 mismatches. Sort is a total order on every column. The text filter matches brute force, and regex-like input is safe. Close and reopen is ASan-clean. Sorting 100k rows takes 9–12 ms (budget 20 ms); a panel frame takes 0.06 ms (budget 2 ms). Viewer helpers moved to apps/viewer/common.
 
+## WP-53 notes
+
+Verifier PASS (conditional on D1). Rule-5 placement matches a brute-force oracle written from the spec in 10,800 comparisons, and the oracle catches mutations. With blending off, results are byte-identical to main over 294 configurations. Fibers match the fixture field by field. Lock summary is exact. Blended, warm, 5 M samples / 1 M scopes: bottomUp 58–70 ms, topDown 42–90 ms. Cold (pairing, index and query): 0.23–0.26 s, or 0.55–0.80 s fiber-aware. BlendIndex memory for 1 M scopes: 38 MB; PairedFibers: 184 MB. Orchestrator fix: the viewer's AnalysisContext snapshot now keys on blendScopes and groupByFiber.
+
 ## Queued follow-ups
+
+- WP-53b (in progress): poll cancellation in the fiber piece computation and the blend-index sorts (cold fiber-aware cancel took 134–212 ms); replace the 3× ratio with absolute budgets (warm blended bottomUp/topDown/butterfly ≤ 100 ms, assert 200 ms; cold ≤ 1 s, assert 2 s, on the 5 M / 1 M model); match mapped frames with `lo < caller_addr <= hi`, since caller_addr is a return address; thread-safety comment on lockSummaryShared.
 
 - WP-33b (also): empty-stack samples are counted in topDown's root exclusive but dropped by bottomUp under KernelFrames::Show/Group. Result: Function List % ≠ Call Graph % on traces with frameless samples (repro: 80% vs 100%). Fix in libs/analysis with a `<no stack>` row (kRootKey) in bottomUp, or by excluding the samples from topDown, consistently in both.
 - Viewer polish (with WP-48): the Butterfly forces inline/kernel mode for inline or `<kernel>` keys without showing it in its toggles. Add a "forced for this selection" hint. Put the module-inclusive double-count note on the % cell too.

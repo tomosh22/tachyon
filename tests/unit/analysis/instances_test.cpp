@@ -4,6 +4,7 @@
 #include "analysis/instances.h"
 
 #include "aggregation_test_util.h"
+#include "analysis/fibers.h"
 #include "analysis/query_cache.h"
 #include "analysis/thread_states.h"  // fixtures
 #include "trace/trace_format.h"
@@ -340,6 +341,69 @@ TEST(InstancesFixture, EveryScopeOfScopesEqualsItsStats) {
     expectMatchesStats(**inst, *st, std::string(l.m.strings.get(sid)));
     EXPECT_TRUE(sortedByBegin(**inst));
     EXPECT_GT((*inst)->size(), 0u);
+  }
+}
+
+// WP-53 options: blending scopes into the stacks must not change the instances (or statistics) of sampled
+// functions, and the fiber-aware pairing must give instance lists equal to the scope statistics.
+TEST(InstancesFixture, BlendScopesDoesNotChangeSampledFunctionInstances) {
+  Loaded l("scopes");
+  QueryContext off(l.m, l.svc);
+  AggregationOptions on;
+  on.blendScopes = true;
+  QueryContext blended(l.m, l.svc, on);
+  auto rows = bottomUpFunctions(off, {});
+  ASSERT_TRUE(rows.ok());
+  size_t checked = 0, nonEmpty = 0;
+  for (const FunctionRow& row : *rows) {
+    if (row.key.isScope()) continue;
+    auto a = functionInstances(off, {}, row.key);
+    auto b = functionInstances(blended, {}, row.key);
+    auto sa = functionStats(off, {}, row.key);
+    auto sb = functionStats(blended, {}, row.key);
+    ASSERT_TRUE(a.ok() && b.ok() && sa.ok() && sb.ok());
+    EXPECT_EQ(**a, **b) << functionKeyName(off, row.key);
+    EXPECT_EQ(sa->count, sb->count);
+    EXPECT_EQ(sa->totalTicks, sb->totalTicks);
+    EXPECT_EQ(sa->histogram, sb->histogram);
+    EXPECT_EQ(compareToStats(**b, *sb), "");
+    ++checked;
+    if (!(*a)->empty()) ++nonEmpty;
+  }
+  EXPECT_GT(checked, 3u);
+  EXPECT_GT(nonEmpty, 0u);
+}
+
+TEST(InstancesFixture, GroupByFiberScopeInstancesEqualScopeStats) {
+  Loaded l("fibers");
+  AggregationOptions opt;
+  opt.groupByFiber = true;
+  QueryContext ctx(l.m, l.svc, opt);
+  QueryContext plain(l.m, l.svc);
+  std::set<uint32_t> ids;
+  for (const trace::ScopeEventRec& rec : l.m.scopeEvents) {
+    const trace::ScopeEventRec e = rec;
+    if (e.kind == trace::kScopeBegin) ids.insert(e.id.get());
+  }
+  ASSERT_FALSE(ids.empty());
+  for (uint32_t id : ids) {
+    const StringIdx sid(id);
+    auto inst = scopeInstances(ctx, {}, sid);
+    auto st = scopeStats(ctx, {}, sid);
+    ASSERT_TRUE(inst.ok() && st.ok());
+    EXPECT_EQ(compareToStats(**inst, *st), "") << l.m.strings.get(sid);
+    // The pairing the statistics use is the fiber-aware one: the list is built from it.
+    auto paired = pairedScopesFor(ctx, {});
+    ASSERT_TRUE(paired.ok());
+    size_t expected = 0;
+    for (const auto& list : (*paired)->byThread)
+      for (const ScopeInstance& si : list) expected += si.id == sid ? 1 : 0;
+    EXPECT_EQ((*inst)->size(), expected) << l.m.strings.get(sid);
+    // Without fiber grouping the cache entries are separate and still self-consistent.
+    auto pi = scopeInstances(plain, {}, sid);
+    auto ps = scopeStats(plain, {}, sid);
+    ASSERT_TRUE(pi.ok() && ps.ok());
+    EXPECT_EQ(compareToStats(**pi, *ps), "");
   }
 }
 

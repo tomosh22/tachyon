@@ -26,7 +26,9 @@ enum class QueryKind : uint8_t {
   ThreadStateTotals,
   Frames,
   SlowestFrames,  // WP-35
-  ScopePairs,     // WP-35: paired Begin/End instances of the whole model (scope_pairing.h)
+  ScopePairs,     // WP-35: paired Begin/End instances of the whole model (scope_pairing.h); WP-53 arg: 1 =
+                  // fiber-aware pairing (fibers.h), 2 = thread blend index, 3 = fiber blend index
+  LockSummary,    // WP-53
   Instances,      // WP-47: instance lists of a function or scope (instances.h)
 };
 
@@ -36,6 +38,7 @@ struct QueryKey {
   QueryKind kind = QueryKind::BottomUp;
   FunctionKey function{};  // function argument (butterfly, lines, ...), else default
   uint64_t arg = 0;        // any other scalar argument (scope id, thread index, ...)
+  uint32_t options = 0;    // WP-53: bits of the context's AggregationOptions that change results (optionBits)
   Filter filter;
 
   // Thread-safe (value type).
@@ -119,7 +122,7 @@ class QueryCache {
   void evictLocked();
   List::iterator lookupLocked(const QueryKey& key, uint64_t hash);
 
-  static constexpr size_t kKinds = 13;
+  static constexpr size_t kKinds = 14;
   mutable std::mutex m_mutex;
   List m_lru;  // front = most recently used
   std::unordered_multimap<uint64_t, List::iterator> m_index;

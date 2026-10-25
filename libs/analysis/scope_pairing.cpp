@@ -9,6 +9,23 @@
 
 namespace tachyon::analysis {
 
+TidLookup::TidLookup(const model::TraceModel& m) {
+  m_tids.reserve(m.tidToThread.size());
+  for (const auto& [tid, idx] : m.tidToThread)
+    if (idx.valid() && idx.get() < m.threads.size()) m_tids.emplace_back(tid, idx.get());
+  std::sort(m_tids.begin(), m_tids.end());
+}
+
+uint32_t TidLookup::find(uint32_t tid) {
+  if (m_lastIdx != kInvalidIdx && tid == m_lastTid) return m_lastIdx;
+  if (tid == 0) return kInvalidIdx;
+  const auto it = std::lower_bound(m_tids.begin(), m_tids.end(), std::pair<uint32_t, uint32_t>{tid, 0});
+  if (it == m_tids.end() || it->first != tid) return kInvalidIdx;
+  m_lastTid = tid;
+  m_lastIdx = it->second;
+  return m_lastIdx;
+}
+
 size_t PairedScopes::heapBytes() const {
   size_t bytes = sizeof(PairedScopes) + vectorBytes(byThread) + vectorBytes(orphanEndTs);
   for (const auto& v : byThread) bytes += vectorBytes(v);
@@ -22,32 +39,17 @@ Result<PairedScopes> pairScopes(const model::TraceModel& m, Cancel cancel) {
   out.byThread.resize(threadCount);
   out.orphanEndTs.resize(threadCount);
 
-  // tid -> thread by binary search over a flat sorted table, with a one-entry cache (events cluster).
-  std::vector<std::pair<uint32_t, uint32_t>> tids;
-  tids.reserve(m.tidToThread.size());
-  for (const auto& [tid, idx] : m.tidToThread)
-    if (idx.valid() && idx.get() < threadCount) tids.emplace_back(tid, idx.get());
-  std::sort(tids.begin(), tids.end());
-
+  TidLookup lookup(m);
   std::vector<std::vector<uint32_t>> open(threadCount);  // indices into byThread[t]
-  uint32_t lastTid = 0, lastIdx = kInvalidIdx;
   const std::vector<trace::ScopeEventRec>& events = m.scopeEvents;
   for (size_t i = 0; i < events.size(); ++i) {
     if ((i & 0xFFFFu) == 0 && cancel.requested()) return makeError(ErrorCode::Cancelled, "query cancelled");
     trace::ScopeEventRec e;  // packed record: copy before use
     std::memcpy(&e, &events[i], sizeof e);
-    const uint32_t tid = e.tid;
-    uint32_t t;
-    if (lastIdx != kInvalidIdx && tid == lastTid) {
-      t = lastIdx;
-    } else {
-      const auto it = std::lower_bound(tids.begin(), tids.end(), std::pair<uint32_t, uint32_t>{tid, 0});
-      if (tid == 0 || it == tids.end() || it->first != tid) {
-        ++out.droppedEvents;
-        continue;
-      }
-      t = lastIdx = it->second;
-      lastTid = tid;
+    const uint32_t t = lookup.find(e.tid);
+    if (t == kInvalidIdx) {
+      ++out.droppedEvents;
+      continue;
     }
     std::vector<uint32_t>& stack = open[t];
     std::vector<ScopeInstance>& list = out.byThread[t];
@@ -58,6 +60,8 @@ Result<PairedScopes> pairScopes(const model::TraceModel& m, Cancel cancel) {
       si.end = e.ts;
       si.depth = static_cast<uint32_t>(stack.size());
       si.callerAddr = e.caller_addr;
+      si.data = e.data;
+      si.color = e.color_rgba;
       si.unterminated = true;  // until its End arrives
       stack.push_back(static_cast<uint32_t>(list.size()));
       list.push_back(si);

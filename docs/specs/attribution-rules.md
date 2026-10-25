@@ -20,3 +20,18 @@
 - ReadyRec while Running/Unknown is ignored. A second ReadyRec in one wait is ignored (the first wins). A ReadyRec on a preempted (Ready) interval attaches unblocking info without splitting.
 - Thread exit: a switch-out with old_state 4 (Terminated), or the ThreadRec end_ts when it is later than the thread's last event.
 - Wait reasons (`libs/analysis/wait_reasons.h`): `old_state` uses KTHREAD_STATE numbering on both platforms (1/3/7 ready/preempted, 4 exited, else waiting). `old_wait_reason` is the KWAIT_REASON on Windows and `prev_state & 0xFF` on Linux. WP-71 must write sched_switch records in this encoding (prev_state TASK_RUNNING → old_state 1, exiting → 4, else 5).
+
+## Clarifications added with WP-53 (2026-10-25, binding)
+- **Rule 5 "above the root"** means directly above the first (outermost) stack frame: slot 0, after frame index 0, with the monotonic max. This matches tracegen's reference. A stack with no frames holds only the scopes.
+- **caller_addr** is a return address captured inside the user's function. A mapped frame matches it when the frame's whole-function range satisfies `lo < caller_addr <= hi` (WP-53b). An unmapped frame matches only its exact address.
+- **Inline expansion:** a scope is placed between the matched frame's function key and its inline keys. This is a known limitation; placing it above the innermost inline frame containing caller_addr is deferred.
+- **Subtree cut:** scopes whose slot is at or above the cut depth are dropped.
+- Blending is `AggregationOptions::blendScopes` (default off) and fiber grouping is `groupByFiber`. Both apply in the shared flattener to every query, and the options are part of every cache key.
+- **Fibers:**
+  - A fiber starts running at switch_end. Register only creates its lane.
+  - Unregister ends the fiber's open scopes, which are flagged unterminated.
+  - At an equal ts, End events at the head of the tie group go first, then fiber events, then the other scope events.
+  - With no fiber running, scope events go to the thread's own lane.
+  - Pieces exclude switched-out time.
+  - scopeStats and lockSummary report wall time (end − begin).
+- **Locks:** a lock wait is a scope with colour 0x4C4F43FF. Its address is parsed from the scope data as hex; unparsable data is counted in `unparsedWaits`. The name is the scope id unless the id is the reserved "Tachyon.LockAcquire". contentionCount counts every acquire, including zero-length ones.

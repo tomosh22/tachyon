@@ -3,7 +3,9 @@
 #include "analysis/attribution.h"
 #include "analysis/detail/instance_enum.h"
 #include "analysis/detail/query_support.h"
+#include "analysis/fibers.h"
 #include "analysis/query_cache.h"
+#include "analysis/scope_blend.h"
 #include "analysis/scope_pairing.h"
 #include "trace/trace_format.h"
 
@@ -14,23 +16,13 @@ namespace tachyon::analysis {
 
 namespace detail {
 
-namespace {
-
-Result<std::shared_ptr<const PairedScopes>> pairedFor(const QueryContext& ctx, Cancel cancel) {
-  QueryKey k;
-  k.kind = QueryKind::ScopePairs;
-  return cachedOrCompute<PairedScopes>(
-      ctx, k, [&]() { return pairScopes(ctx.model(), cancel); },
-      [](const PairedScopes& p) { return p.heapBytes() + 2 * kAllocOverhead + 32; });
-}
-
-}  // namespace
+namespace {}  // namespace
 
 Result<EnumeratedInstances> enumerateScopeInstances(const QueryContext& ctx, const ResolvedFilter& rf,
                                                     StringIdx scopeId, Cancel cancel) {
   if (ctx.model().statesByThread.size() != ctx.model().threads.size())
     return makeError(ErrorCode::InvalidArgument, "thread states are not built (call buildThreadStates)");
-  auto paired = pairedFor(ctx, cancel);
+  auto paired = pairedScopesFor(ctx, cancel);
   if (!paired) return paired.error();
   const PairedScopes& ps = **paired;
   EnumeratedInstances out;
@@ -62,6 +54,10 @@ Result<EnumeratedInstances> enumerateFunctionInstances(const QueryContext& ctx, 
   KeyTable table;
   StackFlattener flat(ctx, table);
   flat.setCancel(cancel);
+  auto blend = blendIndexIfEnabled(ctx, cancel);
+  if (!blend) return blend.error();
+  flat.setBlend(blend->get());
+  static const std::vector<ScopeSegment> kNoSegments;
   const uint32_t target = table.intern(key);
   const uint32_t required = rf.function ? table.intern(*rf.function) : kUnset;
   const uint64_t maxGap = 2 * m.sampleIntervalTicks;
@@ -73,6 +69,9 @@ Result<EnumeratedInstances> enumerateFunctionInstances(const QueryContext& ctx, 
   bool aborted = false;
 
   for (ThreadIdx thread : rf.threads) {
+    ScopeCursor cursor(flat.blending() && thread.get() < (*blend)->byThread.size()
+                           ? (*blend)->byThread[thread.get()]
+                           : kNoSegments);
     bool open = false;
     int32_t runDepth = 0;
     uint64_t firstTs = 0, lastTs = 0, lastWeight = 0;
@@ -84,10 +83,11 @@ Result<EnumeratedInstances> enumerateFunctionInstances(const QueryContext& ctx, 
         m, thread, rf.t0, rf.t1, cancel, [&](uint64_t ts, CallstackIdx cs, uint64_t weight, uint16_t flags) {
           if (weight == 0 || aborted) return;  // not Running: skipped, breaks nothing
           const bool kernelLeaf = (flags & trace::kSampleFlagKernelLeaf) != 0;
-          const uint64_t mk = (uint64_t{cs.get()} << 1) | (kernelLeaf ? 1u : 0u);
+          const uint32_t stack = flat.blending() ? cursor.stackAt(ts) : 0u;
+          const uint64_t mk = (uint64_t{stack} << 33) | (uint64_t{cs.get()} << 1) | (kernelLeaf ? 1u : 0u);
           auto [it, fresh] = memo.try_emplace(mk, -1);
           if (fresh) {
-            const bool kept = flat.flatten(cs, rf.subtree, kernelLeaf, ids, required);
+            const bool kept = flat.flatten(cs, rf.subtree, kernelLeaf, ids, required, stack);
             if (flat.aborted()) {
               aborted = true;
               return;
@@ -95,7 +95,15 @@ Result<EnumeratedInstances> enumerateFunctionInstances(const QueryContext& ctx, 
             meter.add(flat.lastCost() + ids.size());
             if (kept) {
               const auto f = std::find(ids.begin(), ids.end(), target);
-              if (f != ids.end()) it->second = static_cast<int32_t>(f - ids.begin());
+              if (f != ids.end()) {
+                // Depth counts the sampled frames only: a scope that opens or closes inside the function
+                // (blendScopes) must not split an instance.
+                int32_t depth = static_cast<int32_t>(f - ids.begin());
+                if (flat.blending())
+                  for (auto p = ids.begin(); p != f; ++p)
+                    if (table.key(*p).isScope()) --depth;
+                it->second = depth;
+              }
             }
             if (meter.due()) {
               aborted = true;
@@ -162,6 +170,7 @@ Result<std::shared_ptr<const std::vector<Instance>>> scopeInstances(const QueryC
   key.filter.t0 = rf->canonical.t0;
   key.filter.t1 = rf->canonical.t1;
   key.filter.threads = rf->canonical.threads;
+  key.options = rf->options;
   return cachedOrCompute<std::vector<Instance>>(
       ctx, key,
       [&]() -> Result<std::vector<Instance>> {

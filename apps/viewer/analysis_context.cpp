@@ -65,7 +65,8 @@ std::shared_ptr<const AnalysisSnapshot> AnalysisContext::snapshot(const analysis
   std::erase_if(m_snapshots, [&](const auto& s) { return s->symbolGeneration() != symbolGeneration; });
   for (const auto& s : m_snapshots) {
     if (s->options().expandInline == options.expandInline &&
-        s->options().kernelFrames == options.kernelFrames)
+        s->options().kernelFrames == options.kernelFrames &&
+        s->options().blendScopes == options.blendScopes && s->options().groupByFiber == options.groupByFiber)
       return s;
   }
   m_snapshots.push_back(
