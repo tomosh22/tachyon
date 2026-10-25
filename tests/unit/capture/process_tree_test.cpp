@@ -97,6 +97,14 @@ TEST(ProcessTree, EndedParentStopsBeingAParentSoReusedPidsAreFresh) {
   EXPECT_EQ(t.targets(), (std::vector<uint32_t>{100, 101}));
 }
 
+TEST(ProcessTree, RootsOwnStartEventDoesNotUnseatIt) {
+  // Launch mode: the session is running when the root is created, so its Start event is in the trace.
+  ProcessTreeTracker t({100}, true, "*");
+  EXPECT_FALSE(feed(t, kProcessStart, 100, 7, "root.exe"));
+  EXPECT_TRUE(feed(t, kProcessStart, 101, 100, "child.exe"));
+  EXPECT_EQ(t.targets(), (std::vector<uint32_t>{100, 101}));
+}
+
 TEST(ProcessTree, RundownEventsAreIgnored) {
   ProcessTreeTracker t({100}, true, "*");
   EXPECT_FALSE(feed(t, kProcessDcEnd, 101, 100, "old-child.exe"));

@@ -41,10 +41,13 @@ ProcessTreeTracker::ProcessTreeTracker(std::vector<uint32_t> roots, bool followC
     if (r == 0 || std::find(m_targets.begin(), m_targets.end(), r) != m_targets.end()) continue;
     m_targets.push_back(r);
     m_live.insert(r);
+    m_roots.insert(r);
   }
 }
 
 bool ProcessTreeTracker::onProcessStart(const ProcessStartInfo& info) {
+  // A launched root is created after the session, so its own Start event is in the trace: it stays a target.
+  if (m_roots.count(info.pid) != 0) return false;
   // A Start for a pid we think is alive means its End was missed (or the pid was reused): forget it.
   m_live.erase(info.pid);
   if (!m_follow || m_live.count(info.parentPid) == 0) return false;

@@ -74,6 +74,7 @@ class ProcessTreeTracker {
   std::vector<uint32_t> m_targets;
   std::vector<FollowedChild> m_children;
   std::unordered_set<uint32_t> m_live;
+  std::unordered_set<uint32_t> m_roots;
   uint32_t m_rejected = 0;
 };
 
