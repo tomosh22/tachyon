@@ -209,7 +209,7 @@ namespace {
 
 // Open-addressing table (linear probing) from (stack, node, kernel flag) to ticks and sample counts. A per
 // worker accumulator: no deletion, grows at 1/2 load.
-class alignas(64) WeightTable {
+class WeightTable {
  public:
   WeightTable() { reset(1u << 10); }
 
@@ -261,9 +261,13 @@ class alignas(64) WeightTable {
     }
   }
 
+  // Padding keeps the mutable fields of neighbouring workers' tables (they sit in one vector) on different
+  // cache lines: false sharing made the accumulation twice as slow.
+  char m_padHead[64] = {};
   std::vector<Slot> m_slots;
   size_t m_mask = 0, m_count = 0;
   unsigned m_shift = 0;
+  char m_padTail[64] = {};
 };
 
 }  // namespace
