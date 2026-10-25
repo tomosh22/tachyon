@@ -1,0 +1,46 @@
+{
+  "name": "partial_torn",
+  "seed": 9,
+  "platform": "windows",
+  "clock_frequency_hz": 10000000,
+  "sampling_hz": 8000,
+  "start_ts": 6000000,
+  "duration_s": 3,
+  "partial": { "crash_at_ms": 1300, "torn_tail": true },
+  "chunk_records": 4096,
+  "detail": false,
+  "process": { "pid": 9000, "name": "crashed.exe" },
+  "modules": [
+    {
+      "name": "game.exe",
+      "functions": [
+        { "name": "main", "rva": "0x1000", "size": 256 },
+        { "name": "Game::tick", "rva": "0x1100", "size": 256 },
+        { "name": "Job::run", "rva": "0x1200", "size": 256 }
+      ]
+    }
+  ],
+  "stacks": [
+    { "name": "tick", "frames": [ "game.exe!main", "game.exe!Game::tick+0x10" ] },
+    { "name": "job", "frames": [ "game.exe!main", "game.exe!Job::run+0x10" ] },
+    { "name": "block", "frames": [ "game.exe!main", "game.exe!Job::run+0x40" ] }
+  ],
+  "threads": [
+    {
+      "tid": 701,
+      "name": "Main",
+      "mix": [ { "stack": "tick", "weight": 2 }, { "stack": "job", "weight": 1 } ],
+      "pattern": { "run_us": [ 5000, 20000 ], "wait_us": [ 500, 3000 ], "blocking_stacks": [ "block" ], "ready_pct": 50, "waker_tids": [ 702 ], "latency_us": [ 10, 100 ] },
+      "intervals": [ { "state": "running", "dur_us": 7000 } ]
+    },
+    {
+      "tid": 702,
+      "name": "Worker",
+      "start_us": 3000,
+      "mix": [ { "stack": "job", "weight": 1 } ],
+      "pattern": { "run_us": [ 2000, 9000 ], "wait_us": [ 500, 4000 ], "blocking_stacks": [ "block" ], "ready_pct": 50, "waker_tids": [ 701 ], "latency_us": [ 10, 100 ] }
+    }
+  ],
+  "markers": [ { "tid": 701, "at_us": 1000000, "name": "BeforeCrash" } ],
+  "plots": [ { "name": "heap_mb", "period_us": 100000, "count": 13, "kind": "ramp", "min": 100, "max": 120 } ]
+}

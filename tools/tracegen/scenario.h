@@ -178,6 +178,7 @@ struct Scenario {
   uint64_t startTs = 0;         // absolute tick of the trace start
   uint64_t duration = 0;        // ticks
   bool partial = false;         // written without finish()
+  bool tornTail = false;        // partial only: the last chunk (a Samples chunk) is cut in half
   uint64_t chunkRecords = 1'000'000;
   uint64_t eventsLost = 0;
   bool detail = false;  // emit per-thread interval lists in the expected JSON

@@ -24,16 +24,24 @@
     { "name": "submit", "frames": [ "game.exe!main", "game.exe!Render::submit+0x10" ] },
     { "name": "job", "frames": [ "game.exe!Job::run+0x10" ] },
     { "name": "audio", "frames": [ "game.exe!Audio::mix+0x10" ] },
-    { "name": "block", "frames": [ "game.exe!Job::run+0x40" ] }
+    { "name": "block", "frames": [ "game.exe!Job::run+0x40" ] },
+    { "name": "hitch", "frames": [ "game.exe!main", "game.exe!Game::tick+0x40" ] }
   ],
+  "markers": [ { "tid": 501, "at_us": 983294, "name": "Hitch", "data": "frame 59 takes 50.666 ms" } ],
   "threads": [
     {
       "tid": 501,
       "name": "Main",
-      "from_start": true,
       "mix": [ { "stack": "tick", "weight": 3 }, { "stack": "submit", "weight": 2 } ],
-      "pattern": { "run_us": [ 8000, 14000 ], "wait_us": [ 1000, 4000 ], "blocking_stacks": [ "block" ] },
-      "intervals": [ { "state": "running", "dur_us": 10000 }, { "state": "waiting", "dur_us": 2000, "blocking_stack": "block" } ]
+      "intervals": [
+        { "group": [ { "state": "running", "dur_us": 10000 },
+                     { "state": "waiting", "dur_us": 6666, "blocking_stack": "block" } ], "repeat": 59 },
+        { "state": "running", "dur_us": 44000, "mix": [ { "stack": "hitch", "weight": 1 } ] },
+        { "state": "waiting", "dur_us": 6666, "blocking_stack": "block" },
+        { "group": [ { "state": "running", "dur_us": 10000 },
+                     { "state": "waiting", "dur_us": 6666, "blocking_stack": "block" } ], "repeat": 57 },
+        { "state": "running" }
+      ]
     },
     {
       "tid": 502,
@@ -58,8 +66,9 @@
     }
   ],
   "frame_marks": [
-    { "tid": 501, "name": "Frame", "start_us": 0, "period_us": 16666, "count": 119, "jitter_us": 300 },
+    { "tid": 501, "name": "Frame", "start_us": 0, "period_us": 16666, "count": 117,
+      "hitches": [ { "frame": 59, "extra_us": 34000 } ] },
     { "tid": 502, "name": "RenderFrame", "start_us": 5000, "period_us": 33333, "count": 59, "jitter_us": 500 }
   ],
-  "plots": [ { "name": "frame_ms", "period_us": 16666, "count": 119, "kind": "ramp", "min": 10, "max": 20 } ]
+  "plots": [ { "name": "frame_ms", "period_us": 16666, "count": 117, "kind": "ramp", "min": 10, "max": 20 } ]
 }

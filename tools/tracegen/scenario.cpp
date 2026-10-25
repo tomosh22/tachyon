@@ -213,6 +213,7 @@ class Parser {
         m_s.partial = p->get<bool>();
       } else if (p->is_object()) {
         m_s.partial = true;
+        m_s.tornTail = boolean(*p, "torn_tail", false, w + ".partial");
         if (find(*p, "crash_at_us")) m_s.duration = us(*p, "crash_at_us", 0, w + ".partial");
         if (find(*p, "crash_at_ms")) m_s.duration = toTicks(u64(*p, "crash_at_ms", 0, w + ".partial") * 1000);
       } else {
@@ -620,8 +621,25 @@ class Parser {
     t.fromStart = boolean(tj, "from_start", false, w);
     if (const json* mj = find(tj, "mix")) t.mix = parseMix(*mj, tid, w + ".mix");
     if (const json* is = array(tj, "intervals", w)) {
-      for (size_t i = 0; i < is->size() && ok(); ++i)
-        parseInterval((*is)[i], t, i + 1 == is->size(), w + ".intervals[" + std::to_string(i) + "]");
+      // An element {"group": [...], "repeat": N} expands to N copies of the listed intervals.
+      std::vector<const json*> flat;
+      for (size_t i = 0; i < is->size() && ok(); ++i) {
+        const json& e = (*is)[i];
+        const json* g = find(e, "group");
+        if (!g) {
+          flat.push_back(&e);
+          continue;
+        }
+        const uint64_t repeat = u64(e, "repeat", 1, w + ".intervals[" + std::to_string(i) + "]");
+        if (!g->is_array() || repeat == 0 || repeat * g->size() > 1'000'000) {
+          fail(w + ".intervals[" + std::to_string(i) + "]", "invalid group / repeat");
+          break;
+        }
+        for (uint64_t r = 0; r < repeat; ++r)
+          for (const json& sub : *g) flat.push_back(&sub);
+      }
+      for (size_t i = 0; i < flat.size() && ok(); ++i)
+        parseInterval(*flat[i], t, i + 1 == flat.size(), w + ".intervals[" + std::to_string(i) + "]");
     }
     if (const json* pj = find(tj, "pattern")) parsePattern(*pj, t.pattern, w + ".pattern");
     if (const json* es = array(tj, "extra_samples", w)) {
@@ -648,12 +666,6 @@ class Parser {
     if (t.fromStart && t.startOffset != 0) fail(w, "from_start threads cannot have start_us");
     if (t.fromStart && !t.intervals.empty() && t.intervals.front().state != SegState::Run)
       fail(w, "from_start requires the first interval to be running");
-    if (t.fromStart && !t.pattern.present &&
-        std::none_of(t.intervals.begin(), t.intervals.end(),
-                     [](const IntervalSpec& iv) { return iv.state != SegState::Run; }))
-      fail(w,
-           "a from_start thread without any off-cpu interval emits no events and would be Unknown to a "
-           "reader");
     if (t.mix.empty() && (!t.intervals.empty() || t.pattern.present)) fail(w, "thread has no 'mix'");
     m_s.threads.push_back(std::move(t));
   }
@@ -840,9 +852,19 @@ class Parser {
         fail(w, "need period_us > 0, jitter_us < period_us");
         return;
       }
+      // "hitches": [{"frame": 59, "extra_us": 34000}] lengthens frame 59 (every later mark shifts by
+      // extra_us).
+      std::vector<std::pair<uint64_t, uint64_t>> hitches;
+      if (const json* hs = array(fj, "hitches", w)) {
+        for (const json& hj : *hs)
+          hitches.push_back({reqU64(hj, "frame", w + ".hitches"), reqUs(hj, "extra_us", w + ".hitches")});
+      }
       for (uint64_t n = 0; n < count; ++n) {
         FrameMarkInst f;
-        f.ts = start + n * period + (jitter ? rng.range(0, jitter) : 0);
+        uint64_t shift = 0;
+        for (const auto& hitch : hitches)
+          if (hitch.first < n) shift += hitch.second;
+        f.ts = start + n * period + shift + (jitter ? rng.range(0, jitter) : 0);
         f.tid = tid;
         f.name = name;
         f.number = n;
@@ -947,6 +969,8 @@ class Parser {
     for (const ThreadRename& r : m_s.renames)
       if (r.ts >= m_s.duration || !hasThread(r.tid)) fail("thread_names", "invalid rename");
     validateFibers();
+    if (m_s.tornTail && (m_s.blend || !m_s.frameMarks.empty()))
+      fail("scenario", "torn_tail scenarios cannot use blend or frame marks");
     if (m_s.partial && (!m_s.scopes.empty() || !m_s.fiberEvents.empty()))
       fail("scenario", "partial scenarios cannot contain scopes or fibers");
   }

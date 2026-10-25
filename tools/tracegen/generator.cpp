@@ -134,11 +134,16 @@ class MixTable {
   std::vector<uint64_t> m_thr;
 };
 
+enum SampleKind : uint8_t { kSampleNormal = 0, kSampleClipped = 1, kSampleZero = 2 };
+
 struct SampleRow {
   uint64_t ts;
   uint32_t tid;
   uint32_t cs;
   uint16_t cpu;
+  uint32_t stack;   // scenario stack index (bookkeeping, used to undo a torn tail)
+  uint64_t weight;  // bookkeeping
+  uint8_t kind;     // SampleKind
 };
 
 struct SampleLogRec {
@@ -193,6 +198,7 @@ class Generator {
   void account(ThreadGen& g);
   void emitSample(ThreadGen& g, uint64_t rel, uint64_t weightEnd, WindowOut& out);
   void flushWindow(WindowOut& out, bool force);
+  void discardTornRows();
   void buildTally(Tally& t);
   void buildScopeTally(Tally& t);
   void buildBlended(Tally& t);
@@ -208,6 +214,8 @@ class Generator {
   bool m_logSamples = false;
   bool m_logIntervals = false;
   SampleBatch m_batch;
+  std::vector<SampleRow> m_batchRows;  // torn_tail only: rows of the pending batch
+  std::vector<SampleRow> m_tornRows;   // torn_tail only: rows of the final (cut) chunk
   std::vector<ContextSwitchRec> m_csAcc;
   std::vector<ReadyRec> m_readyAcc;
 };
@@ -384,7 +392,10 @@ void Generator::account(ThreadGen& g) {
     if (s.start > 0) add(kStateUnknown, 0, s.start, false, false);
   }
   switch (s.state) {
-    case SegState::Run: add(kStateRunning, s.start, s.end, false, false); break;
+    case SegState::Run:
+      // Running at the trace start without a switch-in: Unknown until the thread's first event.
+      add(s.fromStart ? kStateUnknown : kStateRunning, s.start, s.end, false, false);
+      break;
     case SegState::Wait:
       if (s.readyAt != 0) {
         add(kStateWaiting, s.start, s.readyAt, true, true);
@@ -400,13 +411,18 @@ void Generator::account(ThreadGen& g) {
 void Generator::emitSample(ThreadGen& g, uint64_t rel, uint64_t weightEnd, WindowOut& out) {
   const MixTable& mix = g.cur.mix >= 0 ? g.overrides[static_cast<size_t>(g.cur.mix)] : g.defMix;
   const uint32_t stack = mix.pick(g.counter++);
-  const uint64_t weight = std::min<uint64_t>(m_s.sampleInterval, weightEnd - rel);
-  out.samples.push_back(
-      SampleRow{abs(rel), g.spec.tid, m_stacks[stack].cs.get(), static_cast<uint16_t>(g.spec.cpu)});
+  // A thread that was already running at the trace start has no switch-in: its state is Unknown until its
+  // first context-switch event, so samples in that prefix get weight 0 (attribution-rules.md).
+  const bool prefix = g.cur.fromStart;
+  const uint64_t weight = prefix ? 0 : std::min<uint64_t>(m_s.sampleInterval, weightEnd - rel);
+  const uint8_t kind = prefix ? kSampleZero : (weight < m_s.sampleInterval ? kSampleClipped : kSampleNormal);
+  out.samples.push_back(SampleRow{abs(rel), g.spec.tid, m_stacks[stack].cs.get(),
+                                  static_cast<uint16_t>(g.spec.cpu), stack, weight, kind});
   g.accSamples[stack] += 1;
   g.accTicks[stack] += weight;
   g.totalSamples += 1;
-  if (weight < m_s.sampleInterval) g.clippedSamples += 1;
+  if (kind == kSampleClipped) g.clippedSamples += 1;
+  if (kind == kSampleZero) g.zeroSamples += 1;
   if (m_logSamples) m_sampleLog.push_back(SampleLogRec{abs(rel), g.spec.tid, stack, weight});
 }
 
@@ -494,8 +510,8 @@ void Generator::advance(ThreadGen& g, uint64_t w, WindowOut& out) {
   // Stray samples (outside any running interval by construction; the reference verifies that).
   while (g.extraIdx < g.spec.extraSamples.size() && g.spec.extraSamples[g.extraIdx].at < w) {
     const ExtraSample& e = g.spec.extraSamples[g.extraIdx++];
-    out.samples.push_back(
-        SampleRow{abs(e.at), tid, m_stacks[e.stack].cs.get(), static_cast<uint16_t>(g.spec.cpu)});
+    out.samples.push_back(SampleRow{abs(e.at), tid, m_stacks[e.stack].cs.get(),
+                                    static_cast<uint16_t>(g.spec.cpu), e.stack, 0, kSampleZero});
     g.accSamples[e.stack] += 1;
     g.totalSamples += 1;
     g.zeroSamples += 1;
@@ -507,7 +523,10 @@ void Generator::flushWindow(WindowOut& out, bool force) {
   std::stable_sort(out.samples.begin(), out.samples.end(), [](const SampleRow& a, const SampleRow& b) {
     return std::tie(a.ts, a.tid) < std::tie(b.ts, b.tid);
   });
-  for (const SampleRow& r : out.samples) m_batch.push(r.ts, r.tid, CallstackIdx(r.cs), r.cpu);
+  for (const SampleRow& r : out.samples) {
+    m_batch.push(r.ts, r.tid, CallstackIdx(r.cs), r.cpu);
+    if (m_s.tornTail) m_batchRows.push_back(r);
+  }
   std::stable_sort(out.switches.begin(), out.switches.end(),
                    [](const ContextSwitchRec& a, const ContextSwitchRec& b) { return a.ts < b.ts; });
   m_csAcc.insert(m_csAcc.end(), out.switches.begin(), out.switches.end());
@@ -517,10 +536,6 @@ void Generator::flushWindow(WindowOut& out, bool force) {
   out.samples.clear();
   out.switches.clear();
   out.ready.clear();
-  if (force || m_batch.size() >= m_s.chunkRecords) {
-    if (m_batch.size() > 0) m_w->append(m_batch);
-    m_batch = SampleBatch{};
-  }
   if (force || m_csAcc.size() >= m_s.chunkRecords) {
     if (!m_csAcc.empty()) m_w->append(std::span<const ContextSwitchRec>(m_csAcc));
     m_csAcc.clear();
@@ -529,6 +544,57 @@ void Generator::flushWindow(WindowOut& out, bool force) {
     if (!m_readyAcc.empty()) m_w->append(std::span<const ReadyRec>(m_readyAcc));
     m_readyAcc.clear();
   }
+  // Samples go last so that, for a torn tail, the chunk that gets cut is a Samples chunk whose contents are
+  // known exactly.
+  if (force || m_batch.size() >= m_s.chunkRecords) {
+    if (m_batch.size() > 0) m_w->append(m_batch);
+    m_batch = SampleBatch{};
+    if (force && m_s.tornTail) m_tornRows = std::move(m_batchRows);
+    m_batchRows.clear();
+  }
+}
+
+// Removes the samples of the torn (lost) final chunk from the analytic bookkeeping.
+void Generator::discardTornRows() {
+  for (const SampleRow& r : m_tornRows) {
+    for (auto& gp : m_threads) {
+      if (gp->spec.tid != r.tid) continue;
+      gp->accSamples[r.stack] -= 1;
+      gp->accTicks[r.stack] -= r.weight;
+      gp->totalSamples -= 1;
+      if (r.kind == kSampleClipped) gp->clippedSamples -= 1;
+      if (r.kind == kSampleZero) gp->zeroSamples -= 1;
+    }
+  }
+}
+
+// Cuts the last chunk of the file in half (header intact, payload incomplete). The last chunk must be
+// Samples.
+Result<void> tearLastChunk(const std::filesystem::path& path) {
+  std::fstream f(path, std::ios::in | std::ios::binary);
+  if (!f) return makeError(ErrorCode::IoError, "cannot reopen " + path.string());
+  f.seekg(0, std::ios::end);
+  const uint64_t size = static_cast<uint64_t>(f.tellg());
+  uint64_t pos = sizeof(FileHeader);
+  uint64_t lastStart = 0, lastPayload = 0;
+  uint32_t lastType = 0;
+  while (pos + sizeof(ChunkHeader) <= size) {
+    ChunkHeader ch;
+    f.seekg(static_cast<std::streamoff>(pos));
+    f.read(reinterpret_cast<char*>(&ch), sizeof(ch));
+    if (!f) return makeError(ErrorCode::IoError, "read failed while scanning " + path.string());
+    lastStart = pos;
+    lastPayload = ch.compressed_size;
+    lastType = ch.type;
+    pos += sizeof(ChunkHeader) + ch.compressed_size;
+  }
+  f.close();
+  if (lastType != static_cast<uint32_t>(ChunkType::Samples) || lastPayload < 2)
+    return makeError(ErrorCode::Internal, "torn_tail: the last chunk is not a Samples chunk");
+  std::error_code ec;
+  std::filesystem::resize_file(path, lastStart + sizeof(ChunkHeader) + lastPayload / 2, ec);
+  if (ec) return makeError(ErrorCode::IoError, "cannot truncate " + path.string());
+  return ok();
 }
 
 Result<void> Generator::run(const std::filesystem::path& path, Tally& tally, uint64_t& sampleCount) {
@@ -567,6 +633,12 @@ Result<void> Generator::run(const std::filesystem::path& path, Tally& tally, uin
     if (!r.ok()) return r;
   }
   m_w.reset();  // an unfinished writer leaves a partial (recoverable) file on disk
+  if (m_s.tornTail) {
+    if (m_tornRows.empty())
+      return makeError(ErrorCode::Internal, "torn_tail: the final chunk has no samples");
+    TACHYON_TRY(tearLastChunk(path));
+    discardTornRows();
+  }
 
   buildTally(tally);
   sampleCount = tally.nSamples;

@@ -30,8 +30,8 @@ TEST(FixtureManifest, ListsEveryScenarioExceptLarge) {
   EXPECT_EQ(m["schema"], "tachyon-fixture-manifest-1");
   std::vector<std::string> names;
   for (const auto& item : m["scenarios"].items()) names.push_back(item.key());
-  EXPECT_EQ(names, (std::vector<std::string>{"fibers", "frames", "medium", "partial", "recursion", "scopes",
-                                             "tiny"}));
+  EXPECT_EQ(names, (std::vector<std::string>{"fibers", "frames", "medium", "partial", "partial_torn",
+                                             "recursion", "scopes", "tiny"}));
 }
 
 // The fixtures built by the tachyon_fixtures target (the tracegen executable) match the manifest.
@@ -61,7 +61,7 @@ TEST_P(RegenerateTest, MatchesManifest) {
 
 INSTANTIATE_TEST_SUITE_P(Scenarios, RegenerateTest,
                          ::testing::Values("tiny", "scopes", "fibers", "frames", "recursion", "partial",
-                                           "medium"));
+                                           "partial_torn", "medium"));
 
 }  // namespace
 }  // namespace tachyon::tracegen

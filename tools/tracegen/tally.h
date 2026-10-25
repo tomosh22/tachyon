@@ -89,11 +89,11 @@ struct Tally {
   uint64_t nSamples = 0, nSwitches = 0, nReady = 0, nScopeEvents = 0, nFiberEvents = 0, nFrameMarks = 0,
            nMarkers = 0, nPlots = 0, nThreadNames = 0;
 
-  struct ModuleInfo {
+  struct ModuleEntry {
     std::string name;
     uint64_t base = 0;
   };
-  std::vector<ModuleInfo> modules;
+  std::vector<ModuleEntry> modules;
   std::map<FnKey, std::string> names;
   std::map<uint32_t, ThreadTally> threads;
   std::map<FnKey, FnStat> fns;      // overall

@@ -21,7 +21,7 @@ tachyon_add_executable(tracegen SOURCES main.cpp DEPS tachyon::tracegen_core)
 if(TACHYON_BUILD_TESTS)
   set(TRACEGEN_SCENARIO_DIR ${PROJECT_SOURCE_DIR}/tests/fixtures/tracegen)
   file(MAKE_DIRECTORY ${TACHYON_GENERATED_FIXTURE_DIR})
-  set(TRACEGEN_FIXTURES tiny medium scopes fibers frames recursion partial)
+  set(TRACEGEN_FIXTURES tiny medium scopes fibers frames recursion partial partial_torn)
   set(TRACEGEN_OUTPUTS "")
   foreach(name IN LISTS TRACEGEN_FIXTURES)
     set(outputs

@@ -205,6 +205,30 @@ json Tally::toJson() const {
   }
   j["frames"] = std::move(frs);
 
+  // A hitch frame is one that lasts at least twice as long as the median frame of its (thread, name) series.
+  json hitches = json::array();
+  {
+    std::map<std::pair<uint32_t, std::string>, std::vector<const FrameTally*>> series;
+    for (const FrameTally* fp : orderedFrames) series[{fp->tid, fp->name}].push_back(fp);
+    for (const auto& entry : series) {
+      std::vector<uint64_t> durs;
+      for (const FrameTally* fp : entry.second) durs.push_back(fp->end - fp->start);
+      std::sort(durs.begin(), durs.end());
+      const uint64_t median = durs[(durs.size() - 1) / 2];
+      for (const FrameTally* fp : entry.second) {
+        const uint64_t d = fp->end - fp->start;
+        if (d >= 2 * median)
+          hitches.push_back(json{{"mark_tid", fp->tid},
+                                 {"name", fp->name},
+                                 {"number", fp->number},
+                                 {"start", fp->start},
+                                 {"end", fp->end},
+                                 {"duration_ticks", d}});
+      }
+    }
+  }
+  j["hitch_frames"] = std::move(hitches);
+
   json fibs = json::array();
   for (const auto& [fid, segsIn] : fibers) {
     std::vector<FiberSegment> segs = segsIn;

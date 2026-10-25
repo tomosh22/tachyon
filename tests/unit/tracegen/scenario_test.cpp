@@ -61,7 +61,33 @@ TEST(Scenario, GeneratedTablesAreDeterministic) {
   EXPECT_NE(a->stacks[4].rootToLeaf[1].value, c->stacks[4].rootToLeaf[1].value);
 }
 
+TEST(Scenario, IntervalGroupsAndFrameHitchesExpand) {
+  json d = miniScenario();
+  d["threads"][1]["intervals"] = json::array(
+      {{{"group",
+         json::array({{{"state", "running"}, {"dur_us", 1000}}, {{"state", "waiting"}, {"dur_us", 500}}})},
+        {"repeat", 4}},
+       {{"state", "running"}}});
+  d["frame_marks"] = json::array({{{"tid", 1},
+                                   {"period_us", 1000},
+                                   {"count", 10},
+                                   {"hitches", json::array({{{"frame", 3}, {"extra_us", 5000}}})}}});
+  auto r = parseScenario(d, "x");
+  ASSERT_TRUE(r.ok()) << r.error().toString();
+  EXPECT_EQ(r->threads[1].intervals.size(), 9u);
+  ASSERT_EQ(r->frameMarks.size(), 10u);
+  EXPECT_EQ(r->frameMarks[3].ts, 30'000u);
+  EXPECT_EQ(r->frameMarks[4].ts - r->frameMarks[3].ts, 60'000u);  // frame 3 is lengthened by 5 ms
+  EXPECT_EQ(r->frameMarks[5].ts - r->frameMarks[4].ts, 10'000u);
+}
+
 TEST(Scenario, RejectsBadInput) {
+  {
+    json d = miniScenario();
+    d["partial"] = {{"crash_at_ms", 50}, {"torn_tail", true}};
+    d["blend"] = true;
+    expectRejected(d, "torn_tail");
+  }
   {
     json d = miniScenario();
     d.erase("duration_ms");
@@ -101,11 +127,6 @@ TEST(Scenario, RejectsBadInput) {
     json d = miniScenario();  // two running intervals in a row
     d["threads"][0]["intervals"][2]["state"] = "waiting";
     expectRejected(d, "alternate");
-  }
-  {
-    json d = miniScenario();  // from_start thread that never leaves the CPU emits no event a reader could use
-    d["threads"][0]["intervals"] = json::array({{{"state", "running"}}});
-    expectRejected(d, "off-cpu");
   }
   {
     json d = miniScenario();
@@ -154,7 +175,8 @@ TEST(Scenario, RejectsBadInput) {
 }
 
 TEST(Scenario, CommittedScenariosAllParse) {
-  for (const char* name : {"tiny", "medium", "large", "scopes", "fibers", "frames", "recursion", "partial"}) {
+  for (const char* name :
+       {"tiny", "medium", "large", "scopes", "fibers", "frames", "recursion", "partial", "partial_torn"}) {
     auto r = loadScenario((testing_util::scenarioDir() / (std::string(name) + ".json")).string());
     ASSERT_TRUE(r.ok()) << name << ": " << r.error().toString();
     EXPECT_EQ(r->name, name);

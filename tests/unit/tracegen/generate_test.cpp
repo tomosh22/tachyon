@@ -55,7 +55,7 @@ TEST(Generate, StateTotalsAndWeightsFollowTheRules) {
   EXPECT_EQ((*t1)["state_ticks"]["unknown"], 0u);
   EXPECT_EQ((*t2)["state_ticks"]["unknown"], 50'000u);
   EXPECT_EQ((*t2)["state_ticks"]["running"], duration - 50'000u);
-  EXPECT_EQ((*t1)["context_switches_in"], 1u);  // only the second running interval has a switch-in
+  EXPECT_EQ((*t1)["context_switches_in"], 2u);
   EXPECT_EQ((*t1)["context_switches_out"], 1u);
   EXPECT_EQ((*t1)["ready_events"], 1u);
   EXPECT_EQ((*t2)["context_switches_in"], 1u);
@@ -72,6 +72,25 @@ TEST(Generate, StateTotalsAndWeightsFollowTheRules) {
   for (const json& t : e["threads"]) total += t["samples"].get<uint64_t>();
   EXPECT_GT(workExcl, 0u);
   EXPECT_LT(workExcl, total);
+}
+
+// attribution-rules.md: a thread that was already running at the trace start (no switch-in) is Unknown until
+// its first context-switch event, and its samples in that prefix have weight 0.
+TEST(Generate, FromStartThreadIsUnknownUntilItsFirstEvent) {
+  json d = miniScenario();
+  d["threads"][0]["from_start"] = true;
+  TempDir dir;
+  const GenerateReport rep = generate(d, dir.path());
+  const json e = testing_util::readJson(rep.expectedPath);
+  const json& t1 = e["threads"][0];
+  ASSERT_EQ(t1["tid"], 1u);
+  EXPECT_EQ(t1["state_ticks"]["unknown"], 300'100u);
+  EXPECT_EQ(t1["state_ticks"]["running"], 599'900u);
+  EXPECT_EQ(t1["context_switches_in"], 1u);
+  EXPECT_EQ(t1["context_switches_out"], 1u);
+  // ~240 grid samples fall into the 30.01 ms prefix; all have weight 0 and the Running time starts
+  // afterwards.
+  EXPECT_NEAR(static_cast<double>(t1["zero_weight_samples"].get<uint64_t>()), 240.0, 1.0);
 }
 
 TEST(Generate, ExpectedMatchesReferenceOnDisk) {
@@ -142,6 +161,31 @@ TEST(Generate, ChunkRecordsSplitsStreams) {
   auto samples = reader->readSamples();
   ASSERT_TRUE(samples.ok());
   for (size_t i = 1; i < samples->size(); ++i) ASSERT_LE(samples->ts[i - 1], samples->ts[i]);
+}
+
+TEST(Generate, TornTailLosesExactlyTheLastSamplesChunk) {
+  json d = miniScenario();
+  d["duration_ms"] = 400;
+  d["partial"] = {{"crash_at_ms", 300}, {"torn_tail", true}};
+  d["chunk_records"] = 300;
+  TempDir dir;
+  const GenerateReport rep = generate(d, dir.path());  // generate() verifies analytic == reference
+  auto reader = trace::TraceReader::open(rep.tachyonPath);
+  ASSERT_TRUE(reader.ok());
+  EXPECT_TRUE(reader->isPartial());
+  auto samples = reader->readSamples();
+  ASSERT_TRUE(samples.ok());
+  const json e = testing_util::readJson(rep.expectedPath);
+  EXPECT_EQ(samples->size(), e["counts"]["samples"].get<uint64_t>());
+  // The file ends inside a chunk: bytes remain after the last recovered chunk.
+  const trace::FooterRec last = reader->chunks().back();
+  EXPECT_NE(last.type, static_cast<uint32_t>(trace::ChunkType::Samples));
+  // The same scenario without tearing keeps more samples.
+  d["partial"] = {{"crash_at_ms", 300}};
+  TempDir dir2;
+  const GenerateReport rep2 = generate(d, dir2.path());
+  const json e2 = testing_util::readJson(rep2.expectedPath);
+  EXPECT_GT(e2["counts"]["samples"].get<uint64_t>(), e["counts"]["samples"].get<uint64_t>());
 }
 
 TEST(Generate, PartialScenarioLeavesRecoverableFile) {

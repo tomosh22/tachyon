@@ -41,7 +41,6 @@
     {
       "tid": 301,
       "name": "Main",
-      "from_start": true,
       "mix": [
         { "stack": "idle", "weight": 10 },
         { "stack": "update", "weight": 25 },
@@ -56,7 +55,6 @@
     {
       "tid": 302,
       "name": "Worker",
-      "from_start": true,
       "mix": [ { "stack": "job", "weight": 60 }, { "stack": "job_wait", "weight": 30 }, { "stack": "idle", "weight": 10 } ],
       "pattern": { "run_us": [ 5000, 15000 ], "wait_us": [ 500, 2000 ] },
       "intervals": [ { "state": "running", "dur_us": 8000 }, { "state": "waiting", "dur_us": 1000 } ]

@@ -73,7 +73,7 @@ TEST_P(FixtureTest, TraceOpensAndMatchesHeaderAndCounts) {
 
 INSTANTIATE_TEST_SUITE_P(Fixtures, FixtureTest,
                          ::testing::Values("tiny", "medium", "scopes", "fibers", "frames", "recursion",
-                                           "partial"));
+                                           "partial", "partial_torn"));
 
 TEST(TinyFixture, ContainsTheDeliberateEdgeCases) {
   const json e = expected("tiny");
@@ -85,10 +85,18 @@ TEST(TinyFixture, ContainsTheDeliberateEdgeCases) {
   EXPECT_GE((*worker)["zero_weight_samples"].get<uint64_t>(), 2u);
   // Samples whose interval is clipped by the end of the Running interval.
   EXPECT_GE((*main)["clipped_samples"].get<uint64_t>(), 1u);
-  // Running at trace start without a switch-in: the first interval is Running from the trace start.
+  // Running at trace start without a switch-in: Unknown until the thread's first context-switch event
+  // (attribution-rules.md), here the first switch-out at 40 ms; its samples in that prefix have weight 0.
   const json& first = (*main)["intervals"][0];
-  EXPECT_EQ(first["state"], "running");
+  EXPECT_EQ(first["state"], "unknown");
   EXPECT_EQ(first["start"].get<uint64_t>(), e["trace"]["start_ts"].get<uint64_t>());
+  EXPECT_EQ(first["end"].get<uint64_t>() - first["start"].get<uint64_t>(), 400'000u);
+  // Independently verified numbers for thread 101 under the strict rule.
+  EXPECT_EQ((*main)["state_ticks"]["running"], 8'964'474u);
+  EXPECT_EQ((*main)["state_ticks"]["unknown"], 400'000u);
+  EXPECT_EQ((*main)["zero_weight_samples"], 321u);
+  EXPECT_EQ((*main)["clipped_samples"], 14u);
+  EXPECT_EQ((*main)["sample_ticks"], 8'952'516u);
   // Unknown before a thread's first event.
   EXPECT_EQ((*worker)["intervals"][0]["state"], "unknown");
   EXPECT_EQ((*worker)["state_ticks"]["unknown"].get<uint64_t>(), 1'500'000u);
@@ -210,7 +218,7 @@ TEST(FibersFixture, ScopeIntervalsAreSplitAtFiberSwitches) {
 
 TEST(FramesFixture, PerFrameTotalsPerThread) {
   const json e = expected("frames");
-  EXPECT_EQ(e["frames"].size(), 118u + 58u);
+  EXPECT_EQ(e["frames"].size(), 116u + 58u);
   for (const json& f : e["frames"]) {
     const uint64_t len = f["end"].get<uint64_t>() - f["start"].get<uint64_t>();
     EXPECT_GT(len, 0u);
@@ -241,6 +249,41 @@ TEST(RecursionFixture, InclusiveCountedOncePerSample) {
   EXPECT_GT((*ping)["exclusive_samples"].get<uint64_t>(), 0u);
   EXPECT_EQ((*ping)["inclusive_samples"], (*pong)["inclusive_samples"]);  // same stacks contain both
   EXPECT_EQ(e["clock_frequency_hz"].get<uint64_t>(), 1'000'000'000u);
+}
+
+TEST(FramesFixture, ContainsAPlantedHitchFrame) {
+  const json e = expected("frames");
+  ASSERT_EQ(e["hitch_frames"].size(), 1u);
+  const json& h = e["hitch_frames"][0];
+  EXPECT_EQ(h["mark_tid"], 501u);
+  EXPECT_EQ(h["name"], "Frame");
+  EXPECT_EQ(h["number"], 59u);
+  EXPECT_EQ(h["duration_ticks"], 506'660u);  // 50.666 ms at 10 MHz, against a 16.666 ms frame period
+  for (const json& f : e["frames"]) {
+    const uint64_t d = f["end"].get<uint64_t>() - f["start"].get<uint64_t>();
+    if (f["mark_tid"] == 501) EXPECT_EQ(d, f["number"] == 59 ? 506'660u : 166'660u);
+    if (f["mark_tid"] == 501 && f["number"] == 59) {
+      for (const json& t : f["threads"])
+        if (t["tid"] == 501) EXPECT_EQ(t["running_ticks"], 440'000u);  // the main thread is busy for 44 ms
+    }
+  }
+}
+
+TEST(PartialTornFixture, ReaderRecoversOnlyTheCompleteChunks) {
+  auto reader = trace::TraceReader::open(fixture("partial_torn", ".tachyon"));
+  ASSERT_TRUE(reader.ok());
+  EXPECT_TRUE(reader->isPartial());
+  EXPECT_EQ(reader->header().footer_offset, 0u);
+  const json e = expected("partial_torn");
+  auto samples = reader->readSamples();
+  ASSERT_TRUE(samples.ok());
+  EXPECT_EQ(samples->size(), e["counts"]["samples"].get<uint64_t>());
+  // The cut chunk was a Samples chunk written after the last ContextSwitches / ReadyEvents chunk.
+  const trace::FooterRec last = reader->chunks().back();
+  EXPECT_NE(last.type, static_cast<uint32_t>(trace::ChunkType::Samples));
+  // The file has more bytes than the recovered chunks account for.
+  const uint64_t onDisk = std::filesystem::file_size(fixture("partial_torn", ".tachyon"));
+  EXPECT_GT(onDisk, last.offset);
 }
 
 TEST(PartialFixture, IsUnfinalizedAndRecoverable) {

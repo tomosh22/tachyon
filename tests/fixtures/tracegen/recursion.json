@@ -30,7 +30,6 @@
     {
       "tid": 601,
       "name": "main",
-      "from_start": true,
       "mix": [
         { "stack": "fib_identical", "weight": 2 },
         { "stack": "fib_distinct", "weight": 2 },
@@ -43,7 +42,6 @@
     {
       "tid": 602,
       "name": "other",
-      "from_start": true,
       "mix": [ { "stack": "fib_identical", "weight": 1 }, { "stack": "mutual", "weight": 1 } ],
       "pattern": { "run_us": [ 3000, 9000 ], "wait_us": [ 500, 1500 ], "preempt_pct": 25 },
       "intervals": [ { "state": "running", "dur_us": 5000 }, { "state": "ready", "dur_us": 600 } ]

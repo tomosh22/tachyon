@@ -70,7 +70,7 @@ inline nlohmann::json miniScenario() {
     "stacks": [ { "name": "a", "frames": [ "m.exe!main", "m.exe!work+0x10" ] },
                 { "name": "b", "frames": [ "m.exe!main" ] },
                 { "name": "w", "frames": [ "m.exe!main", "m.exe!work+0x80" ] } ],
-    "threads": [ { "tid": 1, "name": "T1", "from_start": true,
+    "threads": [ { "tid": 1, "name": "T1",
         "mix": [ { "stack": "a", "weight": 3 }, { "stack": "b", "weight": 1 } ],
         "intervals": [ { "state": "running", "dur_us": 30010 },
                        { "state": "waiting", "dur_us": 10000, "blocking_stack": "w",

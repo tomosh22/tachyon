@@ -29,7 +29,6 @@
     {
       "tid": 701,
       "name": "Main",
-      "from_start": true,
       "mix": [ { "stack": "tick", "weight": 2 }, { "stack": "job", "weight": 1 } ],
       "pattern": { "run_us": [ 5000, 20000 ], "wait_us": [ 500, 3000 ], "blocking_stacks": [ "block" ], "ready_pct": 50, "waker_tids": [ 702 ], "latency_us": [ 10, 100 ] },
       "intervals": [ { "state": "running", "dur_us": 7000 } ]

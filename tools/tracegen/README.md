@@ -27,10 +27,10 @@ the Part 3.8 rules naively. On a mismatch both documents are kept as `<name>.ana
   `manifest.json` with the SHA-256 of each generated `.tachyon`, `.expected.json` and `.symbols.json`.
   `tests/unit/tracegen/manifest_test.cpp` regenerates every scenario and checks the hashes (also on Windows CI).
 * After an intentional change to the generator or a scenario, refresh the manifest:
-  `tracegen --out-dir <dir> --manifest tests/fixtures/tracegen/manifest.json tests/fixtures/tracegen/{tiny,medium,scopes,fibers,frames,recursion,partial}.json`
-  (the manifest lists exactly those seven; `large` has none).
+  `tracegen --out-dir <dir> --manifest tests/fixtures/tracegen/manifest.json tests/fixtures/tracegen/{tiny,medium,scopes,fibers,frames,recursion,partial,partial_torn}.json`
+  (the manifest lists exactly those eight; `large` has none).
 * CMake: target `tachyon_fixtures` (part of ALL when tests are enabled) writes `tiny medium scopes fibers frames
-  recursion partial` to `${TACHYON_GENERATED_FIXTURE_DIR}` (`<build>/fixtures`). `tachyon_fixtures_large`
+  recursion partial partial_torn` to `${TACHYON_GENERATED_FIXTURE_DIR}` (`<build>/fixtures`). `tachyon_fixtures_large`
   (opt-in) writes `large` (64 threads x 600 s, about 300 M samples, about 650 MiB).
 
 ## Scenario JSON
@@ -91,11 +91,13 @@ all), at random offsets.
 ```jsonc
 { "tid": 101, "name": "Main",            // or "count": 16, "tid_base": 2000, "name": "worker{i}" ({i}, {tid} expand)
   "cpu": 0,                              // cpu id in context switches / samples; default index % 8
-  "from_start": true,                    // running at trace start: no switch-in record (see "State rules")
+  "from_start": true,                    // running at trace start, no switch-in record: Unknown until its first event
+                                         // (see "State rules"); omit it and use start_us 0 for an explicit switch-in
   "start_us": 150000,                    // otherwise the first switch-in time (state Unknown before it)
   "mix": [ {"stack": "update", "weight": 40}, ... ],       // sample stack shares (relative weights)
   "mix": {"gen": {"prefix": "gs", "pick": 8}},             // or: pick 8 generated stacks, weights 1000/(rank+1)
-  "intervals": [ ... ],                  // explicit sequence from the thread's start
+  "intervals": [ ... ],                  // explicit sequence from the thread's start; {"group": [...], "repeat": N}
+                                         // elements expand to N copies of the listed intervals
   "pattern": { ... },                    // generated continuation after the explicit intervals
   "extra_samples": [ {"at_us": 41000, "stack": "draw"} ],  // stray samples (must fall outside Running intervals)
   "fiber": { "initial": 1, "initial_us": 0, "switches": [ {"at_us": 100000, "to": 2, "gap_us": 20} ] } }
@@ -112,8 +114,8 @@ all), at random offsets.
   `latency_us` before the switch-in; `preempt_pct` the share of off-cpu intervals that are preemptions.
 * Samples are taken on a fixed per-thread grid (`sample_interval` ticks, phase derived from seed and tid) while
   the thread is running; the stack of each sample comes from a low-discrepancy (Weyl) sequence over the mix
-  weights, so shares are close to exact. A `from_start` thread needs at least one off-cpu interval (or a
-  pattern); otherwise it would emit no event at all and be Unknown to any reader.
+  weights, so shares are close to exact. A `from_start` thread's first running interval has no switch-in; its
+  first event is the switch-out that ends it, so that whole prefix is `Unknown` and its samples get weight 0.
 
 ### scopes, fibers, frames, markers, plots
 ```jsonc
@@ -136,7 +138,8 @@ the fiber left. A thread's `fiber.initial` is announced by a `switch_end` with `
 `initial_us`. A scope listed with `"fiber": F` must begin and end while F runs on its thread.
 
 ```jsonc
-"frame_marks": [ {"tid": 501, "name": "Frame", "start_us": 0, "period_us": 16666, "count": 119, "jitter_us": 300} ]
+"frame_marks": [ {"tid": 501, "name": "Frame", "start_us": 0, "period_us": 16666, "count": 117, "jitter_us": 300,
+                  "hitches": [ {"frame": 59, "extra_us": 34000} ]} ]   // frame 59 lasts period + 34 ms; later marks shift
 "markers":      [ {"tid": 101, "at_us": 100000, "name": "LevelLoaded", "data": "forest", "color": "0xff00ff00"} ]
 "plots":        [ {"name": "fps", "start_us": 0, "period_us": 100000, "count": 10, "kind": "noise"|"ramp", "min": 30, "max": 60} ]
 "thread_names": [ {"tid": 102, "at_us": 500000, "name": "Worker-renamed"} ]
@@ -150,6 +153,12 @@ Frame mark numbers start at 0. Plot values are multiples of 0.25 (exactly repres
 reader recovers everything and `expected.json` describes exactly that. Partial scenarios cannot contain scopes or
 fibers.
 
+`"partial": {"crash_at_ms": N, "torn_tail": true}` additionally cuts the last chunk of the file in half (header
+intact, payload incomplete), so readers exercise truncated-chunk recovery. In this mode the final flush writes the
+Samples chunk last, so the torn chunk is always a Samples chunk with known contents: `expected.json` describes the
+records of the complete chunks only (all context switches and ready events, minus the samples of the last batch).
+`torn_tail` scenarios cannot use `blend` or frame marks.
+
 ## State rules used by `expected.json` (clarifications of 3.8)
 
 * **Context-switch records.** tracegen writes one record per thread transition with the other side being the
@@ -157,18 +166,21 @@ fibers.
   `old_thread_stack` = the blocking stack; a switch-in has `old_tid = 0, new_tid = T`, `old_thread_stack = kInvalidIdx`.
   Readers must handle records with both sides non-zero as well. A `ReadyRec` carries `readying_stack` (or
   `kInvalidIdx`).
-* **Unknown.** A thread's state before its first event is `Unknown`, counted from the trace `start_ts`.
-  Exception: if the first event of a thread is a *switch-out*, the thread is taken to have been `Running` since the
-  trace start (this is how "running at trace start with no switch-in" is represented). A thread without any
-  context-switch record is `Unknown` for the whole trace.
+* **Unknown** (normative: `docs/specs/attribution-rules.md`, "Orchestrator clarifications"). A thread's state
+  is `Unknown` from the trace `start_ts` (or thread start) until its first context-switch event. A thread whose
+  first event is a switch-out is *not* inferred to have been running; that prefix stays `Unknown` and its
+  samples have weight 0 (rule 1). A thread without any context-switch record is `Unknown` for the whole trace.
+  To make a thread `Running` from the very start, give it an explicit switch-in at the trace start
+  (`start_us` 0 without `from_start`).
 * **Intervals.** The last interval of a thread lasts until the header `end_ts`. A `ReadyRec` while the thread is
   `Waiting` splits the wait into `Waiting [t, tr)` and `Ready [tr, switch-in)`; both pieces report the same
-  `blocking_stack`, `unblocking_stack` and `woke_by_tid`. A preempted wait (`old_state` 1 or 3) is `Ready` for its
+  `blocking_stack`, `unblocking_stack` and `woke_by_tid` (rule 4 clarification in the spec). A preempted wait (`old_state` 1 or 3) is `Ready` for its
   whole length without unblocking information. Intervals are half-open: `[start, end)`.
 * **Sample weight (rule 1).** `min(sample_interval, end_of_enclosing_Running - ts)`; weight 0 when no `Running`
   interval contains `ts`. Zero-weight samples still count in `samples` and in sample counts of functions, but not
   in `*_ticks`. `clipped_samples` counts samples whose weight was reduced.
-* **Scope blending (rule 5), made precise.** For a sample with open scopes `S0..Sk` (outermost first) and stack
+* **Scope blending (rule 5), made precise** (same as the monotonic-placement clarification in
+  `docs/specs/attribution-rules.md`). For a sample with open scopes `S0..Sk` (outermost first) and stack
   frames `f0..fn` (root first): scope `Si` matches the deepest (largest index) frame whose function address range
   contains `caller_addr`; an unmatched scope uses slot 0 (directly above the root). Slots are made monotonic with
   depth: `slot(Si) = max(match(Si), slot(Si-1))`. The blended stack is `f0, [scopes with slot 0 in order], f1,
@@ -203,6 +215,7 @@ blended: {                                                // only if "blend"
   functions: [ same as `functions`, plus { kind: "scope", id, name: "scope:<id>" } entries ],
   placements: [ { scope, matched, parent: {kind, module, start_rva|id, name}, samples, ticks } ] }   // parent = frame directly below the synthetic frame
 frames:  [ { mark_tid, name, number, start, end, threads: [ { tid, running_ticks, sample_ticks } ] } ]
+hitch_frames: [ { mark_tid, name, number, start, end, duration_ticks } ]   // frames lasting >= 2x their series median
 fibers:  [ { fiber_id, segments: [ { tid, scope, depth, scope_begin, begin, end } ], scope_ticks: [ { scope, ticks } ] } ]
 plots:   [ { name, count, min, max, first_ts, last_ts } ]
 ```
@@ -225,11 +238,12 @@ Functions are sorted by `start_rva` and do not overlap. `module_idx` equals the 
 
 | name | what it exercises |
 |---|---|
-| `tiny` | 2 threads, 1 s, `detail`. Stray (zero-weight) samples, clipped samples, recursion, an unmapped frame, a thread running at start with no switch-in, an Unknown prefix, a Ready-split wait, a preemption, thread rename, markers, a plot |
+| `tiny` | 2 threads, 1 s, `detail`. Stray (zero-weight) samples, clipped samples, recursion, an unmapped frame, a thread running at start with no switch-in (thread 101: Unknown for its first 40 ms, 321 zero-weight samples), an Unknown prefix for a late-starting thread, a Ready-split wait, a preemption, thread rename, markers, a plot |
 | `medium` | 16 threads, 60 s, 8 kHz (about 7.5 M samples), generated module tables with inlines, 64 generated stacks |
 | `scopes` | nested / repeated scopes, matched / unmatched / unmapped callers, `blend` |
 | `fibers` | fiber switches with scopes split across them, two threads |
-| `frames` | two frame-mark series with jitter, four threads, per-frame running / sample ticks |
+| `frames` | two frame-mark series, four threads, per-frame running / sample ticks, and a planted hitch: frame 59 of the main thread's `Frame` series lasts 50.666 ms (506,660 ticks) instead of 16.666 ms, listed in `hitch_frames` |
 | `recursion` | direct, identical-frame and mutual recursion at 1 GHz clock (Linux platform) |
 | `partial` | unfinalized file, small chunks (`chunk_records` 4096), crash at 1.3 s of 3 s |
+| `partial_torn` | like `partial`, plus `torn_tail`: the last Samples chunk is cut in half |
 | `large` | 64 threads x 600 s, about 300 M samples, streamed with bounded memory (not part of the default build) |

@@ -99,6 +99,28 @@ class RecordCursor {
   std::string m_error;
 };
 
+// Non-throwing JSON accessors: a missing or wrong-typed field yields the default.
+const json* member(const json& o, const char* key) {
+  if (!o.is_object()) return nullptr;
+  const auto it = o.find(key);
+  return it == o.end() ? nullptr : &*it;
+}
+uint64_t getU64(const json& o, const char* key, uint64_t def) {
+  const json* v = member(o, key);
+  if (!v) return def;
+  if (v->is_number_unsigned()) return v->get<uint64_t>();
+  if (v->is_number_integer() && v->get<int64_t>() >= 0) return static_cast<uint64_t>(v->get<int64_t>());
+  return def;
+}
+std::string getStr(const json& o, const char* key, const std::string& def) {
+  const json* v = member(o, key);
+  return v && v->is_string() ? v->get<std::string>() : def;
+}
+bool getBool(const json& o, const char* key, bool def) {
+  const json* v = member(o, key);
+  return v && v->is_boolean() ? v->get<bool>() : def;
+}
+
 std::string hexName(const std::string& module, uint64_t rva) {
   char buf[40];
   std::snprintf(buf, sizeof(buf), "!0x%" PRIx64, rva);
@@ -161,16 +183,20 @@ Result<void> Reference::loadSymbols() {
   std::stringstream ss;
   ss << f.rdbuf();
   const json doc = json::parse(ss.str(), nullptr, false);
-  if (doc.is_discarded() || !doc.is_object() || !doc.contains("modules"))
+  const json* mods = doc.is_discarded() ? nullptr : member(doc, "modules");
+  if (!mods || !mods->is_array())
     return makeError(ErrorCode::CorruptData, "bad symbols file " + m_spath.string());
-  for (const json& mj : doc["modules"]) {
+  for (const json& mj : *mods) {
     SymModule m;
-    m.name = mj.value("name", "");
-    for (const json& fj : mj["functions"]) {
+    m.name = getStr(mj, "name", "");
+    const json* fns = member(mj, "functions");
+    if (!fns || !fns->is_array())
+      return makeError(ErrorCode::CorruptData, "symbols file: module without a function array");
+    for (const json& fj : *fns) {
       SymFn fn;
-      fn.name = fj.value("name", "");
-      fn.rva = fj.value("start_rva", uint64_t{0});
-      fn.size = fj.value("size", uint64_t{0});
+      fn.name = getStr(fj, "name", "");
+      fn.rva = getU64(fj, "start_rva", 0);
+      fn.size = getU64(fj, "size", 0);
       m.fns.push_back(std::move(fn));
     }
     std::sort(m.fns.begin(), m.fns.end(), [](const SymFn& a, const SymFn& b) { return a.rva < b.rva; });
@@ -289,13 +315,11 @@ Result<void> Reference::passStates(TraceReader& r) {
       m_t.nSwitches += 1;
       if (c.old_tid != 0) {
         ThreadInfo& ti = info(c.old_tid);
-        if (!ti.seen) {  // first event is a switch-out: the thread was running since the trace start
-          ti.kind = Kind::Running;
-          ti.since = m_h.start_ts;
-          ti.seen = true;
-        }
-        if (ti.kind != Kind::Running)
+        // A thread whose first event is a switch-out is NOT inferred to have been running: its state stays
+        // Unknown from the trace start until this first event (attribution-rules.md clarifications).
+        if (ti.kind != Kind::Running && ti.kind != Kind::Unknown)
           return makeError(ErrorCode::CorruptData, "switch-out of a thread that is not running");
+        ti.seen = true;
         closeSegment(c.old_tid, ti, c.ts);
         ti.kind = (c.old_state == 1 || c.old_state == 3) ? Kind::Ready : Kind::Waiting;
         ti.since = c.ts;
@@ -551,28 +575,30 @@ Result<Tally> Reference::run() {
   const json info = json::parse(infoText, nullptr, false);
   if (info.is_discarded() || !info.is_object())
     return makeError(ErrorCode::CorruptData, "bad CaptureInfo JSON");
-  const uint64_t samplingHz = info.value("sampling_hz", uint64_t{0});
+  const uint64_t samplingHz = getU64(info, "sampling_hz", 0);
   if (samplingHz == 0 || m_h.clock_frequency_hz % samplingHz != 0)
     return makeError(ErrorCode::CorruptData,
                      "CaptureInfo sampling_hz is missing or does not divide the clock");
   m_interval = m_h.clock_frequency_hz / samplingHz;
 
-  if (!info.contains("tracegen") || !info.contains("capture_options"))
+  const json* tg = member(info, "tracegen");
+  const json* opts = member(info, "capture_options");
+  if (!tg || !opts || !tg->is_object() || !opts->is_object())
     return makeError(ErrorCode::CorruptData, "CaptureInfo lacks the tracegen section");
-  m_t.scenario = info["tracegen"].value("scenario", "");
-  m_t.generator = info.value("generator", "");
-  m_t.seed = info["capture_options"].value("seed", uint64_t{0});
+  m_t.scenario = getStr(*tg, "scenario", "");
+  m_t.generator = getStr(info, "generator", "");
+  m_t.seed = getU64(*opts, "seed", 0);
   m_t.clockHz = m_h.clock_frequency_hz;
   m_t.samplingHz = samplingHz;
   m_t.sampleInterval = m_interval;
   m_t.startTs = m_h.start_ts;
   m_t.endTs = m_h.end_ts;
   m_t.partial = reader.isPartial();
-  m_t.blend = info["tracegen"].value("blend", false);
-  m_t.detail = info["tracegen"].value("detail", false);
+  m_t.blend = getBool(*tg, "blend", false);
+  m_t.detail = getBool(*tg, "detail", false);
 
   TACHYON_TRY_ASSIGN(m_strings, reader.readStrings());
-  TACHYON_TRY_ASSIGN(m_mods, readModuleInfos(reader));
+  TACHYON_TRY_ASSIGN(m_mods, reader.readModuleInfos());
   TACHYON_TRY_ASSIGN(m_frames, reader.readFrames());
   TACHYON_TRY_ASSIGN(m_nodes, reader.readCallstackNodes());
   if (m_sym.size() != m_mods.size())
@@ -600,31 +626,6 @@ Result<Tally> Reference::run() {
 }
 
 }  // namespace
-
-Result<std::vector<ModuleInfo>> readModuleInfos(TraceReader& reader) {
-  // ModuleRec is 78 bytes, so elements of a std::vector<ModuleRec> are misaligned for their StrongId member;
-  // decode the raw chunk payload with memcpy instead of TraceReader::readModules().
-  constexpr size_t kRec = 78;
-  std::vector<ModuleInfo> out;
-  std::vector<std::byte> payload;
-  for (const FooterRec c : std::vector<FooterRec>(reader.chunks().begin(), reader.chunks().end())) {
-    if (c.type != static_cast<uint32_t>(ChunkType::Modules)) continue;
-    TACHYON_TRY(reader.readChunk(c, payload));
-    if (c.record_count > kMaxRecordsPerChunk || payload.size() != c.record_count * kRec)
-      return makeError(ErrorCode::CorruptData, "Modules chunk size mismatch");
-    for (size_t i = 0; i < c.record_count; ++i) {
-      const std::byte* p = payload.data() + i * kRec;
-      ModuleInfo m;
-      std::memcpy(&m.base, p + 4, 8);
-      std::memcpy(&m.size, p + 12, 8);
-      std::memcpy(&m.idKind, p + 24, 1);
-      std::memcpy(&m.idLen, p + 25, 1);
-      std::memcpy(&m.age, p + 58, 4);
-      out.push_back(m);
-    }
-  }
-  return out;
-}
 
 Result<Tally> computeReference(const std::filesystem::path& tachyonPath,
                                const std::filesystem::path& symbolsPath) {

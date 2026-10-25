@@ -24,18 +24,18 @@ TEST_P(SymbolsTest, SidecarIsSelfConsistent) {
   auto reader =
       trace::TraceReader::open(std::filesystem::path(TACHYON_GENERATED_FIXTURE_DIR) / (name + ".tachyon"));
   ASSERT_TRUE(reader.ok());
-  auto mods = readModuleInfos(*reader);
+  auto mods = reader->readModuleInfos();
   ASSERT_TRUE(mods.ok());
   ASSERT_EQ(sym["modules"].size(), mods->size());
 
   size_t moduleIdx = 0;
   for (const json& m : sym["modules"]) {
     EXPECT_EQ(m["module_idx"].get<size_t>(), moduleIdx);
-    const ModuleInfo& rec = (*mods)[moduleIdx++];
+    const trace::ModuleInfo& rec = (*mods)[moduleIdx++];
     EXPECT_EQ(m["base"].get<uint64_t>(), rec.base);
     EXPECT_EQ(m["size"].get<uint64_t>(), rec.size);
     EXPECT_EQ(m["age"].get<uint32_t>(), rec.age);
-    EXPECT_EQ(m["id"].get<std::string>().size(), static_cast<size_t>(rec.idLen) * 2);
+    EXPECT_EQ(m["id"].get<std::string>().size(), static_cast<size_t>(rec.id_len) * 2);
     uint64_t prevEnd = 0;
     for (const json& f : m["functions"]) {
       const uint64_t rva = f["start_rva"].get<uint64_t>(), size = f["size"].get<uint64_t>();

@@ -1,39 +1,44 @@
 {
   "scenarios": {
     "fibers": {
-      "fibers.expected.json": "6ddadf482140a2b67e7952b31b1c7dd75eb7917bdfa70142dc94600bf21d38ad",
+      "fibers.expected.json": "40029ec001e3c6dd66e4d2cceaad87f579dbf829d0b0c9b28d24d7ec480cabed",
       "fibers.symbols.json": "5662a12d5a3d9ce095c38be2f69826fcfb3fa2b7f83e4d39bb969fe72de30bd1",
-      "fibers.tachyon": "80c4357ec4f05f81be72b49ccff6498a27a3441c37b8d527e65533b1c7ee9346"
+      "fibers.tachyon": "9e2ad33d3aa6fe8ef88ff0bfdb558a342d11a4b5b00324da32096f782d2c998f"
     },
     "frames": {
-      "frames.expected.json": "996623026f99674a1e841ceb4b9bac9f40f6f7484106a6a3931c63d319a7be62",
+      "frames.expected.json": "8108a0dd07c24d76222104e54cf800c0f3052ba3db58c37f9488c38dac302c45",
       "frames.symbols.json": "efaa82bc677e43b21734e8b3eaa1a15095f5ce90d4efe01dda11bcd0e6c7ad7d",
-      "frames.tachyon": "e56855ba25c3f9c1b38deeba119e009ecaa7ecdf3f70ef48da1b082921ee7555"
+      "frames.tachyon": "9e5ac40e8c4f059d0faefd4a149d3693cfabe98460bf11219bf9d7e45d08f44c"
     },
     "medium": {
-      "medium.expected.json": "c700469f83dc710d3aa8cf7c25ae09f841a06263cba74d2ee53b5a2628d4fb74",
+      "medium.expected.json": "97f08f82e19fe4a342a7d048c0dc72857c1a40497a486c769715699365e81513",
       "medium.symbols.json": "d528bed6834ae7510ad30b24c75eb7a990ec9c17db44b103a919497a8be7dac6",
-      "medium.tachyon": "d40f1416e2383a42b44378ab27360e14b26ed74c09d7dce40a69750612941b3b"
+      "medium.tachyon": "96a40080c88b2f4b33b843983058083d0e2687b4e15798caacdf0baa3a166a00"
     },
     "partial": {
-      "partial.expected.json": "23587d45480c1dac375de57547f53b85db9c5a2707577d6942d625a1d3939448",
+      "partial.expected.json": "8d41f14d7c532bc1a1feb26367e81903b94dce56e22289d1442f844d8db911fe",
       "partial.symbols.json": "5094df92a340439728e55303b8e32db78be18b1827d67375b556ae790fe55926",
-      "partial.tachyon": "dac46e6f14882c8b762a7ee327f67dd80f57837f3b8b8300922d1bf401b7d055"
+      "partial.tachyon": "2abbbecfe622b0cb950a89020f374cb673282d3a5f4d4a79f10e8fed9c51e8b0"
+    },
+    "partial_torn": {
+      "partial_torn.expected.json": "f1d94ad05907304c83e7f2684959c9b3f509972ab535fcda4ed1c711d7353cc9",
+      "partial_torn.symbols.json": "3c658cf97e655b37df32702fd1da37617f014d7b89a68586fac225c5b59f0267",
+      "partial_torn.tachyon": "02ab56da50ec80c28ca86371a776633b568581c42f397331383ea72b7ade7476"
     },
     "recursion": {
-      "recursion.expected.json": "ea01202c0ae0e571b764c2435fc4f1363a2ccc73c8534669d0ce01d179e7bb43",
+      "recursion.expected.json": "fbc6c5d1ca2758c49b739e1da44b4e6ce428b2a13243017478b8431fe86a55a6",
       "recursion.symbols.json": "e0a45b7319f9a10a8fc25a5e7acb979a8c56aebfcfc990167696178e4a1ac784",
-      "recursion.tachyon": "4e762222f382e24ca31165c905526c38b1d13f202bf55f761e3b1c6510ea8eb2"
+      "recursion.tachyon": "dc2deff6167e3a2d1b3757f69af7ce34e2cdca629f30a7aa772d9cbb58731913"
     },
     "scopes": {
-      "scopes.expected.json": "a3a9e6811f2c6cf7b6997e4045980bd8342e7cd889daa26926c00c11146e81de",
+      "scopes.expected.json": "67b4a55c54b7fe3131fbe5920892bb610ea5e763d813c9d632fbeabee9cfbd65",
       "scopes.symbols.json": "95eeac04bffdcdf224ecd263f7c8426d30a9a51afc80d6f70380945852b03aa0",
-      "scopes.tachyon": "14f089be787ad3bbfb83c9b303fe9978da0f82ad33a54aa64b5489ae23e89147"
+      "scopes.tachyon": "9d5b8a5b4b85b9e7f5db6e6d376afa04ef36daef0222ac7a1628fd2bb0c8bce0"
     },
     "tiny": {
-      "tiny.expected.json": "a1e5504e3d83d32de2043a54ea9f2bc035cc187cddd25d58333a735e8787ef7a",
+      "tiny.expected.json": "e8b95c31ef0e56536c43ad93c88ff651bc16c35a6e2c9cd849657b84596edd71",
       "tiny.symbols.json": "21a423efeed4ef912374ebe455f7dd1d5f6ce8c2f42fcaa8b8aaaa61f7fd0447",
-      "tiny.tachyon": "63a17ea119a3ca7523a656c4e1b4dc1832c1d779de275d4c11e431dab277222f"
+      "tiny.tachyon": "edb65e63030781ab2d28d60ebe5f11b6d84669753e5e2c436e47b8b711193a76"
     }
   },
   "schema": "tachyon-fixture-manifest-1"

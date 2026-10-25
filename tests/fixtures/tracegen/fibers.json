@@ -33,7 +33,6 @@
     {
       "tid": 401,
       "name": "FiberThread0",
-      "from_start": true,
       "mix": [ { "stack": "entry", "weight": 1 }, { "stack": "job", "weight": 3 } ],
       "intervals": [ { "state": "running", "dur_us": 500000 }, { "state": "waiting", "dur_us": 100 }, { "state": "running" } ],
       "fiber": {
@@ -49,7 +48,6 @@
     {
       "tid": 402,
       "name": "FiberThread1",
-      "from_start": true,
       "mix": [ { "stack": "job", "weight": 1 } ],
       "pattern": { "run_us": [ 10000, 20000 ], "wait_us": [ 1000, 3000 ] },
       "intervals": [ { "state": "running", "dur_us": 12000 }, { "state": "waiting", "dur_us": 2000 } ],
