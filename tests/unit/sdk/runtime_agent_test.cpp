@@ -151,6 +151,7 @@ TEST_F(AgentTest, AgentLossFallsBackToSidecarAndReconnects) {
   (void)Tachyon_EndEvent();
   Tachyon_Internal_Flush();
 
+  ASSERT_TRUE(waitFor([&] { return agent.instConnections() >= 1; }, 5000));
   agent.dropInstConnections();
   // Keep producing so the next write notices the broken pipe.
   ASSERT_TRUE(waitFor(
@@ -167,6 +168,41 @@ TEST_F(AgentTest, AgentLossFallsBackToSidecarAndReconnects) {
   const ParsedStream file = ParsedStream::parse(sdk_testing::readFile(sidecar));
   EXPECT_TRUE(file.errors.empty()) << (file.errors.empty() ? "" : file.errors.front());
   EXPECT_TRUE(file.headerSeen);
+}
+
+TEST_F(AgentTest, ReopenedSidecarDoesNotTruncateTheFirstPhase) {
+  const std::string address = sdk_testing::uniqueAgentAddress("reopen");
+  const auto sidecar = configure(address);
+  Tachyon_Internal_Restart();
+  ASSERT_EQ(Tachyon_Internal_WaitReady(5000), 2);
+  Tachyon_BeginEvent("phase1", nullptr, 0);
+  (void)Tachyon_EndEvent();
+  Tachyon_Internal_Flush();
+
+  FakeAgent agent(address);
+  ASSERT_TRUE(agent.ok());
+  ASSERT_TRUE(waitFor([] { return Tachyon_IsConnected() == 1; }, 8000));
+  ASSERT_TRUE(waitFor([&] { return agent.instConnections() >= 1; }, 5000));
+  agent.dropInstConnections();
+  const std::string first = sidecar.string();
+  ASSERT_TRUE(waitFor(
+      [&] {
+        Tachyon_BeginEvent("phase3", nullptr, 0);
+        (void)Tachyon_EndEvent();
+        return std::string(Tachyon_Internal_SidecarPath()) != first;
+      },
+      8000));
+  const std::filesystem::path second = Tachyon_Internal_SidecarPath();
+  EXPECT_EQ(second.filename().string(), "fallback.1.tachyon-inst");
+  Tachyon_Internal_Restart();
+
+  const ParsedStream a = ParsedStream::parse(sdk_testing::readFile(sidecar));
+  ASSERT_TRUE(a.errors.empty()) << a.errors.front();
+  ASSERT_EQ(a.select(FrameType::ScopeBegin).size(), 1u);
+  EXPECT_EQ(a.select(FrameType::ScopeBegin)[0]->id, "phase1");
+  const ParsedStream b = ParsedStream::parse(sdk_testing::readFile(second));
+  EXPECT_TRUE(b.errors.empty()) << (b.errors.empty() ? "" : b.errors.front());
+  EXPECT_TRUE(b.headerSeen);
 }
 
 TEST_F(AgentTest, UnsolicitedControlEventsAreDrainedWhileStreaming) {

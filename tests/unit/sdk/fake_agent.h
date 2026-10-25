@@ -151,16 +151,16 @@ class RawStreamListener {
       CloseHandle(ov.hEvent);
       if (!connected) return;
       m_pending = createInstance(false);
+      const unsigned gen0 = m_dropGeneration.load();
       ++m_connections;
-      m_readers.emplace_back([this, instance] { readLoop(instance); });
+      m_readers.emplace_back([this, instance, gen = gen0] { readLoop(instance, gen); });
       if (m_pending == INVALID_HANDLE_VALUE) return;
     }
   }
 
-  void readLoop(HANDLE pipe) {
+  void readLoop(HANDLE pipe, unsigned dropAt) {
     HANDLE readEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     std::vector<uint8_t> buffer(1 << 16);
-    const unsigned dropAt = m_dropGeneration.load();
     for (;;) {
       if (m_dropGeneration.load() != dropAt) break;
       OVERLAPPED ov{};
@@ -197,14 +197,14 @@ class RawStreamListener {
       if ((pfds[0].revents & POLLIN) == 0) continue;
       const int fd = ::accept(m_listenFd, nullptr, nullptr);
       if (fd < 0) continue;
+      const unsigned gen0 = m_dropGeneration.load();
       ++m_connections;
-      m_readers.emplace_back([this, fd] { readLoop(fd); });
+      m_readers.emplace_back([this, fd, gen = gen0] { readLoop(fd, gen); });
     }
   }
 
-  void readLoop(int fd) {
+  void readLoop(int fd, unsigned dropAt) {
     std::vector<uint8_t> buffer(1 << 16);
-    const unsigned dropAt = m_dropGeneration.load();
     while (!m_stop && m_dropGeneration.load() == dropAt) {
       pollfd pfd{fd, POLLIN, 0};
       const int pr = ::poll(&pfd, 1, 20);
