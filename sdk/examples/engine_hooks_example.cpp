@@ -32,6 +32,7 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -465,7 +466,13 @@ class RenderThread {
 int runCli(const std::string& args) {
   const char* exe = std::getenv("TACHYON_CLI");  // path override; default relies on PATH
   const std::string cmd = std::string(exe != nullptr ? exe : "tachyon-cli") + " " + args;
-  return std::system(cmd.c_str());
+  const int status = std::system(cmd.c_str());
+#if defined(_WIN32)
+  return status;  // std::system returns the command's exit code on Windows
+#else
+  if (status == -1) return -1;
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 1;  // decode the POSIX wait status
+#endif
 }
 
 long long currentPid() {

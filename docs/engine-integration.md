@@ -116,7 +116,7 @@ The profiler needs symbols and frame pointers; it cannot recover scopes or calls
 ```
 /Zi        # PDB debug info (use /Z7 only if you do not want a PDB; Tachyon needs a PDB)
 /Zo        # richer debug info for optimized code (inlined frames)
-/Oy-       # keep frame pointers (on x64 this mainly keeps the unwinder data honest in leaf functions)
+/Oy-       # keep frame pointers; MSVC ignores /Oy- on x64 (ETW walks x64 stacks via unwind data), so it only matters for x86
 /DEBUG:FULL        # linker: full PDB, not /DEBUG:FASTLINK
 /OPT:REF /OPT:ICF  # fine to keep; they do not remove symbols
 ```
@@ -132,7 +132,7 @@ cleaned: use `/DEBUG:FULL` for anything you archive.
 -Wl,--build-id        # linker: embed a GNU build-id note (Clang's driver often does this; be explicit)
 ```
 
-Linux capture uses `perf_event_open` with frame-pointer callchains, so *every* function (including leaf
+Linux capture (**available after WP-70**; scheduler events after WP-71) uses `perf_event_open` with frame-pointer callchains, so *every* function (including leaf
 functions and the system libraries you control) must keep its frame pointer. Do not strip release binaries
 before archiving them (section 4.3).
 
@@ -166,7 +166,7 @@ store for as long as you want to open old captures.
 The viewer finds PDBs by the `ModuleRec` identity (PDB GUID+age, or PE timestamp+size when no CodeView record
 exists) through a local cache, then your symbol server. Pointing the viewer at the store over HTTP and the
 two-tier cache arrive with the symbol server client: **available after WP-21**. Until then, keep the PDBs next
-to the executables in the machine that opens the capture (the DIA provider also searches there).
+to the executables in the machine that opens the capture (the symbol locator searches next to the module path first: **available after WP-21/WP-22**).
 
 ### 4.2 Build ids (Linux)
 
@@ -189,7 +189,7 @@ objcopy --strip-debug --add-gnu-debuglink=engine.debug engine
 
 Serve that directory with `debuginfod` (`debuginfod -F <store>`) and give clients `DEBUGINFOD_URLS`. The
 `.gnu_debuglink`/debuginfod lookup in the viewer is part of the symbol locator: **available after WP-21**
-(libdw provider: WP-22).
+(libdw/DWARF provider: WP-72; DIA/PDB provider: WP-22).
 
 ## 5. Instrumenting the engine
 
@@ -292,7 +292,7 @@ Lock waits are recognised through the reserved color `TACHYON_LOCK_COLOR_SENTINE
 SDK sets for you: do not use that color elsewhere. If `lockName` is `NULL` the event is called
 `Tachyon.LockAcquire`. Wrap only locks that can actually block (contended mutexes, `SRWLOCK`, futex-based
 locks); a `try_lock` fast path does not need an event. Combined with context-switch data, the viewer then shows
-who held the lock (the callstack that unblocked the waiter).
+who held the lock (the callstack that unblocked the waiter; on Linux this needs scheduler events, **available after WP-71**).
 
 ### 5.5 Frame marks on main and render threads
 
@@ -389,7 +389,12 @@ Flushing from the engine uses the SDK. Start and stop are agent commands, so the
 ```cpp
 int runCli(const std::string& args) {
   const char* exe = std::getenv("TACHYON_CLI");                       // optional path override
-  return std::system(((exe ? exe : "tachyon-cli") + std::string(" ") + args).c_str());
+  const int status = std::system(((exe ? exe : "tachyon-cli") + std::string(" ") + args).c_str());
+#if defined(_WIN32)
+  return status;                                                   // already the exit code on Windows
+#else
+  return status == -1 ? -1 : (WIFEXITED(status) ? WEXITSTATUS(status) : 1);  // <sys/wait.h>
+#endif
 }
 
 if (line == "prof.flush")  return Tachyon_RequestFlush("console") ? 0 : 1;
@@ -428,8 +433,13 @@ std::string agentCall(const std::string& path, const std::string& requestLine) {
   if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
     const std::string line = requestLine + "\n";
     if (::write(fd, line.data(), line.size()) == static_cast<ssize_t>(line.size())) {
-      char c;
-      while (::read(fd, &c, 1) == 1 && c != '\n') reply.push_back(c);   // unsolicited events may precede it
+      // Unsolicited {"event":...} lines may arrive first: skip lines that carry no "id".
+      for (;;) {
+        reply.clear();
+        char c;
+        while (::read(fd, &c, 1) == 1 && c != '\n') reply.push_back(c);
+        if (reply.empty() || reply.find("\"id\"") != std::string::npos) break;
+      }
     }
   }
   ::close(fd);
@@ -570,5 +580,6 @@ Verification
 | Agent ingests the instrumentation stream and merges it into a `.tachyon` capture | available after WP-52 |
 | Windows ETW capture, 8 kHz sampling, context switches | available after WP-11 |
 | Flight recorder end to end (circular buffer dump on `flush`) | available after WP-60 |
-| Symbol server client, `.gnu_debuglink`/debuginfod lookup, local cache | available after WP-21 |
+| Symbol server client, `.gnu_debuglink`/debuginfod lookup, local cache | available after WP-21 (DWARF provider WP-72, DIA provider WP-22) |
+| Linux capture (`perf_event_open` sampling, scheduler events) | available after WP-70 / WP-71 |
 | GPU clock calibration records | needs an SDK API addition (not in API version 1) |

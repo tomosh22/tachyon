@@ -42,7 +42,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-52 | Agent-side ingestion and merge | — | not started | wp/52-ingestion | |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
-| WP-55 | Engine integration guide and samples | E | in review | wp/55-integration-guide | 2026-10-25 |
+| WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
 | WP-60 | Flight recorder mode | — | not started | wp/60-flight-recorder | |
 | WP-61 | Remote capture | — | not started | wp/61-remote | |
 | WP-62 | CI report tool | — | not started | wp/62-report | |
