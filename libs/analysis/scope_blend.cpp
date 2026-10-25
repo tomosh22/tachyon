@@ -1,5 +1,6 @@
 #include "analysis/scope_blend.h"
 
+#include "analysis/detail/cancellable_sort.h"
 #include "analysis/detail/parallel.h"
 #include "analysis/fibers.h"
 #include "analysis/query_cache.h"
@@ -139,6 +140,7 @@ Result<BlendIndex> buildBlendIndex(const model::TraceModel& m, const PairedScope
   if (fibers != nullptr && fibers->fiberAware) {
     idx.byFiber = true;
     for (const FiberLane& lane : fibers->lanes) {
+      if (cancel.requested()) return makeError(ErrorCode::Cancelled, "query cancelled");
       std::vector<ScopeSegment> logical;
       if (!sweepLane(lane.scopes, trie, cancel, polled,
                      [&](uint64_t b, uint64_t e, uint32_t n) { logical.push_back(ScopeSegment{b, e, n}); }))
@@ -146,6 +148,8 @@ Result<BlendIndex> buildBlendIndex(const model::TraceModel& m, const PairedScope
       // Intersect with the runs (both sorted and disjoint): the lane's scopes only show where it really ran.
       size_t r = 0;
       for (const ScopeSegment& g : logical) {
+        if ((++polled & 0xFFFFu) == 0 && cancel.requested())
+          return makeError(ErrorCode::Cancelled, "query cancelled");
         while (r < lane.runs.size() && lane.runs[r].end <= g.begin) ++r;
         for (size_t k = r; k < lane.runs.size() && lane.runs[k].begin < g.end; ++k) {
           const uint64_t b = std::max(g.begin, lane.runs[k].begin), e = std::min(g.end, lane.runs[k].end);
@@ -155,11 +159,15 @@ Result<BlendIndex> buildBlendIndex(const model::TraceModel& m, const PairedScope
       }
     }
     for (std::vector<ScopeSegment>& v : idx.byThread) {
-      std::sort(v.begin(), v.end(),
-                [](const ScopeSegment& a, const ScopeSegment& b) { return a.begin < b.begin; });
+      if (!detail::cancellableSort(
+              v, [](const ScopeSegment& a, const ScopeSegment& b) { return a.begin < b.begin; }, cancel))
+        return makeError(ErrorCode::Cancelled, "query cancelled");
       uint64_t prevEnd = 0;
       size_t w = 0;
-      for (ScopeSegment g : v) {  // lanes never overlap on a thread; guard against inconsistent events
+      for (size_t i = 0; i < v.size(); ++i) {  // lanes never overlap on a thread; guard against bad events
+        if ((i & 0xFFFFu) == 0xFFFFu && cancel.requested())
+          return makeError(ErrorCode::Cancelled, "query cancelled");
+        ScopeSegment g = v[i];
         g.begin = std::max(g.begin, prevEnd);
         if (g.end <= g.begin) continue;
         prevEnd = g.end;
