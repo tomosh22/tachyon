@@ -1,5 +1,6 @@
 #include "viewer/app.h"
 
+#include "analysis/thread_states.h"
 #include "core/log.h"
 #include "viewer/builtin_panels.h"
 #include "viewer/paths.h"
@@ -80,6 +81,7 @@ bool App::init(std::string& error) {
   m_rendererUp = true;
 
   m_panels.add(makeTraceInfoPanel());
+  m_panels.add(makeThreadsTimelinePanel());
   m_selectionSub = m_selection.subscribe([this](const SelectionState& state, SelectionField field) {
     const PanelContext context = panelContext();
     for (PanelEntry& e : m_panels.entries()) e.panel->onSelectionChanged(context, state, field);
@@ -94,6 +96,10 @@ PanelContext App::panelContext() const {
   c.document = m_document.get();
   c.selection = const_cast<SelectionBus*>(&m_selection);
   c.settings = &m_settings;
+  c.jobs = const_cast<JobQueue*>(&m_jobs);
+  c.documentGeneration = m_documentGeneration;
+  c.redrawFn = [](void* app) { static_cast<App*>(app)->requestRedraw(); };
+  c.redrawUser = const_cast<App*>(this);
   return c;
 }
 
@@ -149,6 +155,7 @@ void App::notifyDocumentChanged() {
 
 void App::onDocumentLoaded(std::shared_ptr<Document> document) {
   m_document = std::move(document);
+  ++m_documentGeneration;
   m_lastError.clear();
   m_selection.clear();
   m_settings.addRecentFile(pathToUtf8(std::filesystem::absolute(m_document->path())));
@@ -159,6 +166,7 @@ void App::onDocumentLoaded(std::shared_ptr<Document> document) {
 void App::closeDocument() {
   if (!m_document) return;
   m_document.reset();
+  ++m_documentGeneration;
   m_selection.clear();
   notifyDocumentChanged();
 }
@@ -175,6 +183,12 @@ void App::openFile(const std::filesystem::path& path) {
         model::LoadOptions options;
         options.cancel = ctx.cancelFlag();
         loaded->emplace(model::TraceModel::load(path, options, [&ctx](float f) { ctx.setProgress(f); }));
+        // The timeline and the analysis queries need the thread state intervals (WP-31); build them while the
+        // model is still mutable, before it is shared as const.
+        if (loaded->has_value() && (*loaded)->ok() && !ctx.cancelled()) {
+          const Result<void> states = analysis::buildThreadStates((*loaded)->value());
+          if (!states.ok()) TACHYON_LOG_WARN("thread states: {}", states.error().toString());
+        }
       },
       [this, path, loaded](JobQueue::JobId id, JobOutcome outcome) {
         if (id != m_openJob) return;  // superseded by a newer open
