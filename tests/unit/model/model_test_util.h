@@ -4,10 +4,10 @@
 #include "core/hash.h"
 #include "model/model.h"
 
-#include <unistd.h>
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -33,8 +33,10 @@ class TempDir {
  public:
   TempDir() {
     static std::atomic<uint32_t> counter{0};
-    m_path = std::filesystem::temp_directory_path() /
-             ("tachyon_model_test_" + std::to_string(::getpid()) + "_" + std::to_string(counter++));
+    m_path =
+        std::filesystem::temp_directory_path() /
+        ("tachyon_model_test_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+         "_" + std::to_string(counter++));
     std::filesystem::create_directories(m_path);
   }
   ~TempDir() {
