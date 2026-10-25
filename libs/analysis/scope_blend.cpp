@@ -263,11 +263,11 @@ class WeightTable {
 
   // Padding keeps the mutable fields of neighbouring workers' tables (they sit in one vector) on different
   // cache lines: false sharing made the accumulation twice as slow.
-  char m_padHead[64] = {};
+  [[maybe_unused]] char m_padHead[64] = {};
   std::vector<Slot> m_slots;
   size_t m_mask = 0, m_count = 0;
   unsigned m_shift = 0;
-  char m_padTail[64] = {};
+  [[maybe_unused]] char m_padTail[64] = {};
 };
 
 }  // namespace
