@@ -26,3 +26,7 @@ endif()
 if(WIN32)
   target_compile_definitions(tachyon_sdk_shared INTERFACE TACHYON_SDK_USE_SHARED)
 endif()
+
+if(TACHYON_BUILD_TESTS)
+  add_subdirectory(examples)
+endif()
