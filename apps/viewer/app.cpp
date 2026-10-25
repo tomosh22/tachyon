@@ -44,6 +44,7 @@ App::App(std::unique_ptr<IRenderer> renderer, AppOptions options)
 
 App::~App() {
   m_jobs.cancelAll();
+  m_document.reset();  // joins the symbol workers (they wake the renderer) before the renderer is shut down
   if (m_selectionSub != SelectionBus::kNoSubscription) m_selection.unsubscribe(m_selectionSub);
   if (m_imgui) {
     // Persist layout/settings while the context is still alive.
@@ -183,15 +184,19 @@ void App::startSymbolResolution(Document& document) {
     if (!added.ok()) TACHYON_LOG_WARN("symbols: {}: {}", pathToUtf8(sidecar), added.error().toString());
   }
   m_symbolMailbox = std::make_shared<SymbolMailbox>();
+  IRenderer* renderer = m_renderer.get();
+  m_symbolMailbox->wake = [renderer] { renderer->wake(); };
   document.setSymbols(service);
-  // The service reads the model's frames and modules and never writes them from a worker (Module::state is
-  // only written by waitAll(), which the viewer does not call; states are read with moduleState()).
   auto mailbox = m_symbolMailbox;
+  // CONST_CAST: resolveAllAsync() wants a non-const model, but the service only READS the frames and modules
+  // from its workers. It writes the model (Module::state) solely in waitAll(), which the viewer must never
+  // call while panels read the model; module states are read with SymbolService::moduleState() instead.
   service->resolveAllAsync(const_cast<model::TraceModel&>(document.model()),
                            [mailbox](ModuleIdx module, symbols::SymbolState state) {
                              const std::lock_guard<std::mutex> lock(mailbox->mutex);
                              mailbox->events.emplace_back(module, state);
                              mailbox->dirty.store(true);
+                             if (mailbox->wake) mailbox->wake();
                            });
 }
 

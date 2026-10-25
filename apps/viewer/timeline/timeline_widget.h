@@ -153,7 +153,8 @@ class TimelineWidget {
 
   // Interaction state (not derived from the document).
   std::optional<TickRange> m_selection;
-  std::optional<TickRange> m_appliedRange;  // the range applySelectionAsFilter() put on the bus
+  std::optional<TickRange> m_appliedRange;         // the range applySelectionAsFilter() put on the bus
+  std::optional<FunctionKey> m_publishedFunction;  // the key this widget last put on the bus for a click
   FramePosition m_selectedPosition = FramePosition::Leaf;
   CallstackIdx m_selectedNode;  // frame behind the last click (re-keyed when symbols resolve)
   std::vector<std::string> m_tooltip;

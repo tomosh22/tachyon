@@ -814,3 +814,138 @@ TEST(TimelineWidget, RowCachesAreKeyedBySymbolGeneration) {
   frame();
   EXPECT_EQ(widget.frameStats().bandQueries, 0u);
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// WP-42b follow-up: the clicked frame must never overwrite a selection someone else made.
+
+namespace {
+
+// A widget driven by hand (own window, own bus) so the symbol generation and the service can be changed
+// between frames.
+struct ManualTimeline {
+  explicit ManualTimeline(Harness& h) : doc(h.app.document().get()) {
+    widget.options().buildInline = true;
+    ctx.document = doc;
+    ctx.selection = &bus;
+    ctx.documentGeneration = 1;
+    ctx.symbols = nullptr;  // unresolved keys until a test installs the service
+    ctx.symbolGeneration = 1;
+    bus.subscribe([this](const SelectionState& state, SelectionField field) {
+      widget.onSelectionChanged(ctx, state, field);
+    });
+  }
+
+  void frame() {
+    ImGuiIO& io = ImGui::GetIO();
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(1200, 600));
+    ImGui::Begin("manual");
+    widget.draw(ctx);
+    ImGui::End();
+    ImGui::Render();
+  }
+
+  // Clicks along the first row's strip until a function gets selected. Returns true if one was.
+  bool clickSomeFunction() {
+    frame();
+    frame();
+    const TimelineScreenGeometry g = widget.screenGeometry();
+    ImGuiIO& io = ImGui::GetIO();
+    const float y = g.rowsContentY0 + 19.0f * ImGui::GetFontSize() / 13.0f;
+    for (float f = 0.05f; f < 0.97f; f += 0.03f) {
+      io.AddMousePosEvent(g.plotX0 + g.plotWidth * f, y);
+      frame();
+      io.AddMouseButtonEvent(0, true);
+      frame();
+      io.AddMouseButtonEvent(0, false);
+      frame();
+      if (bus.state().selectedFunction) return true;
+    }
+    return false;
+  }
+
+  const Document* doc;
+  TimelineWidget widget;
+  SelectionBus bus;
+  PanelContext ctx;
+};
+
+}  // namespace
+
+TEST(TimelineWidget, ResolvingModulesRekeysTheClickedFunctionOnlyWhileItIsStillSelected) {
+  Harness h;
+  h.open("medium.tachyon");
+  h.waitSymbols();
+  ManualTimeline t(h);
+  ASSERT_TRUE(t.clickSomeFunction());
+  const FunctionKey unresolved = *t.bus.state().selectedFunction;
+
+  // The symbols arrive: the clicked frame's key changes and the bus follows (nobody else touched it).
+  t.ctx.symbols = h.app.document()->symbols().get();
+  t.ctx.symbolGeneration = 2;
+  t.frame();
+  ASSERT_TRUE(t.bus.state().selectedFunction.has_value());
+  const FunctionKey resolved = *t.bus.state().selectedFunction;
+  EXPECT_EQ(resolved.module, unresolved.module);
+  EXPECT_NE(resolved.value, unresolved.value) << "the frame sits mid-function: start rva differs";
+}
+
+TEST(TimelineWidget, SymbolGenerationDoesNotRestoreAnOldClickOverAnotherPanelsSelection) {
+  Harness h;
+  h.open("medium.tachyon");
+  h.waitSymbols();
+  ManualTimeline t(h);
+  ASSERT_TRUE(t.clickSomeFunction());
+
+  // (A) Another panel selects K2, then a module resolves: K2 stays.
+  const FunctionKey k2{ModuleIdx(0), 0x123456};
+  t.bus.setSelectedFunction(k2);
+  t.ctx.symbols = h.app.document()->symbols().get();
+  t.ctx.symbolGeneration = 2;
+  t.frame();
+  EXPECT_EQ(t.bus.state().selectedFunction, k2);
+  t.ctx.symbolGeneration = 3;
+  t.frame();
+  EXPECT_EQ(t.bus.state().selectedFunction, k2);
+
+  // Another panel clearing the selection is respected too.
+  ASSERT_TRUE(t.clickSomeFunction());
+  t.bus.setSelectedFunction(std::nullopt);
+  t.ctx.symbolGeneration = 4;
+  t.frame();
+  EXPECT_FALSE(t.bus.state().selectedFunction.has_value());
+}
+
+TEST(TimelineWidget, StaleClickNodeIsNotEvaluatedAgainstTheNextDocument) {
+  Harness h;
+  h.open("medium.tachyon");
+  h.waitSymbols();
+  ManualTimeline t(h);
+  ASSERT_TRUE(t.clickSomeFunction());
+  const FunctionKey clicked = *t.bus.state().selectedFunction;
+
+  // (B) Document A closes and B opens: the node index of the click means nothing in B. The bus keeps whatever
+  // it holds, and a later symbol generation change must not rewrite it from the stale node.
+  t.widget.onDocumentChanged(nullptr);
+  EXPECT_FALSE(t.widget.hasDocument());
+  const FunctionKey foreign{ModuleIdx(1), 0xabcdef};
+  t.bus.setSelectedFunction(foreign);
+  t.ctx.documentGeneration = 2;  // "document B"
+  t.ctx.symbols = h.app.document()->symbols().get();
+  t.ctx.symbolGeneration = 5;
+  t.frame();
+  EXPECT_EQ(t.bus.state().selectedFunction, foreign);
+  t.ctx.symbolGeneration = 6;  // B's symbols resolve
+  t.frame();
+  EXPECT_EQ(t.bus.state().selectedFunction, foreign);
+
+  // Even if the bus still held the old click's key, a reset widget must not re-key it.
+  t.bus.setSelectedFunction(clicked);
+  t.widget.onDocumentChanged(nullptr);
+  t.frame();
+  t.ctx.symbolGeneration = 7;
+  t.frame();
+  EXPECT_EQ(t.bus.state().selectedFunction, clicked);
+}

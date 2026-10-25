@@ -239,6 +239,9 @@ void TimelineWidget::resetDocument() {
   m_doc.reset();
   m_documentPtr = nullptr;
   m_selection.reset();
+  m_selectedNode = CallstackIdx();  // node indices belong to the old model
+  m_selectedPosition = FramePosition::Leaf;
+  m_publishedFunction.reset();
   m_drag = {};
   m_hoverPublished = false;
 }
@@ -281,9 +284,14 @@ void TimelineWidget::startBuild(const PanelContext& context) {
 
 void TimelineWidget::onSelectionChanged(const PanelContext& context, const SelectionState& state,
                                         SelectionField field) {
-  (void)state;
   if (field == SelectionField::All) {
     m_selection.reset();  // a new document or an explicit reset
+  }
+  if ((field == SelectionField::SelectedFunction || field == SelectionField::All) &&
+      state.selectedFunction != m_publishedFunction) {
+    // Someone else changed the function selection: the clicked frame is no longer ours to keep re-keying.
+    m_selectedNode = CallstackIdx();
+    m_publishedFunction.reset();
   }
   if (field != SelectionField::Hovered) context.requestRedraw();
 }
@@ -420,9 +428,12 @@ void TimelineWidget::draw(const PanelContext& context) {
     // row caches and refresh the key of the clicked frame.
     m_doc->symbolGeneration = context.symbolGeneration;
     for (RowCache& r : m_doc->rows) r.valid = false;
-    if (m_selectedNode.valid() && context.selection && context.selection->state().selectedFunction) {
-      context.selection->setSelectedFunction(
-          functionKeyForNode(*m_doc->model, context.symbols, m_selectedNode, m_selectedPosition));
+    // Only while the bus still holds the key this widget published for the click (nobody else changed it).
+    if (m_selectedNode.valid() && context.selection && m_publishedFunction &&
+        context.selection->state().selectedFunction == m_publishedFunction) {
+      m_publishedFunction =
+          functionKeyForNode(*m_doc->model, context.symbols, m_selectedNode, m_selectedPosition);
+      context.selection->setSelectedFunction(m_publishedFunction);
     }
   }
   if (!m_doc->buildStarted && !m_options.deferLodBuild) startBuild(context);
@@ -1065,8 +1076,9 @@ void TimelineWidget::applyClick(const PanelContext& context, const Hit& hit) {
   if (hit.inPlot && hit.stack.valid()) {
     m_selectedNode = hit.stack;
     m_selectedPosition = hit.stackPosition;
-    context.selection->setSelectedFunction(
-        functionKeyForNode(*m_doc->model, context.symbols, hit.stack, hit.stackPosition));
+    // Recorded before publishing: the bus callback (onSelectionChanged) must recognise this key as ours.
+    m_publishedFunction = functionKeyForNode(*m_doc->model, context.symbols, hit.stack, hit.stackPosition);
+    context.selection->setSelectedFunction(m_publishedFunction);
   }
 }
 

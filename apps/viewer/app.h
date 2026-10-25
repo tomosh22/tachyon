@@ -14,23 +14,26 @@
 #include <array>
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 struct ImGuiContext;
 
 namespace tachyon::viewer {
-// Module state changes reported by the symbol workers, handed to the main thread (thread-safe).
+
+// Module state changes reported by the symbol workers, handed to the main thread.
 struct SymbolMailbox {
   std::mutex mutex;
   std::vector<std::pair<ModuleIdx, symbols::SymbolState>> events;
   std::atomic<bool> dirty{false};
+  // Called (from the worker) after each push; set before the workers start and never changed afterwards.
+  std::function<void()> wake;
 };
-}  // namespace tachyon::viewer
-
-namespace tachyon::viewer {
 
 struct AppOptions {
   // settings.json to use; empty means <user config dir>/settings.json (no persistence if that is unknown).
@@ -97,6 +100,8 @@ class App {
   void registerCommands();
   void onDocumentLoaded(std::shared_ptr<Document> document);
   void closeDocument();
+  // Main-thread only. Installs a SymbolService on `document` and starts resolving; the workers report through
+  // m_symbolMailbox (thread-safe), which wakes the event loop.
   void startSymbolResolution(Document& document);
   void notifyDocumentChanged();
   void applyPendingStyle();

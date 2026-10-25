@@ -23,6 +23,7 @@ class SdlGlRenderer final : public IRenderer {
       return false;
     }
     m_sdlUp = true;
+    m_wakeEvent = SDL_RegisterEvents(1);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -85,6 +86,16 @@ class SdlGlRenderer final : public IRenderer {
     return out;
   }
 
+  void wake() override {
+    // SDL_PushEvent is thread-safe. A failed push (queue full) is harmless: the idle timeout still fires.
+    const Uint32 type = m_wakeEvent;
+    if (type == 0 || type == static_cast<Uint32>(-1)) return;
+    SDL_Event e;
+    SDL_zero(e);
+    e.type = type;
+    SDL_PushEvent(&e);
+  }
+
   void beginFrame() override {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
@@ -117,6 +128,7 @@ class SdlGlRenderer final : public IRenderer {
 
  private:
   void handle(const SDL_Event& e, PlatformEvents& out) {
+    if (e.type == m_wakeEvent && m_wakeEvent != 0) return;  // wake(): not input
     ImGui_ImplSDL2_ProcessEvent(&e);
     out.hadInput = true;
     switch (e.type) {
@@ -138,6 +150,7 @@ class SdlGlRenderer final : public IRenderer {
 
   SDL_Window* m_window = nullptr;
   SDL_GLContext m_context = nullptr;
+  Uint32 m_wakeEvent = 0;  // set once in init(), read by wake() from worker threads afterwards
   bool m_sdlUp = false, m_platformUp = false, m_glUp = false;
 };
 

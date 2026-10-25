@@ -82,8 +82,9 @@ enum class FramePosition : uint8_t { Leaf, NonLeaf };
 // function key (selection, hover, highlight, by-function colours): when WP-32b's caller variant of
 // functionKeyFor lands, only the body of this function changes. `position` and `kernelLeaf` (the sample's
 // kernel-leaf flag) are the inputs that rule needs; until then every frame is resolved as a leaf.
-// Key of the function the leaf frame of `node` belongs
-// to (spec 3.7, WP-20): symbols::functionKeyFor when `symbols` is given, otherwise the unresolved form
+//
+// Returns the key of the function the frame of `node` belongs to (spec 3.7, WP-20): symbols::functionKeyFor
+// when `symbols` is given, otherwise the unresolved form
 // ({module, rva} or {invalid, address}). nullopt for invalid nodes and the root. Keys change when the frame's
 // module resolves.
 std::optional<symbols::FunctionKey> functionKeyForNode(const model::TraceModel& model,
