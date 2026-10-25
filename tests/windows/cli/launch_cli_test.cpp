@@ -251,7 +251,7 @@ class LaunchCliTest : public ::testing::Test {
     std::error_code ec;
     fs::remove_all(m_dir, ec);
     fs::create_directories(m_dir);
-    m_address = R"(\\.\pipe\tachyon-launchtest-)" + std::to_string(GetCurrentProcessId()) + "-" +
+    m_address = "\\\\.\\pipe\\tachyon-launchtest-" + std::to_string(GetCurrentProcessId()) + "-" +
                 std::to_string(static_cast<unsigned>(Clock::now().time_since_epoch().count() & 0xFFFFFF));
     m_agent =
         Process::spawn(TACHYON_AGENT_EXE, {"--backend", "etw", "--socket", m_address}, m_dir / "agent.log");

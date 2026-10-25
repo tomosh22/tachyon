@@ -12,14 +12,14 @@ TEST(QuoteArgument, PlainEmptyAndSpecial) {
   EXPECT_EQ(quoteArgument("a b"), "\"a b\"");
   EXPECT_EQ(quoteArgument("a\tb"), "\"a\tb\"");
   EXPECT_EQ(quoteArgument("say \"hi\""), "\"say \\\"hi\\\"\"");
-  EXPECT_EQ(quoteArgument(R"(C:\dir\file.txt)"), R"(C:\dir\file.txt)");  // backslashes alone are literal
-  EXPECT_EQ(quoteArgument(R"(C:\my dir\)"), R"("C:\my dir\\")");         // trailing backslashes double
-  EXPECT_EQ(quoteArgument(R"(a\"b)"), R"("a\\\"b")");                    // backslash before a quote
+  EXPECT_EQ(quoteArgument("C:\\dir\\file.txt"), "C:\\dir\\file.txt");  // backslashes alone are literal
+  EXPECT_EQ(quoteArgument("C:\\my dir\\"), "\"C:\\my dir\\\\\"");      // trailing backslashes double
+  EXPECT_EQ(quoteArgument("a\\\"b"), "\"a\\\\\\\"b\"");                // backslash before a quote
 }
 
 TEST(BuildCommandLine, QuotesExeAndArguments) {
   EXPECT_EQ(buildCommandLine("C:\\Program Files\\game.exe", {"--scenario", "spin", "--name", "a b"}),
-            R"("C:\Program Files\game.exe" --scenario spin --name "a b")");
+            "\"C:\\Program Files\\game.exe\" --scenario spin --name \"a b\"");
   EXPECT_EQ(buildCommandLine("game.exe", {}), "game.exe");
 }
 
@@ -32,17 +32,17 @@ TEST(SplitCommandLine, BasicTokens) {
 }
 
 TEST(SplitCommandLine, QuotesAndBackslashes) {
-  EXPECT_EQ(splitCommandLine(R"(a "b c" d)"), (std::vector<std::string>{"a", "b c", "d"}));
-  EXPECT_EQ(splitCommandLine(R"("" x)"), (std::vector<std::string>{"", "x"}));
-  EXPECT_EQ(splitCommandLine(R"(say \"hi\")"), (std::vector<std::string>{"say", "\"hi\""}));
-  EXPECT_EQ(splitCommandLine(R"(C:\dir\file.txt)"), (std::vector<std::string>{R"(C:\dir\file.txt)"}));
-  EXPECT_EQ(splitCommandLine(R"("C:\my dir\\" y)"), (std::vector<std::string>{R"(C:\my dir\)", "y"}));
-  EXPECT_EQ(splitCommandLine(R"(pre"mid dle"post)"), (std::vector<std::string>{"premid dlepost"}));
+  EXPECT_EQ(splitCommandLine("a \"b c\" d"), (std::vector<std::string>{"a", "b c", "d"}));
+  EXPECT_EQ(splitCommandLine("\"\" x"), (std::vector<std::string>{"", "x"}));
+  EXPECT_EQ(splitCommandLine("say \\\"hi\\\""), (std::vector<std::string>{"say", "\"hi\""}));
+  EXPECT_EQ(splitCommandLine("C:\\dir\\file.txt"), (std::vector<std::string>{"C:\\dir\\file.txt"}));
+  EXPECT_EQ(splitCommandLine("\"C:\\my dir\\\\\" y"), (std::vector<std::string>{"C:\\my dir\\", "y"}));
+  EXPECT_EQ(splitCommandLine("pre\"mid dle\"post"), (std::vector<std::string>{"premid dlepost"}));
 }
 
 TEST(SplitCommandLine, RoundTripsQuoteArgument) {
-  const std::vector<std::string> args = {"plain",     "with space",  "",          "q\"uote",
-                                         R"(a\b)",    R"(a b\)",     R"(a\"b c)", R"(\\server\share x)",
+  const std::vector<std::string> args = {"plain",     "with space",  "",         "q\"uote",
+                                         "a\\b",      "a b\\",       "a\\\"b c", "\\\\server\\share x",
                                          "tab\there", "--flag=\"v\""};
   std::string line;
   for (const std::string& a : args) {
