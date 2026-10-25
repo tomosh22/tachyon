@@ -1,0 +1,80 @@
+#include "capture/windows_etw/process_tree.h"
+
+#include "capture/windows_etw/glob_match.h"
+
+#include <algorithm>
+
+namespace tachyon::capture::etw {
+
+std::string executablePathOf(std::string_view cl) {
+  size_t i = 0;
+  while (i < cl.size() && (cl[i] == ' ' || cl[i] == '\t')) ++i;
+  cl.remove_prefix(i);
+  if (cl.empty()) return {};
+  if (cl.front() == '"') {
+    const size_t end = cl.find('"', 1);
+    return std::string(cl.substr(1, end == std::string_view::npos ? std::string_view::npos : end - 1));
+  }
+  const size_t end = cl.find_first_of(" \t");
+  return std::string(cl.substr(0, end));
+}
+
+std::string baseNameOf(std::string_view path) {
+  const size_t sep = path.find_last_of("/\\");
+  return std::string(sep == std::string_view::npos ? path : path.substr(sep + 1));
+}
+
+bool matchesChildFilter(std::string_view filter, std::string_view imageName, std::string_view commandLine,
+                        bool ci) {
+  if (filter.empty()) return true;
+  const std::string exePath = executablePathOf(commandLine);
+  if (filter.find_first_of("/\\") != std::string_view::npos)
+    return !exePath.empty() && globMatch(filter, exePath, ci);
+  if (!imageName.empty() && globMatch(filter, baseNameOf(imageName), ci)) return true;
+  return !exePath.empty() && globMatch(filter, baseNameOf(exePath), ci);
+}
+
+ProcessTreeTracker::ProcessTreeTracker(std::vector<uint32_t> roots, bool followChildren,
+                                       std::string childFilter, bool caseInsensitive)
+    : m_follow(followChildren), m_filter(std::move(childFilter)), m_ci(caseInsensitive) {
+  for (uint32_t r : roots) {
+    if (r == 0 || std::find(m_targets.begin(), m_targets.end(), r) != m_targets.end()) continue;
+    m_targets.push_back(r);
+    m_live.insert(r);
+  }
+}
+
+bool ProcessTreeTracker::onProcessStart(const ProcessStartInfo& info) {
+  // A Start for a pid we think is alive means its End was missed (or the pid was reused): forget it.
+  m_live.erase(info.pid);
+  if (!m_follow || m_live.count(info.parentPid) == 0) return false;
+  if (!matchesChildFilter(m_filter, info.imageName, info.commandLine, m_ci)) {
+    ++m_rejected;
+    return false;
+  }
+  if (std::find(m_targets.begin(), m_targets.end(), info.pid) == m_targets.end()) {
+    m_targets.push_back(info.pid);
+    m_children.push_back({info.pid, info.parentPid, info.imageName});
+  }
+  m_live.insert(info.pid);
+  return true;
+}
+
+void ProcessTreeTracker::onProcessEnd(uint32_t pid) {
+  m_live.erase(pid);
+}
+
+bool ProcessTreeTracker::onEvent(const etlconvert::EtwEvent& e) {
+  if (e.provider != etlconvert::guids::kProcess) return false;
+  if (e.opcode != etlconvert::opcodes::kProcessStart && e.opcode != etlconvert::opcodes::kProcessEnd)
+    return false;
+  const auto p = etlconvert::decodeProcess(e.payload, e.version);
+  if (!p) return false;
+  if (e.opcode == etlconvert::opcodes::kProcessEnd) {
+    onProcessEnd(p->processId);
+    return false;
+  }
+  return onProcessStart({p->processId, p->parentId, p->imageFileName, p->commandLine});
+}
+
+}  // namespace tachyon::capture::etw

@@ -1,10 +1,13 @@
 #include "cli/cli.h"
 
+#include "capture/windows_etw/launch.h"
 #include "control/client.h"
 #include "control/protocol.h"
 #include "control/transport.h"
 
+#include <cerrno>
 #include <charconv>
+#include <cstdlib>
 #include <iomanip>
 #include <ostream>
 #include <sstream>
@@ -20,7 +23,9 @@ struct Parsed {
   bool json = false;
   int timeoutS = 600;
   int connectTimeoutMs = 0;
-  bool wait = false;
+  bool wait = false;       // start / stop: wait for capture_done
+  double durationS = 0.0;  // capture: stop after this many seconds (0: until the target exits)
+  bool noStart = false;    // start: park the launch
   std::string command;
   RequestBody request;
 };
@@ -33,11 +38,30 @@ bool parseUint(const std::string& s, uint32_t& out) {
   return true;
 }
 
+bool parseSeconds(const std::string& s, double& out) {
+  if (s.empty()) return false;
+  char* end = nullptr;
+  errno = 0;
+  const double v = std::strtod(s.c_str(), &end);
+  if (errno != 0 || end != s.c_str() + s.size() || !(v > 0.0) || v > 86400.0 * 7) return false;
+  out = v;
+  return true;
+}
+
+bool isStartLike(const std::string& command) {
+  return command == "start" || command == "capture";
+}
+
+bool hasWhitespace(const std::string& s) {
+  return s.find_first_of(" \t\n") != std::string::npos;
+}
+
 // Parses args into `p`. Returns an error message on usage errors, empty string on success.
 std::string parse(const std::vector<std::string>& args, Parsed& p) {
   StartRequest start;
   FlushRequest flush;
   bool haveMode = false, haveName = false, haveSeconds = false;
+  int targetFlags = 0;  // --launch / --attach / --system / --mode: exactly one
 
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string& a = args[i];
@@ -60,6 +84,7 @@ std::string parse(const std::vector<std::string>& args, Parsed& p) {
     };
     std::string err, v;
     uint32_t n = 0;
+    const bool startLike = isStartLike(p.command);
 
     if (a == "--socket" || a == "--pipe") {
       if (!needValue(p.address)) return "missing value for " + a;
@@ -75,48 +100,73 @@ std::string parse(const std::vector<std::string>& args, Parsed& p) {
       p.wait = true;
     } else if (a.rfind("--", 0) != 0 && p.command.empty()) {
       p.command = a;
-    } else if (p.command == "start" && a == "--mode") {
+    } else if (p.command == "capture" && a == "--duration") {
+      if (!needValue(v)) return "missing value for --duration";
+      if (!parseSeconds(v, p.durationS)) return "--duration expects a positive number of seconds: " + v;
+    } else if (startLike && a == "--launch") {
+      if (!needValue(start.exe)) return "missing value for --launch";
+      start.mode = capture::CaptureMode::Launch;
+      haveMode = true;
+      ++targetFlags;
+    } else if (startLike && a == "--attach") {
+      if (!needUint(start.pid, err)) return err;
+      start.mode = capture::CaptureMode::Attach;
+      haveMode = true;
+      ++targetFlags;
+    } else if (startLike && a == "--system") {
+      start.mode = capture::CaptureMode::System;
+      haveMode = true;
+      ++targetFlags;
+    } else if (startLike && a == "--mode") {
       if (!needValue(v)) return "missing value for --mode";
       auto m = capture::parseCaptureMode(v);
       if (!m) return "--mode must be launch, attach or system";
       start.mode = *m;
       haveMode = true;
-    } else if (p.command == "start" && a == "--exe") {
+      ++targetFlags;
+    } else if (startLike && a == "--exe") {
       if (!needValue(start.exe)) return "missing value for --exe";
-    } else if (p.command == "start" && a == "--cwd") {
+    } else if (startLike && a == "--cwd") {
       if (!needValue(start.cwd)) return "missing value for --cwd";
-    } else if (p.command == "start" && a == "--arg") {
+    } else if (startLike && a == "--arg") {
       if (!needValue(v)) return "missing value for --arg";
       start.args.push_back(v);
-    } else if (p.command == "start" && a == "--args") {
-      // Consumes every following token up to the next "--option".
-      while (i + 1 < args.size() && args[i + 1].rfind("--", 0) != 0) start.args.push_back(args[++i]);
-    } else if (p.command == "start" && a == "--env") {
+    } else if (startLike && a == "--args") {
+      if (i + 1 >= args.size()) return "missing value for --args";
+      if (hasWhitespace(args[i + 1])) {
+        // One command-line string: "--scenario spin --duration 3".
+        for (std::string& t : capture::etw::splitCommandLine(args[++i])) start.args.push_back(std::move(t));
+      } else {
+        // Legacy form: every following word up to the next "--option".
+        while (i + 1 < args.size() && args[i + 1].rfind("--", 0) != 0) start.args.push_back(args[++i]);
+      }
+    } else if (startLike && a == "--env") {
       if (!needValue(v)) return "missing value for --env";
       const size_t eq = v.find('=');
       if (eq == std::string::npos || eq == 0) return "--env expects KEY=VALUE";
       start.env[v.substr(0, eq)] = v.substr(eq + 1);
-    } else if (p.command == "start" && a == "--pid") {
+    } else if (startLike && a == "--pid") {
       if (!needUint(start.pid, err)) return err;
-    } else if (p.command == "start" && (a == "--hz" || a == "--sampling-hz")) {
+    } else if (startLike && (a == "--hz" || a == "--sampling-hz")) {
       if (!needUint(start.sampling_hz, err)) return err;
-    } else if (p.command == "start" && a == "--follow-children") {
+    } else if (startLike && a == "--follow-children") {
       start.follow_children = true;
-    } else if (p.command == "start" && a == "--child-filter") {
+    } else if (startLike && a == "--child-filter") {
       if (!needValue(start.child_filter)) return "missing value for --child-filter";
-    } else if (p.command == "start" && a == "--circular-mb") {
+    } else if (startLike && a == "--circular-mb") {
       if (!needUint(start.circular_mb, err)) return err;
-    } else if (p.command == "start" && (a == "--out" || a == "--out-path")) {
+    } else if (startLike && (a == "--out" || a == "--out-path")) {
       if (!needValue(start.out_path)) return "missing value for " + a;
-    } else if (p.command == "start" && a == "--defer-start") {
+    } else if (startLike && (a == "--no-start" || a == "--defer-start")) {
       start.start_immediately = false;
-    } else if (p.command == "start" && a == "--no-profile") {
+      p.noStart = true;
+    } else if (startLike && a == "--no-profile") {
       start.stackwalk.profile = false;
-    } else if (p.command == "start" && a == "--no-cswitch") {
+    } else if (startLike && a == "--no-cswitch") {
       start.stackwalk.cswitch = false;
-    } else if (p.command == "start" && a == "--no-readythread") {
+    } else if (startLike && a == "--no-readythread") {
       start.stackwalk.readythread = false;
-    } else if (p.command == "start" && a == "--no-kernel-stacks") {
+    } else if (startLike && a == "--no-kernel-stacks") {
       start.kernel_stacks = false;
     } else if (p.command == "flush" && a == "--name") {
       if (!needValue(flush.name)) return "missing value for --name";
@@ -135,8 +185,27 @@ std::string parse(const std::vector<std::string>& args, Parsed& p) {
     p.request = StopRequest{};
   } else if (p.command == "cancel") {
     p.request = CancelRequest{};
-  } else if (p.command == "start") {
-    if (!haveMode) return "start requires --mode";
+  } else if (p.command == "resume") {
+    // The trigger of a parked launch (see agent.h): a start whose only meaning is "now". The protocol insists
+    // on an exe for mode launch; the agent ignores everything else in this request.
+    StartRequest r;
+    r.mode = capture::CaptureMode::Launch;
+    r.exe = "-";
+    r.start_immediately = true;
+    p.request = std::move(r);
+  } else if (isStartLike(p.command)) {
+    if (!haveMode) return p.command + " requires a target: --launch EXE, --attach PID or --system";
+    if (targetFlags > 1) return "give exactly one of --launch, --attach, --system, --mode";
+    if (start.mode == capture::CaptureMode::Launch && start.exe.empty())
+      return "launch mode needs an executable (--launch EXE or --exe E)";
+    if (start.mode != capture::CaptureMode::Launch && p.noStart) return "--no-start applies to --launch only";
+    if (!start.follow_children && !start.child_filter.empty())
+      return "--child-filter needs --follow-children";
+    if (p.command == "capture") {
+      if (p.noStart) return "capture starts the recording itself; --no-start belongs to the start command";
+      if (start.mode == capture::CaptureMode::System && p.durationS <= 0.0)
+        return "capture --system needs --duration (nothing else ends a system capture)";
+    }
     p.request = std::move(start);
   } else if (p.command == "flush") {
     if (!haveName || !haveSeconds) return "flush requires --name and --seconds";
@@ -147,6 +216,8 @@ std::string parse(const std::vector<std::string>& args, Parsed& p) {
     return "unknown command: " + p.command;
   }
   if (p.wait && p.command != "start" && p.command != "stop") return "--wait applies to start and stop only";
+  if (p.wait && p.noStart) return "--wait cannot be combined with --no-start";
+  if (p.durationS > 0.0 && p.command != "capture") return "--duration applies to capture only";
   return {};
 }
 
@@ -154,13 +225,18 @@ void printUsage(std::ostream& err) {
   err << "usage: tachyon-cli [--socket PATH | --pipe NAME] [--json] [--timeout SECONDS] <command> [options]\n"
          "commands:\n"
          "  status\n"
-         "  start --mode launch|attach|system [--exe E] [--args A...] [--arg A] [--cwd D] [--env K=V]\n"
-         "        [--pid N] [--hz N] [--follow-children] [--child-filter G] [--circular-mb N] [--out PATH]\n"
-         "        [--defer-start] [--no-profile] [--no-cswitch] [--no-readythread] [--no-kernel-stacks] "
-         "[--wait]\n"
-         "  stop [--wait]\n"
-         "  flush --name N --seconds S\n"
-         "  cancel\n";
+         "  start   <target> [start options] [--no-start] [--wait]\n"
+         "  stop    [--wait]\n"
+         "  resume                       begin recording a launch parked with 'start --no-start'\n"
+         "  flush   --name N --seconds S\n"
+         "  cancel\n"
+         "  capture <target> [start options] [--duration S]\n"
+         "target: --launch EXE | --attach PID | --system | --mode launch|attach|system [--exe E] [--pid N]\n"
+         "start options: [--args \"A B\" | --args A B | --arg A]... [--cwd D] [--env K=V]... [--hz N]\n"
+         "  [--follow-children] [--child-filter GLOB] [--circular-mb N] [--out PATH] [--no-profile]\n"
+         "  [--no-cswitch] [--no-readythread] [--no-kernel-stacks]\n"
+         "exit codes: 0 ok, 1 agent/capture error, 2 connection failure or timeout, 3 usage,\n"
+         "            4 capture written but events were lost\n";
 }
 
 void printResponse(const Response& r, bool json, std::ostream& out, std::ostream& err) {
@@ -194,6 +270,69 @@ void printEvent(const Event& e, bool json, std::ostream& out) {
   }
 }
 
+bool isFinal(const Event& e) {
+  return std::holds_alternative<CaptureDoneEvent>(e) || std::holds_alternative<ErrorEvent>(e);
+}
+
+// Prints the final event and maps it to an exit code.
+int finish(const Event& event, bool json, std::ostream& out, std::ostream& err) {
+  if (const auto* ee = std::get_if<ErrorEvent>(&event)) {
+    if (json) {
+      out << encodeEvent(event) << "\n";
+    } else {
+      err << "error: " << ee->message << "\n";
+    }
+    return kExitProtocolError;
+  }
+  printEvent(event, json, out);
+  if (const auto* d = std::get_if<CaptureDoneEvent>(&event); d != nullptr && d->summary.events_lost > 0) {
+    err << "tachyon-cli: warning: the session lost " << d->summary.events_lost
+        << " events; the trace is incomplete\n";
+    return kExitEventsLost;
+  }
+  return kExitOk;
+}
+
+// `capture`: the start request was accepted; wait for the end, stop when --duration runs out.
+int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream& err) {
+  const int timeoutMs = p.timeoutS * 1000;
+  const bool timed = p.durationS > 0.0;
+  const int firstWaitMs = timed ? static_cast<int>(p.durationS * 1000.0) : timeoutMs;
+
+  // The agent finishing by itself (the launched or attached target exited) arrives as capture_done.
+  auto event = client.waitForEvent(isFinal, firstWaitMs);
+  bool timedOut = false;
+  if (!event.ok()) {
+    if (event.error().code != ErrorCode::Timeout) {
+      err << "tachyon-cli: waiting for the capture: " << event.error().message << "\n";
+      return kExitConnectionFailure;
+    }
+    timedOut = !timed;  // no --duration: --timeout ran out before the target exited
+    auto stop = client.call(StopRequest{});
+    if (!stop.ok()) {
+      err << "tachyon-cli: " << stop.error().message << "\n";
+      return kExitConnectionFailure;
+    }
+    // NotFound / Busy: the capture just ended on its own; its capture_done is already on the way.
+    if (!stop->ok && stop->code != ErrorCode::NotFound && stop->code != ErrorCode::Busy) {
+      printResponse(*stop, p.json, out, err);
+      return kExitProtocolError;
+    }
+    event = client.waitForEvent(isFinal, timeoutMs);
+    if (!event.ok()) {
+      err << "tachyon-cli: waiting for capture_done: " << event.error().message << "\n";
+      return kExitConnectionFailure;
+    }
+  }
+  const int code = finish(*event, p.json, out, err);
+  if (timedOut && code == kExitOk) {
+    err << "tachyon-cli: the target did not exit within --timeout " << p.timeoutS
+        << " s; the capture was stopped and the trace written\n";
+    return kExitConnectionFailure;
+  }
+  return code;
+}
+
 }  // namespace
 
 int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
@@ -216,29 +355,22 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
     err << "tachyon-cli: " << resp.error().message << "\n";
     return kExitConnectionFailure;
   }
-  printResponse(*resp, p.json, out, err);
+  const bool capturing = p.command == "capture";
+  if (capturing && !p.json && resp->ok) {
+    out << "capture started\n";
+  } else {
+    printResponse(*resp, p.json, out, err);
+  }
   if (!resp->ok) return kExitProtocolError;
+  if (capturing) return runCapture(*client, p, out, err);
   if (!p.wait) return kExitOk;
 
-  auto event = client->waitForEvent(
-      [](const Event& e) {
-        return std::holds_alternative<CaptureDoneEvent>(e) || std::holds_alternative<ErrorEvent>(e);
-      },
-      p.timeoutS * 1000);
+  auto event = client->waitForEvent(isFinal, p.timeoutS * 1000);
   if (!event.ok()) {
     err << "tachyon-cli: waiting for capture_done: " << event.error().message << "\n";
     return kExitConnectionFailure;
   }
-  if (const auto* ee = std::get_if<ErrorEvent>(&*event)) {
-    if (p.json) {
-      out << encodeEvent(*event) << "\n";
-    } else {
-      err << "error: " << ee->message << "\n";
-    }
-    return kExitProtocolError;
-  }
-  printEvent(*event, p.json, out);
-  return kExitOk;
+  return finish(*event, p.json, out, err);
 }
 
 }  // namespace tachyon::cli

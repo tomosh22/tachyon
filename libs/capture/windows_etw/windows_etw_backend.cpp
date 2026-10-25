@@ -1,5 +1,6 @@
 #include "capture/windows_etw/windows_etw_backend.h"
 
+#include "capture/windows_etw/process_scan.h"
 #include "capture/windows_etw/time_window.h"
 #include "core/log.h"
 #include "core/platform.h"
@@ -28,7 +29,15 @@ constexpr int kNameRetries = 8;
 
 WindowsEtwBackend::WindowsEtwBackend(WindowsEtwBackendConfig config) : m_config(std::move(config)) {}
 
-WindowsEtwBackend::~WindowsEtwBackend() = default;
+WindowsEtwBackend::~WindowsEtwBackend() {
+  // A launched process still parked in its suspended state would never run again.
+  std::unique_ptr<etw::TargetProcess> pending;
+  {
+    std::lock_guard lock(m_mutex);
+    if (m_pending) pending = std::move(m_target);
+  }
+  if (pending) pending->terminate();
+}
 
 Result<void> WindowsEtwBackend::checkPrivileges() {
 #if TACHYON_PLATFORM_WINDOWS
@@ -91,10 +100,26 @@ Result<std::unique_ptr<EtwSession>> WindowsEtwBackend::startSegment(const Captur
 }
 
 Result<void> WindowsEtwBackend::start(const CaptureOptions& options) {
-  TACHYON_TRY(etw::validateCaptureOptions(options));
 #if !TACHYON_PLATFORM_WINDOWS
+  TACHYON_TRY(etw::validateCaptureOptions(options));
   return makeError(ErrorCode::Unsupported, "the ETW backend requires Windows");
 #else
+  // Second start of a deferred launch: begin recording; everything but the fact of the call is ignored.
+  {
+    std::unique_lock lock(m_mutex);
+    if (m_pending) {
+      if (!options.startImmediately)
+        return makeError(ErrorCode::Busy, "a launched process is already waiting for the recording to start");
+      const CaptureOptions launchedOptions = m_options;
+      std::unique_ptr<etw::TargetProcess> target = std::move(m_target);
+      m_pending = false;
+      lock.unlock();
+      TACHYON_LOG_INFO("etw: recording starts for deferred launch of pid {}", launchedOptions.pid);
+      return startRecording(launchedOptions, std::move(target), false);
+    }
+  }
+
+  TACHYON_TRY(etw::validateCaptureOptions(options));
   if (options.mode == CaptureMode::Attach && !EtwSession::processAlive(options.pid))
     return makeError(ErrorCode::NotFound,
                      "attach target pid " + std::to_string(options.pid) + " is not running");
@@ -120,16 +145,101 @@ Result<void> WindowsEtwBackend::start(const CaptureOptions& options) {
     }
   }
 
+  CaptureOptions effective = options;
+  std::unique_ptr<etw::TargetProcess> target;
+  bool launchNow = false;
+  if (options.mode == CaptureMode::Launch) {
+    if (options.startImmediately) {
+      // Session first, process second (see the class comment): the exe and ntdll images and the process
+      // start are then logged live, which a rundown at stop time cannot reproduce once the process exited.
+      launchNow = true;
+    } else {
+      // Deferred: the process is created now and parked; the session starts at the second start().
+      auto proc = etw::TargetProcess::launchSuspended(launchSpecFor(options));
+      if (!proc.ok()) return fail(proc.error());
+      target = std::make_unique<etw::TargetProcess>(std::move(*proc));
+      effective.pid = target->pid();
+      TACHYON_LOG_INFO("etw: launched '{}' parked as pid {}{}", options.exe, effective.pid,
+                       target->tracksDescendants() ? " (job object)" : "");
+      std::lock_guard lock(m_mutex);
+      m_options = effective;
+      m_target = std::move(target);
+      m_pending = true;
+      m_diag.rootPid = effective.pid;
+      return ok();  // lifecycle and state stay Starting until the second start()
+    }
+  } else if (options.mode == CaptureMode::Attach) {
+    auto proc = etw::TargetProcess::open(options.pid);
+    if (proc.ok()) {
+      target = std::make_unique<etw::TargetProcess>(std::move(*proc));
+    } else {
+      TACHYON_LOG_WARN("etw: attach target {} cannot be watched for exit: {}", options.pid,
+                       proc.error().toString());
+    }
+  }
+  return startRecording(effective, std::move(target), launchNow);
+#endif
+}
+
+etw::LaunchSpec WindowsEtwBackend::launchSpecFor(const CaptureOptions& options) {
+  etw::LaunchSpec spec;
+  spec.exe = options.exe;
+  spec.args = options.args;
+  spec.cwd = options.cwd;
+  spec.env = options.env;
+  return spec;
+}
+
+Result<void> WindowsEtwBackend::startRecording(const CaptureOptions& requested,
+                                               std::unique_ptr<etw::TargetProcess> target, bool launchNow) {
+  CaptureOptions options = requested;
+  const bool resumeNeeded = options.mode == CaptureMode::Launch;  // parked or freshly launched: suspended
+  auto fail = [this, &target, resumeNeeded](Error e) -> Result<void> {
+    if (target && resumeNeeded)
+      target->terminate();  // never leave a suspended process behind (not an attach)
+    std::lock_guard lock(m_mutex);
+    m_lifecycle.startFailed();
+    m_state = CaptureState::Idle;
+    m_pending = false;
+    return e;
+  };
+
   auto session = startSegment(options, 0);
   if (!session.ok()) return fail(session.error());
+  if (launchNow) {
+    auto proc = etw::TargetProcess::launchSuspended(launchSpecFor(options));
+    if (!proc.ok()) {
+      const fs::path etl = (*session)->config().etlPath;
+      (void)(*session)->stop();
+      std::error_code ec;
+      fs::remove(etl, ec);
+      return fail(proc.error());
+    }
+    target = std::make_unique<etw::TargetProcess>(std::move(*proc));
+    options.pid = target->pid();
+    TACHYON_LOG_INFO("etw: launched '{}' suspended as pid {}{}", options.exe, options.pid,
+                     target->tracksDescendants() ? " (job object)" : "");
+  }
+  // The session is live: now let the target run, so its first instruction is inside the capture.
+  if (resumeNeeded && target) {
+    auto resumed = target->resume();
+    if (!resumed.ok()) {
+      (void)(*session)->stop();
+      return fail(resumed.error());
+    }
+  }
 
   std::lock_guard lock(m_mutex);
   m_options = options;
   m_session = std::move(*session);
+  m_target = std::move(target);
   m_diag.startInfo = m_session->startInfo();
   m_diag.sessionName = m_session->config().name;
   m_diag.lastFlushGapSeconds = -1.0;
   m_diag.flushCount = 0;
+  m_diag.rootPid = options.mode == CaptureMode::System ? 0 : options.pid;
+  m_diag.followedChildren.clear();
+  m_diag.targetPids.clear();
   m_startTime = std::chrono::steady_clock::now();
   m_lifecycle.startSucceeded(m_session->config().circular);
   m_state = CaptureState::Capturing;
@@ -139,33 +249,76 @@ Result<void> WindowsEtwBackend::start(const CaptureOptions& options) {
                    m_session->config().buffers.maximumBuffers, m_session->config().buffers.bufferSizeKb,
                    m_session->config().circular ? ", circular" : "");
   return ok();
-#endif
+}
+
+bool WindowsEtwBackend::launchPending() const {
+  std::lock_guard lock(m_mutex);
+  return m_pending;
+}
+
+bool WindowsEtwBackend::targetExited() const {
+  std::lock_guard lock(m_mutex);
+  if (m_state != CaptureState::Capturing || !m_target) return false;
+  return m_options.followChildren ? m_target->allExited() : m_target->exited();
+}
+
+uint32_t WindowsEtwBackend::rootPid() const {
+  std::lock_guard lock(m_mutex);
+  if (!m_pending && m_state != CaptureState::Capturing) return 0;
+  return m_options.mode == CaptureMode::System ? 0 : m_options.pid;
 }
 
 etlconvert::ConvertOptions WindowsEtwBackend::convertOptionsFor(const CaptureOptions& options,
                                                                 const SessionConfig& cfg,
-                                                                const SessionCounters& counters) const {
+                                                                const SessionCounters& counters) {
   etlconvert::ConvertOptions co;
-  if (options.mode == CaptureMode::Attach) {
+  if (options.mode != CaptureMode::System) {
     co.targetPids = {options.pid};
     co.mode = etlconvert::CaptureMode::Process;
+    if (options.followChildren) {
+      // The converter filters by a fixed pid list: complete it from the ETL's process events.
+      etw::ProcessTreeTracker tracker({options.pid}, true, options.childFilter);
+      auto scanned = etw::scanEtlProcessEvents(cfg.etlPath, tracker);
+      if (scanned.ok()) {
+        co.targetPids = tracker.targets();
+        TACHYON_LOG_INFO("etw: following {} child process(es) of pid {} ({} rejected by filter '{}')",
+                         tracker.children().size(), options.pid, tracker.rejectedChildren(),
+                         options.childFilter);
+        std::lock_guard lock(m_mutex);
+        m_diag.followedChildren = tracker.children();
+      } else {
+        TACHYON_LOG_WARN("etw: child scan failed, converting the root only: {}", scanned.error().toString());
+      }
+    }
+    std::lock_guard lock(m_mutex);
+    m_diag.targetPids = co.targetPids;
   } else {
     co.mode = etlconvert::CaptureMode::System;
   }
   co.samplingHz = static_cast<uint32_t>(std::lround(etw::intervalUnitsToHz(cfg.profileIntervalUnits)));
   co.eventsLost = counters.eventsLost;
-  co.captureOptionsJson = etw::captureOptionsJson(options, cfg);
+  co.captureOptionsJson = etw::captureOptionsJson(options, cfg, co.targetPids);
   co.agentVersion = m_config.agentVersion;
   return co;
 }
 
 Result<CaptureResult> WindowsEtwBackend::stop() {
   std::unique_ptr<EtwSession> session;
+  std::unique_ptr<etw::TargetProcess> target;
   CaptureOptions options;
   SessionConfig cfg;
   double durationS = 0.0;
   {
     std::lock_guard lock(m_mutex);
+    if (m_pending) {  // launched but never recorded: nothing to convert, the parked process is useless
+      std::unique_ptr<etw::TargetProcess> parked = std::move(m_target);
+      m_pending = false;
+      m_lifecycle.startFailed();
+      m_state = CaptureState::Idle;
+      if (parked) parked->terminate();
+      return makeError(ErrorCode::NotFound,
+                       "the launched process never started recording; it was terminated");
+    }
     auto kind = m_lifecycle.beginStop();
     if (!kind.ok()) return kind.error();
     if (*kind == StopKind::NoSession) {
@@ -175,6 +328,7 @@ Result<CaptureResult> WindowsEtwBackend::stop() {
                        "the ETW session was lost: restarting it after a flush failed; nothing to stop");
     }
     session = std::move(m_session);
+    target = std::move(m_target);  // released below; the process itself keeps running
     options = m_options;
     cfg = m_sessionConfig;
     durationS = secondsSince(m_startTime);
@@ -192,6 +346,7 @@ Result<CaptureResult> WindowsEtwBackend::stop() {
   if (!counters.ok()) return finishFailed(counters.error());
   const fs::path etl = session->config().etlPath;
   session.reset();
+  target.reset();
   if (counters->eventsLost != 0 || counters->logBuffersLost != 0 || counters->realTimeBuffersLost != 0)
     TACHYON_LOG_WARN("etw: data loss: {} events, {} log buffers, {} real-time buffers", counters->eventsLost,
                      counters->logBuffersLost, counters->realTimeBuffersLost);

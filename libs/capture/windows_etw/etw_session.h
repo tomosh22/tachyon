@@ -2,8 +2,9 @@
 //
 // The recipe is the one WP-01 (tools/etlstat) proved on the CI runner: a uniquely named private system logger
 // (EVENT_TRACE_SYSTEM_LOGGER_MODE, Windows 8+) with its own GUID, falling back to SystemTraceControlGuid when
-// StartTrace insists on it; Wnode.ClientContext = 1 (QPC); the sampled-profile interval set with the session
-// handle first and handle 0 as a fallback; stack walking for SampledProfile / CSwitch / ReadyThread.
+// StartTrace insists on it; Wnode.ClientContext = 1 (QPC); the sampled-profile interval set with handle 0
+// (the session handle is rejected, observed on the CI runner); stack walking for SampledProfile / CSwitch /
+// ReadyThread.
 //
 // On non-Windows platforms the class still compiles; every operation returns ErrorCode::Unsupported (orphan
 // cleanup reports nothing to do) so the platform-independent code above it stays testable.
@@ -33,7 +34,7 @@ struct SessionCounters {
 // Facts learned while starting a session (the open [VERIFY] items of docs/etw-notes.md).
 struct SessionStartInfo {
   bool kernelGuidFallback = false;            // StartTrace needed SystemTraceControlGuid
-  bool intervalSetWithSessionHandle = false;  // true: session handle worked; false: needed handle 0
+  bool intervalSetWithSessionHandle = false;  // always false: the session handle fails, handle 0 is used
   bool stackTracingEnabled = false;
 };
 

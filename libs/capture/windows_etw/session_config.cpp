@@ -118,8 +118,8 @@ OrphanVerdict classifySession(std::string_view loggerName,
 Result<void> validateCaptureOptions(const CaptureOptions& o) {
   switch (o.mode) {
     case CaptureMode::Launch:
-      return makeError(ErrorCode::Unsupported,
-                       "launch mode is not implemented by the ETW backend yet (WP-13); use attach or system");
+      if (o.exe.empty()) return makeError(ErrorCode::InvalidArgument, "launch mode needs an executable");
+      break;
     case CaptureMode::Attach:
       if (o.pid == 0) return makeError(ErrorCode::InvalidArgument, "attach mode needs a pid");
       break;
@@ -164,11 +164,21 @@ bool isValidFlushName(std::string_view name) {
   return !name.empty() && name.find_first_of("/\\") == std::string_view::npos && name != "." && name != "..";
 }
 
-std::string captureOptionsJson(const CaptureOptions& o, const SessionConfig& c) {
+std::string captureOptionsJson(const CaptureOptions& o, const SessionConfig& c,
+                               const std::vector<uint32_t>& targetPids) {
   nlohmann::json j;
   j["backend"] = "etw";
   j["mode"] = std::string(captureModeName(o.mode));
   j["pid"] = o.pid;
+  if (o.mode == CaptureMode::Launch) {
+    j["exe"] = o.exe;
+    j["args"] = o.args;
+    j["cwd"] = o.cwd;
+    j["start_immediately"] = o.startImmediately;
+  }
+  j["follow_children"] = o.followChildren;
+  j["child_filter"] = o.childFilter;
+  j["target_pids"] = targetPids;
   j["sampling_hz_requested"] = o.samplingHz;
   j["sampling_hz_effective"] = intervalUnitsToHz(c.profileIntervalUnits);
   j["profile_interval_100ns"] = c.profileIntervalUnits;
