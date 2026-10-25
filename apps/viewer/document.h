@@ -10,6 +10,8 @@
 
 namespace tachyon::viewer {
 
+class AnalysisContext;  // analysis_context.h (kept out of this header: analysis/query.h clashes with lod.h)
+
 // Extension slots. Each is an empty interface for now; the owning work package replaces the body (adds
 // methods) and installs an implementation with Document::setSymbols() etc. App and existing panels need no
 // restructuring because they only ever reach a service through the Document.
@@ -30,6 +32,10 @@ class Document {
  public:
   // Thread-safe (constructs a value).
   Document(std::filesystem::path path, std::shared_ptr<const model::TraceModel> model);
+  // Cancels and waits for the queries running through analysis().
+  ~Document();
+  Document(const Document&) = delete;
+  Document& operator=(const Document&) = delete;
 
   // All accessors: thread-safe for concurrent const access. The model is immutable once loaded.
   const std::filesystem::path& path() const { return m_path; }
@@ -44,6 +50,9 @@ class Document {
   void setQueries(std::shared_ptr<IQueryExecutor> q) { m_queries = std::move(q); }
   void setLod(std::shared_ptr<ILodProvider> l) { m_lod = std::move(l); }
 
+  // WP-43: the analysis contexts shared by the panels (see analysis_context.h). Thread-safe.
+  const AnalysisContext& analysis() const;
+
   // Thread-safe: pure function on the model. Total samples over all threads.
   uint64_t totalSamples() const;
 
@@ -53,6 +62,7 @@ class Document {
   std::shared_ptr<symbols::SymbolService> m_symbols;  // declared after m_model: destroyed first
   std::shared_ptr<IQueryExecutor> m_queries;
   std::shared_ptr<ILodProvider> m_lod;
+  std::unique_ptr<AnalysisContext> m_analysis;  // last: destroyed first (cancels and waits for its queries)
 };
 
 }  // namespace tachyon::viewer

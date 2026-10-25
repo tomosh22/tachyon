@@ -18,4 +18,8 @@ std::unique_ptr<IPanel> makeThreadsTimelinePanel();
 // interaction/interaction_panel.cpp.
 std::unique_ptr<IPanel> makeThreadInteractionPanel();
 
+// Thread-safe: factory. WP-43: top-down call graph ("Call Graph"); implemented in
+// callgraph/callgraph_panel.cpp.
+std::unique_ptr<IPanel> makeCallGraphPanel();
+
 }  // namespace tachyon::viewer
