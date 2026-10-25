@@ -22,7 +22,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-22 | DIA symbol provider | B | not started | wp/22-dia | |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
-| WP-32 | Attribution and aggregation | C | not started | wp/32-attribution | |
+| WP-32 | Attribution and aggregation | C | in progress | wp/32-attribution | 2026-10-25 |
 | WP-33 | Filters, cancellation, query cache | C | not started | wp/33-filters | |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
 | WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
@@ -30,7 +30,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | not started | wp/41-session-explorer | |
-| WP-42 | Threads timeline | D | not started | wp/42-timeline | |
+| WP-42 | Threads timeline | D | in progress | wp/42-threads-timeline | 2026-10-25 |
 | WP-43 | Call graph panel | D | not started | wp/43-call-graph | |
 | WP-44 | Function list and butterfly | D | not started | wp/44-function-list | |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
