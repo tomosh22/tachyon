@@ -12,9 +12,9 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-03 | Trace format library | — | merged (CI green incl. windows; interning-time target split to WP-03b) | wp/03-trace | 2026-10-25 |
 | WP-03b | Callstack interning throughput (10 s target) | — | merged (skewed 8.66 s met with streaming-input harness; uniform 11.99 s best effort) | wp/03b-intern-speed | 2026-10-25 |
 | WP-04 | Synthetic trace generator `tracegen` | C | in progress | wp/04-tracegen | 2026-10-25 |
-| WP-10 | Agent skeleton and control protocol | A | in progress | wp/10-agent | 2026-10-25 |
+| WP-10 | Agent skeleton and control protocol | A | in review | wp/10-agent | 2026-10-25 |
 | WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
-| WP-12 | ETL to `.tachyon` converter | A | not started | wp/12-etlconvert | |
+| WP-12 | ETL to `.tachyon` converter | A | in progress | wp/12-etlconvert | 2026-10-25 |
 | WP-13 | Launch, attach, process tree, CLI | A | not started | wp/13-launch-cli | |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | not started | wp/20-symbol-core | |
