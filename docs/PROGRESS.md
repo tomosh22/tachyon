@@ -21,7 +21,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-21 | Symbol locator and HTTP client | B | not started | wp/21-symbol-locator | |
 | WP-22 | DIA symbol provider | B | not started | wp/22-dia | |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
-| WP-31 | Thread state intervals | C | not started | wp/31-thread-states | |
+| WP-31 | Thread state intervals | C | in progress | wp/31-thread-states | 2026-10-25 |
 | WP-32 | Attribution and aggregation | C | not started | wp/32-attribution | |
 | WP-33 | Filters, cancellation, query cache | C | not started | wp/33-filters | |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
