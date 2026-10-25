@@ -66,11 +66,11 @@ class SymbolService {
   // it get this file as their symbol file, ahead of the locate function. Not thread-safe.
   Result<void> addSymbolFileOverride(const std::filesystem::path& symbolsJson);
 
-  // Thread-safe flag set, then joins the workers (call from the owning thread; not concurrently with
-  // resolveAllAsync/waitAll). Aborts in-flight downloads and backoff sleeps, skips modules not yet started
-  // (they stay Pending) and unpins cache files. Typically returns
-  // within tens of milliseconds, bounded by the slowest non-cancellable provider load. The service stays
-  // usable: a later resolveAllAsync() starts a fresh run.
+  // Not thread-safe: call from the owning thread, never concurrently with resolveAllAsync/waitAll. Sets the
+  // cancel flag, then joins the workers. Aborts in-flight downloads and backoff sleeps, skips modules not yet
+  // started (they stay Pending) and unpins cache files. Typically returns within tens of milliseconds,
+  // bounded by the slowest non-cancellable provider load. The service stays usable: a later resolveAllAsync()
+  // starts a fresh run.
   void cancel();
 
   // Starts resolution of every module referenced by a frame of `model` and returns immediately. Workers

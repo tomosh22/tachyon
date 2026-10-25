@@ -167,7 +167,7 @@ Shared helpers moved to libs/analysis/detail/query_support.h (pure move). `libs/
 - WP-33b: `Filter::subtreePath` (FunctionKey path prefix, applied after flatten; hashed in QueryCache), then switch the Call Graph "Filter to subtree" to it and drop the main-thread subtree resolver. Also: pie chart gets a "self" slice; selected-row deep-cap message.
 
 - WP-02b: done by the orchestrator. testbed_tests are RUN_SERIAL (the CPU-share checks failed when ctest -j oversubscribed the cores; the verifier reproduced this on pre-existing binaries). LocatorTest.ConcurrentDownloadsAreBounded now asserts only the bound (≤ 2), not that the limit is reached. CancellationTest.TwentyMillion measured 42.6 ms against 50 ms under load average 10; watch it.
-- WP-21b (in progress, wp/21b-cancellable-symbols): make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.
+- WP-21b: MERGED (verifier PASS). Cancel or destroy with 4 stalled transfers now takes 18–130 ms (was 16 s); curl idle CPU is 0.15%; pins are balanced. Low follow-ups: catch thread creation failure in the WinHTTP CancelWatcher; pins taken via setLocate(makeDefaultLocate(...)) are never unpinned; the remembered-model overload of resolveAllAsync needs the model to outlive waitAll. Original item: make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.
 - WP-36b: 64-row LOD frame under 4 ms.
 - `SymbolService::resolveAllAsync` should take `const TraceModel&` (the viewer const_casts today).
 
