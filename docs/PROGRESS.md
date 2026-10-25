@@ -20,7 +20,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | merged (oracle 0/929 mismatches; cold resolve 11.5 ms, memo 2.2 ns on CI) | wp/20-symbol-core | 2026-10-25 |
 | WP-21 | Symbol locator and HTTP client | B | merged (CI green incl. msdl.microsoft.com ntdll.pdb fetch) | wp/21-symbol-locator | 2026-10-25 |
-| WP-22 | DIA symbol provider | B | in progress | wp/22-dia-provider | 2026-10-25 |
+| WP-22 | DIA symbol provider | B | merged (Windows CI ran real DIA tests) | wp/22-dia-provider | 2026-10-25 |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
 | WP-32 | Attribution and aggregation | C | merged | wp/32-attribution | 2026-10-25 |
@@ -63,6 +63,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | Gate | Result | Date | Notes |
 |---|---|---|---|
 | M0 | passed with exceptions | 2026-10-25 | CI green on Linux and Windows. etlstat numbers pending the user's Windows run (WP-01). Fixtures are generated at build time and checked against SHA256s, because LFS push is blocked. Trace round-trip/interning budget: skewed met (8.66 s), uniform 11.99 s against 10 s, memory met after compact. |
+| M1 | passed for the testbed; engine part pending WP-14 (user-assisted) | 2026-10-25 | Windows CI (elevated runner): `tachyon-cli capture --launch tachyon-testbed.exe` gives a trace with 0 lost events, loader samples before main, child following and attach; the trace opens in TraceReader. Engine capture and conversion-time budget on a real engine capture need the user (WP-14). 20 s dev-box run queued below. |
+| M2 | passed with exceptions | 2026-10-25 | Windows CI: DIA resolves testbed hot functions to file:line and the inline scenario to inline chains (every frame has a line); 1 M RVAs in about 4 s (budget 20 s); ntdll.pdb fetched from msdl.microsoft.com. No team symbol store yet (Part 7 default), so the team-store fetch is untested. An end-to-end symbolized testbed capture in the viewer on Windows is queued for the user. Known limits: hot/cold separated blocks resolve only when the parent's length covers them; an unbounded last public symbol claims trailing addresses. |
 
 ## WP-03 measured numbers (GitHub ubuntu-24.04 runner)
 
@@ -123,6 +125,8 @@ WP-32b merged (verifier PASS): `SymbolService::lookupCaller` and `functionKeyFor
 - `SymbolService::resolveAllAsync` should take `const TraceModel&` (the viewer const_casts today).
 
 ## Windows / privileged verification queue
+
+M2 end-to-end (Windows dev box): capture the testbed (`tachyon-cli capture --launch tachyon-testbed.exe --args "--scenario inline --duration 10" --out inline.tachyon`), open it in `tachyon-viewer.exe` and check that the timeline tooltips and flame chart show testbed function names, and that inline frames resolve. Symbol servers come from Settings (empty by default); add `https://msdl.microsoft.com/download/symbols` to resolve system DLLs.
 
 WP-42 GPU check (needs a mid-range GPU): `cmake --build --preset windows-release --target tachyon_fixtures_large`, open `build/windows-release/fixtures/large.tachyon` in `tachyon-viewer.exe` at 1080p and 1440p with all 64 rows visible, wait for "Building timeline index" to finish, then wheel-zoom from the whole trace to about 100 µs at 3 positions and drag-pan continuously; repeat with 4 rows expanded and during the first minute while the LOD builds. Report p95 and worst frame time (target: steady 60 fps, no frame > 16.6 ms). CPU-only frame cost measured on Linux: large, 64 collapsed rows, 1920 px: worst 5.2–6.9 ms, median about 3 ms; peak about 367 k vertices per frame.
 
