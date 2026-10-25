@@ -23,6 +23,7 @@ uint64_t hashKey(const QueryKey& k) {
   h = core::hashU64(h ^ k.function.module.get());
   h = core::hashU64(h ^ k.function.value);
   h = core::hashU64(h ^ k.arg);
+  h = core::hashU64(h ^ k.options);
   return h;
 }
 

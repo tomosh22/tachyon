@@ -1,9 +1,9 @@
 // Pairing of instrumentation Begin/End events into scope instances (WP-35; spec 3.1 ScopeEventRec, 3.8 rule
 // 5).
 //
-// Reusable by the scope blending of WP-53, which extends the interface with fiber-aware splitting: keep this
-// interface narrow. The input is TraceModel::scopeEvents (sorted by ts, ties in file order). Events are
-// paired per thread (by tid), with stack discipline:
+// Reused by the scope blending, the lock summary and the fiber-aware pairing of WP-53 (fibers.h). The input
+// is TraceModel::scopeEvents (sorted by ts, ties in file order). Events are paired per thread (by tid), with
+// stack discipline:
 //   * Begin pushes; End pops the innermost open scope of the same thread and closes it at the End's ts (the
 //     End record carries no id: the pairing is positional);
 //   * an End with no open Begin on its thread is an orphan: it is ignored and its ts is recorded;
@@ -20,9 +20,15 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace tachyon::analysis {
+
+// ScopeEventRec::color_rgba of a lock wait (TACHYON_LOCK_COLOR_SENTINEL in the SDK) and the reserved id used
+// by Tachyon_LockAcquireBegin when the lock has no name (docs/specs/sdk-api.md).
+inline constexpr uint32_t kLockColorSentinel = 0x4C4F43FFu;
+inline constexpr const char* kLockReservedId = "Tachyon.LockAcquire";
 
 // One paired scope. Note: distinct from model::ScopeInstance (which WP-53 fills and which has data, color).
 struct ScopeInstance {
@@ -30,6 +36,8 @@ struct ScopeInstance {
   uint64_t begin = 0, end = 0;
   uint32_t depth = 0;  // number of scopes open on the thread when this one began (0 = outermost)
   uint64_t callerAddr = 0;
+  StringIdx data;      // Begin's dynamic data string (invalid/empty when none); lock waits carry the address
+  uint32_t color = 0;  // Begin's color_rgba (kLockColorSentinel marks a lock wait)
   bool unterminated = false;  // no End event: end = header.end_ts
 };
 
@@ -44,6 +52,20 @@ struct PairedScopes {
 
   // Thread-safe (const access). Approximate heap bytes, for the query cache.
   size_t heapBytes() const;
+};
+
+// Not thread-safe to build, thread-safe for concurrent const use. tid -> ThreadIdx for the event streams: a
+// binary search over a flat sorted table with a one-entry cache (events cluster; the cache makes find() not
+// const-thread-safe, so every thread of control uses its own TidLookup).
+class TidLookup {
+ public:
+  explicit TidLookup(const model::TraceModel& model);
+  // Not thread-safe. The thread's index, or kInvalidIdx for tid 0 and unknown tids.
+  uint32_t find(uint32_t tid);
+
+ private:
+  std::vector<std::pair<uint32_t, uint32_t>> m_tids;
+  uint32_t m_lastTid = 0, m_lastIdx = kInvalidIdx;
 };
 
 // Thread-safe for concurrent const access to the model. Pairs every thread's scope events. Cost O(events).

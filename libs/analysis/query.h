@@ -106,6 +106,17 @@ struct AggregationOptions {
   bool expandInline = false;  // expand inline chains into frames (innermost inline = leaf)
   KernelFrames kernelFrames = KernelFrames::Show;
   unsigned threads = 0;  // worker threads; 0 = hardware_concurrency. Results do not depend on it.
+  // WP-53 (rule 5): splice the instrumentation scopes open at each sample into its stack, as synthetic frames
+  // with keys {kScopeModule, StringIdx} (see scope_blend.h). Applies to topDownTree, bottomUpFunctions,
+  // butterfly, functionStats (sampled functions) and the topFunctions of frames, consistently. Default off:
+  // results are then identical to a build without scope support. Needs the symbols resolved (function bounds
+  // place the scopes); without them every scope goes directly above the root.
+  bool blendScopes = false;
+  // WP-53: group scopes by fiber. Scope events are attributed to the fiber running on their thread (from the
+  // trace's FiberEvents) and paired per fiber (fibers.h); with blendScopes a sample is blended with the scope
+  // stack of the fiber that was running on its thread, scopeStats and lockSummary use the fiber-aware
+  // pairing. Without FiberEvents in the trace this changes nothing (everything is per thread).
+  bool groupByFiber = false;
 };
 
 // hits / misses count every cache lookup of a query, including the lookup of the internal per-leaf-node
@@ -343,6 +354,40 @@ Result<std::vector<FrameSummary>> frames(const QueryContext& ctx, const Filter& 
 // Thread-safe. The n longest of those frames, sorted by duration descending, then start ascending.
 Result<std::vector<FrameSummary>> slowestFrames(const QueryContext& ctx, const Filter& filter, uint32_t n,
                                                 FrameOptions options = {}, Cancel cancel = {});
+
+// ---------------------------------------------------------------------------------------------------------
+// WP-53: lock summary. Lock waits are scopes with the lock color sentinel (scope_pairing.h
+// kLockColorSentinel, Tachyon_LockAcquireBegin): id = the lock name or the reserved id "Tachyon.LockAcquire",
+// data = "0x<hex lock address>". Waits are exact (paired Begin/End, wall time between them; with
+// AggregationOptions::groupByFiber the pairing is per fiber, so a wait that migrates threads is one wait).
+// A wait is selected when its Begin lies in [t0, t1) and its thread (the thread of the Begin) is selected;
+// subtreeRoot and function do not apply. An unterminated wait ends at header.end_ts and is counted.
+struct LockWaiter {
+  ThreadIdx thread;
+  uint32_t waits = 0;
+  uint64_t waitTicks = 0;
+};
+
+struct LockRow {
+  uint64_t address = 0;          // parsed from the scope data
+  StringIdx name;                // trace string of the lock name; invalid when only the reserved id was used
+  uint32_t contentionCount = 0;  // number of lock-wait scopes
+  uint64_t totalWaitTicks = 0, maxWaitTicks = 0;
+  uint32_t unterminated = 0;  // waits counted above whose Begin has no End
+  // Top kMaxLockWaiters threads by waitTicks (then waits, then thread index).
+  std::vector<LockWaiter> topThreads;
+};
+
+struct LockSummary {
+  std::vector<LockRow> locks;  // sorted by totalWaitTicks descending, then address
+  uint32_t unparsedWaits = 0;  // lock-wait scopes whose data holds no hex address (not in `locks`)
+};
+inline constexpr size_t kMaxLockWaiters = 5;
+
+Result<std::shared_ptr<const LockSummary>> lockSummaryShared(const QueryContext& ctx, const Filter& filter,
+                                                             Cancel cancel = {});
+// Thread-safe. Per lock address summary of the lock-wait scopes (see above).
+Result<LockSummary> lockSummary(const QueryContext& ctx, const Filter& filter, Cancel cancel = {});
 
 // Thread-safe. Display name: "module!function", "module!0x<rva>" for unresolved frames,
 // "<unmapped>!0x<addr>",

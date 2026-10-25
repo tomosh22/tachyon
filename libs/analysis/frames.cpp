@@ -4,6 +4,7 @@
 #include "analysis/detail/parallel.h"
 #include "analysis/detail/query_support.h"
 #include "analysis/query_cache.h"
+#include "analysis/scope_blend.h"
 #include "trace/trace_format.h"
 
 #include <algorithm>
@@ -53,6 +54,7 @@ struct FrameJob {
   const ResolvedFilter& rf;
   uint32_t topN;
   Cancel cancel;
+  const BlendIndex* blend = nullptr;  // scope blending (AggregationOptions::blendScopes); outlives the job
 };
 
 // Fills threads and topFunctions of `out` for the span.
@@ -61,6 +63,7 @@ class FrameDetailer {
   explicit FrameDetailer(const FrameJob& job)
       : m_job(job), m_model(job.ctx.model()), m_flat(job.ctx, m_table) {
     m_flat.setCancel(job.cancel);
+    m_flat.setBlend(job.blend);
     if (job.rf.function) m_required = m_table.intern(*job.rf.function);
   }
 
@@ -68,7 +71,14 @@ class FrameDetailer {
   bool detail(const FrameSpan& span, FrameSummary& out) {
     m_touched.clear();
     const auto& threads = m_job.rf.threads;
-    if (m_cursors.empty()) m_cursors.assign(threads.size(), Cursor{});
+    if (m_cursors.empty()) {
+      m_cursors.assign(threads.size(), Cursor{});
+      static const std::vector<ScopeSegment> kNoSegments;
+      for (ThreadIdx t : threads)
+        m_scopeCursors.emplace_back(m_flat.blending() && t.get() < m_job.blend->byThread.size()
+                                        ? m_job.blend->byThread[t.get()]
+                                        : kNoSegments);
+    }
     const bool rewind = span.start < m_lastStart;  // frames of a worker normally ascend: reuse the cursors
     m_lastStart = span.start;
     const uint64_t interval = m_model.sampleIntervalTicks;
@@ -125,7 +135,8 @@ class FrameDetailer {
         if (si < ivs.size() && ivs[si].state == model::ThreadState::Running && ivs[si].start <= t)
           weight = std::min(interval, ivs[si].end - t);
         const uint16_t flags = i < cols.flags.size() ? cols.flags[i] : uint16_t{0};
-        const int64_t leaf = leafOf(cols.callstack[i], (flags & trace::kSampleFlagKernelLeaf) != 0);
+        const uint32_t stack = m_flat.blending() ? m_scopeCursors[k].stackAt(t) : 0u;
+        const int64_t leaf = leafOf(cols.callstack[i], (flags & trace::kSampleFlagKernelLeaf) != 0, stack);
         if (m_aborted) return false;
         if (leaf == kFiltered) continue;
         tt.sampleTicks += weight;
@@ -167,11 +178,11 @@ class FrameDetailer {
   static constexpr int64_t kNoFunction = -2;  // passes, but has no frame to attribute to (empty stack)
 
   // Leaf function id (KeyTable id) of the sample's stack as the query sees it, memoized per node.
-  int64_t leafOf(CallstackIdx cs, bool kernelLeaf) {
-    const uint64_t mk = (uint64_t{cs.get()} << 1) | (kernelLeaf ? 1u : 0u);
+  int64_t leafOf(CallstackIdx cs, bool kernelLeaf, uint32_t stack) {
+    const uint64_t mk = (uint64_t{stack} << 33) | (uint64_t{cs.get()} << 1) | (kernelLeaf ? 1u : 0u);
     auto [it, fresh] = m_memo.try_emplace(mk, kFiltered);
     if (!fresh) return it->second;
-    const bool kept = m_flat.flatten(cs, m_job.rf.subtree, kernelLeaf, m_ids, m_required);
+    const bool kept = m_flat.flatten(cs, m_job.rf.subtree, kernelLeaf, m_ids, m_required, stack);
     if (m_flat.aborted()) {
       m_aborted = true;
       m_memo.erase(it);
@@ -192,6 +203,7 @@ class FrameDetailer {
   const FrameJob& m_job;
   const model::TraceModel& m_model;
   std::vector<Cursor> m_cursors;  // per selected thread
+  std::vector<ScopeCursor> m_scopeCursors;
   uint64_t m_lastStart = 0;
   size_t m_polled = 0;
   KeyTable m_table;
@@ -222,7 +234,10 @@ Result<std::vector<FrameSummary>> computeFrames(const QueryContext& ctx, const R
     }
     std::sort(spans.begin(), spans.end(), slowerFirst);
   }
-  const FrameJob job{ctx, rf, topN, cancel};
+  auto blend = blendIndexIfEnabled(ctx, cancel);
+  if (!blend) return blend.error();
+  FrameJob job{ctx, rf, topN, cancel};
+  job.blend = blend->get();
   const size_t n = spans.size();
   out.resize(n);
   // Frames are independent: workers pull chunks of frames from a shared counter and each owns a detailer.

@@ -6,6 +6,7 @@
 #include "analysis/attribution.h"
 #include "analysis/query.h"
 #include "analysis/query_cache.h"
+#include "analysis/scope_blend.h"
 
 #include <algorithm>
 #include <memory>
@@ -60,8 +61,21 @@ class StackFlattener {
   // Frames visited by the last flatten() (the cost the callers meter cancellation by).
   size_t lastCost() const { return m_chain.size(); }
 
+  // Scope blending (3.8 rule 5; scope_blend.h): with an index, flatten() splices the scopes of the trie node
+  // `scopeStack` into the stack. The index must outlive the flattener.
+  void setBlend(const BlendIndex* index) {
+    m_blend = index != nullptr && !index->empty() ? index : nullptr;
+    m_scopeKeys.assign(m_blend != nullptr ? m_blend->nodes.size() : 0, kUnset);
+    m_ranges[0].clear();
+    m_ranges[1].clear();
+  }
+  bool blending() const { return m_blend != nullptr; }
+
+  // `scopeStack`: the ScopeStackNode open at the sample (0 = none; ignored without setBlend). The scopes are
+  // spliced before the subtree cut is applied to the result: a scope placed above a frame that the cut
+  // removes (slot <= the cut depth, with a cut at depth > 0) is dropped; others keep their place.
   bool flatten(CallstackIdx node, CallstackIdx subtree, bool kernelLeaf, std::vector<uint32_t>& out,
-               uint32_t required = kUnset) {
+               uint32_t required = kUnset, uint32_t scopeStack = 0) {
     out.clear();
     m_chain.clear();
     const size_t limit = m_model.nodes.size();
@@ -83,6 +97,39 @@ class StackFlattener {
     if (kernelLeaf) {
       while (exactAt < m_chain.size() && isKernelNode(m_chain[exactAt])) ++exactAt;
     }
+    // Rule 5: slots of the open scopes (scope k goes directly above the physical frame at depth slot-1).
+    const size_t total = m_chain.size();
+    const size_t dFirst = total - first;  // depth (from the root) of the topmost included frame
+    size_t sp = 0;
+    m_slots.clear();
+    if (m_blend != nullptr && scopeStack != 0 && scopeStack < m_blend->nodes.size()) {
+      m_open.clear();
+      for (uint32_t n = scopeStack; n != 0; n = m_blend->nodes[n].parent) m_open.push_back(n);
+      std::reverse(m_open.begin(), m_open.end());  // outermost first
+      // The root of the stack is its first frame (depth 0): an unmatched scope sits directly above it, so no
+      // scope ever precedes the first frame (tracegen's reference blending agrees; see the clarification).
+      size_t prev = std::min<size_t>(total, 1);
+      for (uint32_t sn : m_open) {
+        const uint64_t caller = m_blend->nodes[sn].callerAddr;
+        size_t slot = prev;
+        // Deepest frame (largest depth d >= prev) whose function contains caller_addr.
+        for (size_t d = total; d-- > prev;) {
+          const size_t ci = total - 1 - d;
+          if (frameContains(m_model.nodes[m_chain[ci]].frame, ci != 0 && ci != exactAt, caller)) {
+            slot = d + 1;
+            break;
+          }
+        }
+        prev = slot;
+        m_slots.push_back(static_cast<uint32_t>(slot));
+      }
+      if (dFirst > 0)
+        while (sp < m_slots.size() && m_slots[sp] <= dFirst) ++sp;  // above frames the subtree cut removed
+    }
+    auto emitScopes = [&](size_t slot) {
+      while (sp < m_slots.size() && m_slots[sp] == slot) out.push_back(scopeKeyId(m_open[sp++]));
+    };
+    emitScopes(0);
     for (size_t i = first; i-- > 0;) {
       // A single very deep stack costs O(depth) with a symbol lookup per new frame: stay cancellable.
       if ((first - i) % 2048 == 0 && m_cancel.requested()) {
@@ -90,11 +137,13 @@ class StackFlattener {
         return false;
       }
       const Entry& e = entryFor(m_model.nodes[m_chain[i]].frame, i != 0 && i != exactAt);
+      const size_t above = total - i;  // slot directly above this frame (depth + 1)
       for (uint32_t k = 0; k < e.count; ++k) {
         const uint32_t id = m_flat[e.offset + k];
-        if (group && id == m_kernelId && !out.empty() && out.back() == m_kernelId) continue;
-        out.push_back(id);
+        if (!(group && id == m_kernelId && !out.empty() && out.back() == m_kernelId)) out.push_back(id);
+        if (k == 0) emitScopes(above);  // between the function key and its inline keys
       }
+      if (e.count == 0) emitScopes(above);
     }
     if (out.empty() && m_ctx.options().kernelFrames == KernelFrames::Hide) out.push_back(m_kernelId);
     // Function filter (Filter::function): only stacks that contain the function, as seen after the cut.
@@ -113,6 +162,47 @@ class StackFlattener {
   bool isKernelNode(uint32_t node) const {
     const FrameIdx f = m_model.nodes[node].frame;
     return f.valid() && f.get() < m_model.frames.size() && isKernel(m_model.frames[f.get()]);
+  }
+
+  // Address range [lo, hi) of the function containing a frame (whole function from the symbols,
+  // return-address rule through `caller`), or the single address of an unmapped frame; empty when unknown.
+  struct Range {
+    uint64_t lo = 0, hi = 0;
+    bool known = false;
+  };
+
+  bool frameContains(FrameIdx frame, bool caller, uint64_t addr) {
+    if (!frame.valid() || frame.get() >= m_model.frames.size()) return false;
+    std::vector<Range>& cache = m_ranges[caller ? 1 : 0];
+    if (cache.empty()) cache.resize(m_model.frames.size());
+    Range& r = cache[frame.get()];
+    if (!r.known) {
+      r.known = true;
+      const model::Frame& f = m_model.frames[frame.get()];
+      if (!f.module.valid()) {
+        r.lo = f.addr_or_rva;
+        r.hi = r.lo + 1;
+      } else if (f.module.get() < m_model.modules.size()) {
+        const symbols::ResolvedAddress& ra =
+            caller ? m_ctx.symbols().lookupCaller(frame) : m_ctx.symbols().lookup(frame);
+        if (ra.resolved) {
+          if (symbols::ISymbolProvider* p = m_ctx.symbols().provider(f.module)) {
+            const auto fb = p->functionBounds(ra.functionStartRva);
+            if (fb && fb->size != 0) {
+              r.lo = m_model.modules[f.module.get()].base + fb->startRva;
+              r.hi = r.lo + fb->size;
+            }
+          }
+        }
+      }
+    }
+    return addr >= r.lo && addr < r.hi;
+  }
+
+  uint32_t scopeKeyId(uint32_t node) {
+    uint32_t& id = m_scopeKeys[node];
+    if (id == kUnset) id = m_table.intern(FunctionKey{kScopeModule, m_blend->nodes[node].id.get()});
+    return id;
   }
 
   const Entry& entryFor(FrameIdx frame, bool caller) {
@@ -163,6 +253,10 @@ class StackFlattener {
   std::vector<uint32_t> m_flat;
   std::vector<uint32_t> m_chain;
   uint32_t m_kernelId = 0;
+  const BlendIndex* m_blend = nullptr;
+  std::vector<uint32_t> m_scopeKeys;  // trie node -> interned scope key id
+  std::vector<Range> m_ranges[2];     // per frame, lazily (exact / return-address variant)
+  std::vector<uint32_t> m_open, m_slots;
 };
 
 struct ResolvedFilter {
@@ -170,7 +264,8 @@ struct ResolvedFilter {
   std::vector<ThreadIdx> threads;  // sorted, unique
   CallstackIdx subtree;            // invalid = none
   std::optional<FunctionKey> function;
-  Filter canonical;  // normalised form of the request: equal requests give equal canonical filters
+  Filter canonical;      // normalised form of the request: equal requests give equal canonical filters
+  uint32_t options = 0;  // optionBits() of the context: part of every cache key
 };
 
 // Validates `f` and brings it into canonical form: an empty range is [0, 0), the thread list is sorted and
@@ -204,6 +299,7 @@ inline Result<ResolvedFilter> resolveFilterBasic(const QueryContext& ctx, const 
     if (!r.function)
       return makeError(ErrorCode::InvalidArgument, "Filter::function is not a handle of this QueryContext");
   }
+  r.options = optionBits(ctx.options());
   r.canonical.t0 = r.t0;
   r.canonical.t1 = r.t1;
   if (!allThreads) r.canonical.threads = r.threads;
@@ -223,7 +319,16 @@ inline QueryKey resultKey(const ResolvedFilter& f, QueryKind kind, FunctionKey f
   k.kind = kind;
   k.function = fk;
   k.filter = f.canonical;
+  k.options = f.options;
   return k;
+}
+
+// The scope blend index of the context when AggregationOptions::blendScopes is on (else nullptr), built and
+// cached on first use. Callers pass it to StackFlattener::setBlend and keep the pointer alive while
+// flattening.
+inline Result<std::shared_ptr<const BlendIndex>> blendIndexIfEnabled(const QueryContext& ctx, Cancel cancel) {
+  if (!ctx.options().blendScopes) return std::shared_ptr<const BlendIndex>();
+  return blendIndexFor(ctx, cancel);
 }
 
 inline uint32_t saturate32(uint64_t v) {
