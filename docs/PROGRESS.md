@@ -15,10 +15,10 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-10 | Agent skeleton and control protocol | A | merged (CI green incl. windows named-pipe tests; Windows console checks queued) | wp/10-agent | 2026-10-25 |
 | WP-11 | ETW session controller | A | needs Windows verification (merged; 11 real ETW tests passed on elevated CI runner; 30 s dev-box run pending) | wp/11-etw-session | 2026-10-25 |
 | WP-12 | ETL to `.tachyon` converter | A | needs Windows verification (merged; CI windows job converted a real ETL; hot_a/b/c ranking and 2 GB timing unconfirmed) | wp/12-etlconvert | 2026-10-25 |
-| WP-13 | Launch, attach, process tree, CLI | A | in progress (local green; awaiting CI for Windows) | wp/13-launch-cli | 2026-10-25 |
+| WP-13 | Launch, attach, process tree, CLI | A | in review (CI green incl. Windows launch acceptance) | wp/13-launch-cli | 2026-10-25 |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | merged (oracle 0/929 mismatches; cold resolve 11.5 ms, memo 2.2 ns on CI) | wp/20-symbol-core | 2026-10-25 |
-| WP-21 | Symbol locator and HTTP client | B | in progress (local green; awaiting CI) | wp/21-symbol-locator | 2026-10-25 |
+| WP-21 | Symbol locator and HTTP client | B | in review (verifier fixes in; awaiting Windows CI) | wp/21-symbol-locator | 2026-10-25 |
 | WP-22 | DIA symbol provider | B | not started | wp/22-dia | |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
@@ -26,7 +26,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-33 | Filters, cancellation, query cache | C | not started | wp/33-filters | |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
 | WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
-| WP-36 | Timeline LOD | C | in progress | wp/36-lod | 2026-10-25 |
+| WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
+| WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | not started | wp/41-session-explorer | |
 | WP-42 | Threads timeline | D | not started | wp/42-timeline | |
@@ -82,6 +83,18 @@ Note: WP-03b added transparent huge pages for the interner's arrays (Linux) and 
 The connected target is dominated by two `CLOCK_MONOTONIC_RAW`/QPC reads (about 27 ns each on the CI VM). The implementation's own cost is about 15 ns. The plan concern was raised with the user; the proposal is an 80 ns binding budget until a TSC fast-path WP exists.
 Follow-ups fixed in WP-51b: sidecar re-open now writes `<stem>.<n>.<ext>` (WP-52 import must also pick up numbered siblings); the perf test retries and no longer fails on drops.
 Noted for later: `Begin/EndFiberSwitch` take a sharded mutex (not Begin/End).
+
+## WP-36 measured numbers (verifier, 4-vCPU dev VM; large = 64 threads × 10 min)
+
+| Metric | Target | Measured |
+|---|---|---|
+| Build, large (4 workers / 1 worker) | < 15 s | 2.7–3.8 s / 12.4 s |
+| LOD memory | — | 3.34 B/sample (953.7 MiB on large) |
+| Single-row query, any zoom (band + strip + 32-depth flame) | < 4 ms | ≈ 0.4 ms worst |
+| 64-row frame, band + strip, 1920 px (spec 3.9 reading) | < 4 ms | 6.8–8.2 ms worst (pixel just under the 8192-tick base: direct strip; above base: LOD band ≈ 28 ns/column) |
+| Medium 16-row frame incl. flame | < 4 ms | 2.45 ms CI, 3.9–6.2 ms dev VM |
+
+Merged because the WP-36 per-query criterion is met and correctness probes (random coverage, LOD vs direct, TSan/ASan build-vs-query races, cancel/resume hash) are clean. The spec 3.9 frame target is carried by WP-36b: cut the per-column band/strip cost about 2× (fuse band+strip, avoid 64-bit divisions in moveTo), make the sub-base strip path cheaper, and assert the 64-row band+strip frame with a non-flaky metric. Notes: entry points are `TimelineLod::prepare()/build()` rather than `lod::build(TraceModel&)`; progress fires per finished thread; no thread build priority yet (a WP-42 need).
 
 ## Windows / privileged verification queue
 
