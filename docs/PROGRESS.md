@@ -14,7 +14,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-04 | Synthetic trace generator `tracegen` | C | in progress | wp/04-tracegen | 2026-10-25 |
 | WP-10 | Agent skeleton and control protocol | A | merged (CI green incl. windows named-pipe tests; Windows console checks queued) | wp/10-agent | 2026-10-25 |
 | WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
-| WP-12 | ETL to `.tachyon` converter | A | in progress | wp/12-etlconvert | 2026-10-25 |
+| WP-12 | ETL to `.tachyon` converter | A | needs Windows verification (merged; CI windows job converted a real ETL; hot_a/b/c ranking and 2 GB timing unconfirmed) | wp/12-etlconvert | 2026-10-25 |
 | WP-13 | Launch, attach, process tree, CLI | A | not started | wp/13-launch-cli | |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | not started | wp/20-symbol-core | |
@@ -108,6 +108,15 @@ build\windows-release\bin\tachyon-agent.exe --backend mock --pipe \\.\pipe\x    
 build\windows-release\bin\tachyon-agent.exe --backend etw                          (unelevated: expect ENOPRIV, exit 3)
 ```
 Known follow-ups assigned to WP-11: named-pipe DACL so a non-elevated client can talk to an elevated agent; broadcast outside the agent lock with a write timeout (a stalled client can currently wedge state changes); don't hold the agent lock across `backend->flush()`.
+
+### WP-12 (elevated prompt)
+```
+ctest --preset windows-release -R EtlConvertWindows -V
+type build\windows-release\etlconvert_real_summary.txt
+```
+Confirm in the summary: the hot_a > hot_b > hot_c ranking was asserted, not "skipped: no PDB"; the sample count equals etlstat's; and the match-role histograms. Copy the histograms into docs/etw-notes.md to resolve the [VERIFY] items.
+30 s run: `etlstat record --out t.etl --seconds 30 --hz 8000 --exe tachyon-testbed.exe --exe-args "--scenario spin --duration 30"`, then convert it (a CLI wrapper arrives with WP-13) and compare samplesWritten with `etlstat stats t.etl --image tachyon-testbed.exe`.
+2 GB timing: convert a real ~2 GB ETL and check ConvertStats.seconds < 90 on an 8-core machine. On Linux the pipeline alone measured 1.40 M events/s, about 20 s extrapolated for 2 GB.
 
 ## Open questions (Part 7) and assumed defaults
 

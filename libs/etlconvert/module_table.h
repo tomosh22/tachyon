@@ -23,7 +23,7 @@ using PeLookupFn = std::function<Result<PeInfo>(const std::string& dosPath)>;
 // How a module was identified; counted in ConvertStats.
 struct ModuleIdCounters {
   uint32_t rsds = 0;         // id_kind 1: PDB GUID + age from the CodeView record
-  uint32_t fallback = 0;     // id_kind 0 with TimeDateStamp + SizeOfImage
+  uint32_t fallback = 0;     // id_kind 3 (kModuleIdPeTimestampSize): TimeDateStamp + SizeOfImage
   uint32_t fileMissing = 0;  // subset of fallback: file could not be read
   uint32_t noCodeView = 0;   // subset of fallback: PE has no RSDS record
   uint32_t mismatch = 0;     // subset of fallback: file on disk differs from the loaded image
