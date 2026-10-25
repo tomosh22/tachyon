@@ -14,7 +14,21 @@
 #include <sstream>
 #include <string>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace tachyon::tracegen::testing_util {
+
+inline long currentPid() {
+#if defined(_WIN32)
+  return static_cast<long>(_getpid());
+#else
+  return static_cast<long>(getpid());
+#endif
+}
 
 // Unique scratch directory for the current test, removed on destruction.
 class TempDir {
@@ -22,8 +36,9 @@ class TempDir {
   TempDir() {
     static int counter = 0;
     const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
-    std::string name = std::string("tachyon_tracegen_") + info->test_suite_name() + "_" + info->name() + "_" +
-                       std::to_string(counter++);
+    // The pid keeps parallel test processes (other worktrees, ctest -j with shared TMPDIR) apart.
+    std::string name = std::string("tachyon_tracegen_") + std::to_string(currentPid()) + "_" +
+                       info->test_suite_name() + "_" + info->name() + "_" + std::to_string(counter++);
     for (char& c : name)
       if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') c = '_';  // parameterized names: '/', '"'
     m_path = std::filesystem::temp_directory_path() / name;

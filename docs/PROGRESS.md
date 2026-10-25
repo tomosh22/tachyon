@@ -25,7 +25,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
 | WP-32 | Attribution and aggregation | C | merged | wp/32-attribution | 2026-10-25 |
 | WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | merged | wp/32b-return-address | 2026-10-25 |
-| WP-33 | Filters, cancellation, query cache | C | in progress | wp/33-query-cache | 2026-10-25 |
+| WP-33 | Filters, cancellation, query cache | C | in progress (verifier FAIL: executor lost wakeup, racy tests, deep-stack cancel; fixing) | wp/33-query-cache | 2026-10-25 |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
 | WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
