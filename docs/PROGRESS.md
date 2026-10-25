@@ -25,7 +25,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
 | WP-32 | Attribution and aggregation | C | merged | wp/32-attribution | 2026-10-25 |
 | WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | merged | wp/32b-return-address | 2026-10-25 |
-| WP-33 | Filters, cancellation, query cache | C | in progress (verifier FAIL: executor lost wakeup, racy tests, deep-stack cancel; fixing) | wp/33-query-cache | 2026-10-25 |
+| WP-33 | Filters, cancellation, query cache | C | merged | wp/33-query-cache | 2026-10-25 |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
 | WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
@@ -116,6 +116,19 @@ Verifier FAIL on the first commit (HTTP two-tier servers not handled), plus secu
 All 8 fixtures match expected.json exactly. Large also matches exactly (verifier probe, 1055 functions). TSan is clean on concurrent queries. Spec 3.7 signature changed to `QueryContext` (see docs/specs/analysis-query.md), and the return-address rule is added, implemented by WP-32b.
 Recurring load flake: TestbedScenarios.EveryScenarioRunsAndProducesValidReport fails under `ctest -j` (seen 4 times) and passes alone. Queued as WP-02b (make the scenario assertions load-tolerant).
 WP-32b merged (verifier PASS): `SymbolService::lookupCaller` and `functionKeyForCaller`, `frameKeyAt`/`usesExactAddress` helpers in libs/analysis/attribution.h for WP-34/35/46, iterative NodeAgg destruction (NodeAgg is no longer an aggregate, so no brace-init), tracegen non-leaf offsets in [1, size) (only the medium manifest hash changed). Orchestrator fix: the worker memory budget now counts the kernel-leaf arrays.
+
+## WP-33 notes
+
+Merged after the verifier FAIL was fixed in 71a9d73 (lost wakeup in waitIdle, racy executor tests, deep-stack cancellation latency, cache byte accounting, task exceptions reported as Cancelled). The verifier confirmed filters against brute force on all fixtures (about 1,100 combinations on medium), cache key canonicalisation and forced collisions, a TSan-clean concurrent workload, and the claim that nested fan-out through the executor cannot deadlock.
+
+| Metric | Measured | Budget |
+|---|---|---|
+| cache hit (shared API) | 0.11–0.18 µs | 50 µs |
+| bottomUp over a 10% range, medium, cold | 1.0–2.7 ms | 30 ms |
+| cancellation latency (medium / 20 M samples / executor / 100k-deep stacks) | 12.5 / 8.7 / 7.3 / 4.3 ms worst | 50 ms |
+| full-range bottomUp, medium (post-merge main) | 14.6 ms | 300 ms |
+
+API additions in query.h: `FunctionRegistry` (`ctx.functionIdx(key)`), `QueryCacheConfig`, the `*Shared` queries, `QueryExecutor` with `GenerationToken`, and `setExecutor`. Subtree root 0 now means no subtree. `Filter::function` tests the stack after the subtree cut. A FunctionIdx from another context is not detected (documented).
 
 ## Queued follow-ups
 
