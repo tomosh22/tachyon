@@ -13,14 +13,14 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-03b | Callstack interning throughput (10 s target) | — | merged (skewed 8.66 s met with streaming-input harness; uniform 11.99 s best effort) | wp/03b-intern-speed | 2026-10-25 |
 | WP-04 | Synthetic trace generator `tracegen` | C | merged (CI green incl. windows manifest; independent oracle 0 mismatches) | wp/04-tracegen | 2026-10-25 |
 | WP-10 | Agent skeleton and control protocol | A | merged (CI green incl. windows named-pipe tests; Windows console checks queued) | wp/10-agent | 2026-10-25 |
-| WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
+| WP-11 | ETW session controller | A | in progress | wp/11-etw-session | 2026-10-25 |
 | WP-12 | ETL to `.tachyon` converter | A | needs Windows verification (merged; CI windows job converted a real ETL; hot_a/b/c ranking and 2 GB timing unconfirmed) | wp/12-etlconvert | 2026-10-25 |
 | WP-13 | Launch, attach, process tree, CLI | A | not started | wp/13-launch-cli | |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | not started | wp/20-symbol-core | |
 | WP-21 | Symbol locator and HTTP client | B | not started | wp/21-symbol-locator | |
 | WP-22 | DIA symbol provider | B | not started | wp/22-dia | |
-| WP-30 | Model loader | C | not started | wp/30-model | |
+| WP-30 | Model loader | C | in progress | wp/30-model | 2026-10-25 |
 | WP-31 | Thread state intervals | C | not started | wp/31-thread-states | |
 | WP-32 | Attribution and aggregation | C | not started | wp/32-attribution | |
 | WP-33 | Filters, cancellation, query cache | C | not started | wp/33-filters | |
@@ -37,7 +37,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
-| WP-51 | Client runtime | E | in progress | wp/51-sdk-runtime | 2026-10-25 |
+| WP-51 | Client runtime | E | in review | wp/51-sdk-runtime | 2026-10-25 |
 | WP-52 | Agent-side ingestion and merge | — | not started | wp/52-ingestion | |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
