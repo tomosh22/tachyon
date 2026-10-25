@@ -64,8 +64,8 @@ TEST(WaitReasons, LinuxPrevState) {
 }
 
 TEST(WaitReasons, OldStateClassification) {
-  for (uint8_t s : {1, 3, 7}) EXPECT_TRUE(oldStateIsReady(s)) << int(s);
-  for (uint8_t s : {0, 2, 4, 5, 6}) EXPECT_FALSE(oldStateIsReady(s)) << int(s);
+  for (int s : {1, 3, 7}) EXPECT_TRUE(oldStateIsReady(static_cast<uint8_t>(s))) << int(s);
+  for (int s : {0, 2, 4, 5, 6}) EXPECT_FALSE(oldStateIsReady(static_cast<uint8_t>(s))) << int(s);
   EXPECT_TRUE(oldStateIsExit(4));
   EXPECT_FALSE(oldStateIsExit(5));
   EXPECT_FALSE(oldStateIsExit(1));
