@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <thread>
 
 namespace tachyon::control {
@@ -130,8 +131,11 @@ TEST(ServerClient, ConcurrentClients) {
   std::vector<std::thread> threads;
   for (int t = 0; t < kClients; ++t) {
     threads.emplace_back([&] {
+      const auto t0 = std::chrono::steady_clock::now();
       auto c = Client::connect(f.address);
-      ASSERT_TRUE(c.ok());
+      const double connectS = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      ASSERT_TRUE(c.ok()) << c.error().toString() << " after " << connectS << " s";
+      if (connectS > 0.5) ADD_FAILURE() << "slow connect: " << connectS << " s";
       for (int i = 1; i <= kRequests; ++i) {
         auto r = c->call(StatusRequest{});
         ASSERT_TRUE(r.ok());
