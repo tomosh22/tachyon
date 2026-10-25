@@ -1,4 +1,4 @@
-<!-- Orchestrator-owned copy of sdk/src/inst_wire.md (WP-51). Keep both in sync. -->
+<!-- Orchestrator-owned copy of sdk/src/inst_wire.md (WP-51, WP-51b). Keep both in sync. -->
 
 # Tachyon instrumentation wire format, version 1
 
@@ -14,7 +14,11 @@ The same byte stream is used for all of them:
   and writes the stream. The SDK never reads from this connection.
 - Sidecar file `.tachyon-inst`: exactly the same byte stream written to a file. Default path
   `<cwd>/<exe-name>-<pid>.tachyon-inst` (exe name without directory or extension); `TACHYON_SIDECAR=<path>`
-  overrides, `TACHYON_SIDECAR=off` disables the sidecar.
+  overrides, `TACHYON_SIDECAR=off` disables the sidecar. Each sidecar file holds exactly one stream (one
+  StreamHeader). If the SDK has to open the sidecar again in the same process (it switched to an agent and the
+  agent was lost), earlier files are never truncated: the n-th re-open (n >= 1) writes `<stem>.<n>.<ext>`, e.g.
+  `app-1234.1.tachyon-inst`, inserted before the last extension of the configured path. Consumers that import a
+  sidecar should also look for these numbered siblings and treat them as later parts of the same process.
 
 All integers are little-endian, all structs are packed (no padding). Timestamps are `uint64` ticks of the trace
 clock (QPC on Windows, `CLOCK_MONOTONIC_RAW` nanoseconds on Linux); `clock_frequency_hz` in the StreamHeader gives

@@ -38,7 +38,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
 | WP-51 | Client runtime | E | merged (CI green incl. windows; connected overhead 46.9 ns Linux / 68 ns Windows vs 40 ns target, under 80 ns gate; disabled 4.7 / 16 ns) | wp/51-sdk-runtime | 2026-10-25 |
-| WP-51b | SDK runtime fixes (flaky AgentLossFallsBack test, sidecar truncation, perf flake) | E | in progress | wp/51b-sdk-fixes | 2026-10-25 |
+| WP-51b | SDK runtime fixes (flaky AgentLossFallsBack test, sidecar truncation, perf flake) | E | merged (root cause: fake-agent race; 20× ctest repeats green under load) | wp/51b-sdk-fixes | 2026-10-25 |
 | WP-52 | Agent-side ingestion and merge | — | not started | wp/52-ingestion | |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
@@ -80,9 +80,7 @@ Note: WP-03b added transparent huge pages for the interner's arrays (Linux) and 
 | 16 threads × 1 M scopes stress | no corruption | — | passes; received + dropped == emitted exactly | passes |
 
 The connected target is dominated by two `CLOCK_MONOTONIC_RAW`/QPC reads (about 27 ns each on the CI VM). The implementation's own cost is about 15 ns. The plan concern was raised with the user; the proposal is an 80 ns binding budget until a TSC fast-path WP exists.
-Follow-ups assigned to WP-52:
-- reopening the sidecar after agent loss truncates it (`O_TRUNC`); use a new file or append;
-- the connected perf test asserts drops == 0 with no retry and is flaky under load.
+Follow-ups fixed in WP-51b: sidecar re-open now writes `<stem>.<n>.<ext>` (WP-52 import must also pick up numbered siblings); the perf test retries and no longer fails on drops.
 Noted for later: `Begin/EndFiberSwitch` take a sharded mutex (not Begin/End).
 
 ## Windows / privileged verification queue
