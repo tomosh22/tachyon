@@ -14,4 +14,8 @@ std::unique_ptr<IPanel> makeTraceInfoPanel();
 // timeline/timeline_panel.cpp.
 std::unique_ptr<IPanel> makeThreadsTimelinePanel();
 
+// Thread-safe: factory. WP-46: wait / wake-up inspector ("Thread Interaction"); implemented in
+// interaction/interaction_panel.cpp.
+std::unique_ptr<IPanel> makeThreadInteractionPanel();
+
 }  // namespace tachyon::viewer

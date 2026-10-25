@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace tachyon::viewer {
@@ -38,15 +39,56 @@ struct HoveredItem {
   bool operator==(const HoveredItem&) const = default;
 };
 
+// A wait of one thread chosen for inspection (WP-46): the off-CPU episode that starts at `switchOutTs` on
+// `thread`. Identified by value so it survives rebuilds of the interval vectors.
+struct WaitSelection {
+  ThreadIdx thread;
+  uint64_t switchOutTs = 0;
+
+  bool operator==(const WaitSelection&) const = default;
+};
+
+// Asks the timeline to show [t0, t1) (absolute ticks) on the row of `thread` (WP-46). `serial` is unique per
+// request (0 = no request yet) so that repeating the same request is still an event.
+struct NavigationRequest {
+  uint64_t serial = 0;
+  ThreadIdx thread;
+  uint64_t t0 = 0, t1 = 0;
+
+  bool operator==(const NavigationRequest&) const = default;
+};
+
+// Asks the shell to open and focus a panel by name (WP-46). `serial` as for NavigationRequest.
+struct PanelRequest {
+  uint64_t serial = 0;
+  std::string name;
+
+  bool operator==(const PanelRequest&) const = default;
+};
+
 struct SelectionState {
   // Current time filter; nullopt means "whole trace".
   std::optional<ViewFilter> timeFilter;
   ThreadIdx selectedThread;
   std::optional<FunctionKey> selectedFunction;
   HoveredItem hovered;
+  // WP-46 additions.
+  std::optional<WaitSelection> selectedWait;
+  NavigationRequest navigation;  // the last request; serial 0 after clear()
+  PanelRequest panelRequest;     // the last request; serial 0 after clear()
 };
 
-enum class SelectionField : uint8_t { TimeFilter, SelectedThread, SelectedFunction, Hovered, All };
+// SelectedWait, Navigation and PanelRequest were added by WP-46 after All; All still means "everything".
+enum class SelectionField : uint8_t {
+  TimeFilter,
+  SelectedThread,
+  SelectedFunction,
+  Hovered,
+  All,
+  SelectedWait,
+  Navigation,
+  PanelRequest
+};
 
 // Main-thread only. Dispatch is synchronous, in subscription order. A callback may unsubscribe itself or any
 // other subscriber: a subscriber removed before its turn in the current dispatch is not called. A callback
@@ -70,6 +112,12 @@ class SelectionBus {
   void setSelectedThread(ThreadIdx thread);
   void setSelectedFunction(std::optional<FunctionKey> function);
   void setHovered(const HoveredItem& item);
+  // Main-thread only. Publishes only if the value changed.
+  void setSelectedWait(std::optional<WaitSelection> wait);
+  // Main-thread only. Always publishes (an event, not a value): assigns the next serial and returns it.
+  uint64_t requestNavigation(ThreadIdx thread, uint64_t t0, uint64_t t1);
+  // Main-thread only. Always publishes; assigns the next serial and returns it.
+  uint64_t requestPanel(std::string name);
   // Main-thread only. Resets everything (e.g. a new document) and publishes SelectionField::All once.
   void clear();
 
@@ -87,6 +135,7 @@ class SelectionBus {
   SelectionState m_state;
   std::vector<Subscriber> m_subscribers;
   SubscriptionId m_nextId = 1;
+  uint64_t m_nextSerial = 1;  // survives clear() so a new request never repeats an old serial
 };
 
 }  // namespace tachyon::viewer

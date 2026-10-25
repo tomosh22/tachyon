@@ -131,3 +131,50 @@ TEST(SelectionBus, ClearResetsAndPublishesOnce) {
   EXPECT_EQ(field, SelectionField::All);
   EXPECT_FALSE(bus.state().selectedThread.valid());
 }
+
+// ---- WP-46 additions: selected wait, navigation and panel requests ----
+
+TEST(SelectionBusInteraction, SelectedWaitPublishesOnlyOnChange) {
+  SelectionBus bus;
+  int calls = 0;
+  SelectionField last = SelectionField::All;
+  bus.subscribe([&](const SelectionState&, SelectionField f) {
+    ++calls;
+    last = f;
+  });
+  bus.setSelectedWait(WaitSelection{ThreadIdx(2), 500});
+  EXPECT_EQ(calls, 1);
+  EXPECT_EQ(last, SelectionField::SelectedWait);
+  ASSERT_TRUE(bus.state().selectedWait.has_value());
+  EXPECT_EQ(bus.state().selectedWait->thread, ThreadIdx(2));
+  EXPECT_EQ(bus.state().selectedWait->switchOutTs, 500u);
+  bus.setSelectedWait(WaitSelection{ThreadIdx(2), 500});
+  EXPECT_EQ(calls, 1);
+  bus.setSelectedWait(std::nullopt);
+  EXPECT_EQ(calls, 2);
+  EXPECT_FALSE(bus.state().selectedWait.has_value());
+}
+
+TEST(SelectionBusInteraction, NavigationAndPanelRequestsAreEventsWithIncreasingSerials) {
+  SelectionBus bus;
+  std::vector<SelectionField> fields;
+  bus.subscribe([&](const SelectionState&, SelectionField f) { fields.push_back(f); });
+  const uint64_t a = bus.requestNavigation(ThreadIdx(1), 10, 20);
+  const uint64_t b = bus.requestNavigation(ThreadIdx(1), 10, 20);  // the same request is still an event
+  EXPECT_GT(b, a);
+  EXPECT_EQ(bus.state().navigation.serial, b);
+  EXPECT_EQ(bus.state().navigation.thread, ThreadIdx(1));
+  EXPECT_EQ(bus.state().navigation.t0, 10u);
+  EXPECT_EQ(bus.state().navigation.t1, 20u);
+  const uint64_t c = bus.requestPanel("Thread Interaction");
+  EXPECT_GT(c, b);
+  EXPECT_EQ(bus.state().panelRequest.name, "Thread Interaction");
+  ASSERT_EQ(fields.size(), 3u);
+  EXPECT_EQ(fields[0], SelectionField::Navigation);
+  EXPECT_EQ(fields[2], SelectionField::PanelRequest);
+  // clear() resets the state but serials keep growing, so a stale serial never matches a new request.
+  bus.clear();
+  EXPECT_EQ(bus.state().navigation.serial, 0u);
+  EXPECT_FALSE(bus.state().selectedWait.has_value());
+  EXPECT_GT(bus.requestNavigation(ThreadIdx(1), 1, 2), c);
+}
