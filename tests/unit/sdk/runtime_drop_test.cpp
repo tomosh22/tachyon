@@ -61,6 +61,7 @@ TEST_F(DropTest, OverflowIsCountedReportedAndKeepsScopesBalanced) {
 }
 
 TEST_F(DropTest, NoDropsWhenTheDrainKeepsUp) {
+  sdk_testing::setEnv("TACHYON_RING_KB", "1024");  // generous: only scheduling jitter could cause drops
   const auto path = startSidecar();
   for (int i = 0; i < 2000; ++i) {
     Tachyon_BeginEvent("calm", "x", 0);

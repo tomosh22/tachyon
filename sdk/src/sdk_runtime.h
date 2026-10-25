@@ -122,6 +122,7 @@ class Runtime {
   std::mutex m_shutdownMutex;
   std::atomic<bool> m_shutDown{false};
   bool m_started = false;
+  bool m_timerPeriodRaised = false;  // Windows: timeBeginPeriod(1) in effect
 
   // Sink (flush thread, then the shutdown caller after the join).
   Channel m_sink;

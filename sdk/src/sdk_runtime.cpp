@@ -17,6 +17,11 @@
 
 #include "tachyon/tachyon.h"
 
+#if defined(_WIN32)
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")
+#endif
+
 namespace tachyon::sdk {
 
 std::atomic<uint32_t> g_state{kStateUninit};
@@ -329,6 +334,10 @@ Runtime::Runtime(RuntimeConfig config) : m_config(std::move(config)) {
 Runtime::~Runtime() = default;  // never invoked for the process-wide instance
 
 bool Runtime::start() {
+#if defined(_WIN32)
+  // Without this the 1 ms drain cadence degrades to the default 15.6 ms timer tick.
+  m_timerPeriodRaised = timeBeginPeriod(1) == TIMERR_NOERROR;
+#endif
   try {
     m_thread = std::thread([this] { run(); });
   } catch (...) {
@@ -684,6 +693,9 @@ void Runtime::shutdown() {
     }
     m_thread.join();
   }
+#if defined(_WIN32)
+  if (m_timerPeriodRaised) timeEndPeriod(1);
+#endif
   // The flush thread is gone; this thread is now the (only) consumer.
   for (int i = 0; i < 8; ++i) {
     if (drainAll() == 0) break;
