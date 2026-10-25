@@ -85,7 +85,9 @@ default `+0x10` or smaller for tiny functions), or an unmapped absolute address:
 
 `stack_gen`: `[{"prefix": "gs", "count": 64, "min_depth": 6, "max_depth": 24, "root": "engine.exe!main",
 "modules": ["engine.exe", ...]}]` creates stacks `gs0..gs63` from random functions of the listed modules (default
-all), at random offsets.
+all), at random offsets. Non-leaf frames are return addresses, so their offset is drawn in [1, size) (never the
+function's first byte; a call that is the last instruction of the previous function is a different, valid case that
+the analysis handles but the generator does not emit); the leaf frame (last) uses [0, size). One RNG draw per frame.
 
 ### threads
 ```jsonc

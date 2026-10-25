@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <imgui.h>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <sstream>
@@ -109,8 +110,8 @@ TEST(ViewerApp, OpensTraceAsynchronouslyAndNotifiesPanels) {
   EXPECT_GT(panel->draws, 0);
   ASSERT_FALSE(app.settings().recentFiles.empty());
 
-  // Service slots exist but are empty until WP-20/33/36 install implementations.
-  EXPECT_EQ(app.document()->symbols(), nullptr);
+  // Query / LOD slots stay empty until WP-33/36 install implementations; symbols are installed on open.
+  EXPECT_NE(app.document()->symbols(), nullptr);  // WP-42b: one SymbolService per document
   EXPECT_EQ(app.document()->queries(), nullptr);
   EXPECT_EQ(app.document()->lod(), nullptr);
 
@@ -181,4 +182,52 @@ TEST(ViewerApp, PanelNamesAreUnique) {
   EXPECT_TRUE(app.panels().add(std::make_unique<RecordingPanel>()));
   EXPECT_FALSE(app.panels().add(std::make_unique<RecordingPanel>()));
   EXPECT_NE(app.panels().find("Trace Info"), nullptr);
+}
+
+namespace {
+
+// Null renderer that counts wake() calls (made from the symbol workers).
+class WakeCountingRenderer final : public IRenderer {
+ public:
+  WakeCountingRenderer(std::atomic<int>* wakes) : m_inner(makeNullRenderer()), m_wakes(wakes) {}
+  bool init(std::string& error) override { return m_inner->init(error); }
+  void shutdown() override { m_inner->shutdown(); }
+  PlatformEvents pollEvents(int timeoutMs) override { return m_inner->pollEvents(timeoutMs); }
+  void beginFrame() override { m_inner->beginFrame(); }
+  void endFrame() override { m_inner->endFrame(); }
+  float dpiScale() const override { return m_inner->dpiScale(); }
+  void setWindowTitle(const std::string& title) override { m_inner->setWindowTitle(title); }
+  bool isHeadless() const override { return true; }
+  void wake() override { m_wakes->fetch_add(1); }
+
+ private:
+  std::unique_ptr<IRenderer> m_inner;
+  std::atomic<int>* m_wakes;
+};
+
+}  // namespace
+
+TEST(ViewerApp, SymbolResolutionWakesTheEventLoop) {
+  std::atomic<int> wakes{0};
+  App app(std::make_unique<WakeCountingRenderer>(&wakes), headlessOptions());
+  std::string error;
+  ASSERT_TRUE(app.init(error)) << error;
+  EXPECT_EQ(wakes.load(), 0);
+  app.openFile(fixture("tiny.tachyon"));  // tiny.symbols.json sits next to it
+  ASSERT_TRUE(frameUntil(app, [&] { return app.document() != nullptr; }));
+  // The workers report the module transitions: each one wakes the (possibly blocked) loop, and the events are
+  // then delivered on the main thread, bumping the symbol generation.
+  const uint64_t generation = app.symbolGeneration();
+  ASSERT_TRUE(frameUntil(app, [&] {
+    const auto p = app.document()->symbols()->progress();
+    return p.total > 0 && p.done == p.total;
+  }));
+  EXPECT_GT(wakes.load(), 0);
+  app.frame(0);
+  EXPECT_GE(app.symbolGeneration(), generation);
+  EXPECT_FALSE(app.pumpSymbolEvents()) << "everything was delivered already";
+  app.commands().run("file.close");  // joins the workers; waking after that must not happen
+  const int afterClose = wakes.load();
+  app.frame(0);
+  EXPECT_EQ(wakes.load(), afterClose);
 }

@@ -372,6 +372,7 @@ Result<ThreadStateTotals>    threadStateTotals(const TraceModel&, const Filter&,
 Result<std::vector<FrameSummary>> frames(const TraceModel&, const Filter&);
 ```
 `FunctionKey` = `(ModuleIdx, functionStartRva)` for sampled functions or `(kScopeModule, StringIdx)` for instrumentation scopes, so both appear in the same trees.
+*(Orchestrator change, WP-32: queries take `const QueryContext&` (model + SymbolService + options + memo) instead of `const TraceModel&`, with a trailing defaulted `Cancel`. Non-leaf frames resolve at return address − 1. See docs/specs/analysis-query.md.)*
 
 ### 3.8 Attribution rules (normative)
 1. Sample weight = `sampleIntervalTicks`, clipped so that no sample's weight extends beyond the end of the `Running` interval it falls in. A sample with no enclosing `Running` interval (thread not running per context-switch data) gets weight 0 and is excluded from time totals but kept for stack display.

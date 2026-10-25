@@ -504,7 +504,12 @@ class Parser {
             StackFrame fr;
             fr.module = mi;
             fr.function = static_cast<uint32_t>(rng.below(m.functions.size()));
-            fr.value = m.functions[fr.function].rva + rng.below(m.functions[fr.function].size);
+            // One draw per frame regardless of position. Non-leaf frames are return addresses: they lie
+            // inside the caller, never at its first byte, so their offset is mapped into [1, size).
+            const uint64_t fnSize = m.functions[fr.function].size;
+            uint64_t off = rng.below(fnSize);
+            if (d + 1 < depth && fnSize > 1) off = 1 + off % (fnSize - 1);
+            fr.value = m.functions[fr.function].rva + off;
             st.rootToLeaf.push_back(fr);
           }
           addStack(std::move(st), w);

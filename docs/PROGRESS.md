@@ -20,18 +20,20 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | merged (oracle 0/929 mismatches; cold resolve 11.5 ms, memo 2.2 ns on CI) | wp/20-symbol-core | 2026-10-25 |
 | WP-21 | Symbol locator and HTTP client | B | merged (CI green incl. msdl.microsoft.com ntdll.pdb fetch) | wp/21-symbol-locator | 2026-10-25 |
-| WP-22 | DIA symbol provider | B | not started | wp/22-dia | |
+| WP-22 | DIA symbol provider | B | in progress | wp/22-dia-provider | 2026-10-25 |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
-| WP-32 | Attribution and aggregation | C | in progress | wp/32-attribution | 2026-10-25 |
-| WP-33 | Filters, cancellation, query cache | C | not started | wp/33-filters | |
+| WP-32 | Attribution and aggregation | C | merged | wp/32-attribution | 2026-10-25 |
+| WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | merged | wp/32b-return-address | 2026-10-25 |
+| WP-33 | Filters, cancellation, query cache | C | in progress | wp/33-query-cache | 2026-10-25 |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
 | WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | not started | wp/41-session-explorer | |
-| WP-42 | Threads timeline | D | in progress | wp/42-threads-timeline | 2026-10-25 |
+| WP-42 | Threads timeline | D | merged; needs GPU verification (60 fps) | wp/42-threads-timeline | 2026-10-25 |
+| WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | merged | wp/42b-timeline-symbols | 2026-10-25 |
 | WP-43 | Call graph panel | D | not started | wp/43-call-graph | |
 | WP-44 | Function list and butterfly | D | not started | wp/44-function-list | |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
@@ -41,7 +43,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
 | WP-51 | Client runtime | E | merged (CI green incl. windows; connected overhead 46.9 ns Linux / 68 ns Windows vs 40 ns target, under 80 ns gate; disabled 4.7 / 16 ns) | wp/51-sdk-runtime | 2026-10-25 |
 | WP-51b | SDK runtime fixes (flaky AgentLossFallsBack test, sidecar truncation, perf flake) | E | merged (root cause: fake-agent race; 20× ctest repeats green under load) | wp/51b-sdk-fixes | 2026-10-25 |
-| WP-52 | Agent-side ingestion and merge | — | not started | wp/52-ingestion | |
+| WP-52 | Agent-side ingestion and merge | A | in progress | wp/52-ingestion | 2026-10-25 |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
 | WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
@@ -101,7 +103,28 @@ Merged because the WP-36 per-query criterion is met and correctness probes (rand
 
 Verifier FAIL on the first commit (HTTP two-tier servers not handled), plus security hardening; all fixed in 05df6da: index2.txt probed once per server; remote `file.ptr` PATH followed only under configured roots (never UNC); 4 KiB file.ptr cap and a 2 GiB default download cap; curl protocols limited to http/https; percent-encoded URL components; WinHTTP truncated-body and timeout handling. Windows CI fetched ntdll.pdb from msdl.microsoft.com. Follow-ups: nothing calls `unpin()` yet (WP-22 or SymbolService should when providers close); the PDB name falls back to `<image stem>.pdb` because Module/ModuleRec has no PDB name field (proposal pending: carry the RSDS pdb file name).
 
+## WP-32 measured numbers (verifier, 4-vCPU VM, cold = fresh QueryContext after load + thread states + symbols)
+
+| Query | Fixture | Measured | Budget |
+|---|---|---|---|
+| bottomUpFunctions full range | medium (7.49 M samples) | 12–17 ms | 300 ms |
+| bottomUpFunctions full range | large (299.5 M samples) | 0.26–0.51 s | 3 s |
+| memoized repeat | medium / large | 11 µs / 32 µs | — |
+
+All 8 fixtures match expected.json exactly. Large also matches exactly (verifier probe, 1055 functions). TSan is clean on concurrent queries. Spec 3.7 signature changed to `QueryContext` (see docs/specs/analysis-query.md), and the return-address rule is added, implemented by WP-32b.
+Recurring load flake: TestbedScenarios.EveryScenarioRunsAndProducesValidReport fails under `ctest -j` (seen 4 times) and passes alone. Queued as WP-02b (make the scenario assertions load-tolerant).
+WP-32b merged (verifier PASS): `SymbolService::lookupCaller` and `functionKeyForCaller`, `frameKeyAt`/`usesExactAddress` helpers in libs/analysis/attribution.h for WP-34/35/46, iterative NodeAgg destruction (NodeAgg is no longer an aggregate, so no brace-init), tracegen non-leaf offsets in [1, size) (only the medium manifest hash changed). Orchestrator fix: the worker memory budget now counts the kernel-leaf arrays.
+
+## Queued follow-ups
+
+- WP-02b: make TestbedScenarios.EveryScenarioRunsAndProducesValidReport load-tolerant (fails under ctest -j).
+- WP-21b: make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.
+- WP-36b: 64-row LOD frame under 4 ms.
+- `SymbolService::resolveAllAsync` should take `const TraceModel&` (the viewer const_casts today).
+
 ## Windows / privileged verification queue
+
+WP-42 GPU check (needs a mid-range GPU): `cmake --build --preset windows-release --target tachyon_fixtures_large`, open `build/windows-release/fixtures/large.tachyon` in `tachyon-viewer.exe` at 1080p and 1440p with all 64 rows visible, wait for "Building timeline index" to finish, then wheel-zoom from the whole trace to about 100 µs at 3 positions and drag-pan continuously; repeat with 4 rows expanded and during the first minute while the LOD builds. Report p95 and worst frame time (target: steady 60 fps, no frame > 16.6 ms). CPU-only frame cost measured on Linux: large, 64 collapsed rows, 1920 px: worst 5.2–6.9 ms, median about 3 ms; peak about 367 k vertices per frame.
 
 WP-13 (CI on the elevated windows-2022 runner already ran the 3 s launch acceptance test and the attach/child-following tests). On a dev box, in an elevated prompt:
 1. `tachyon-agent --backend etw --pipe \\.\pipe\tachyon-agent`

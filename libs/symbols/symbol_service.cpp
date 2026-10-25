@@ -13,6 +13,10 @@ struct SymbolService::Job {
   std::vector<std::string> errors;  // written by the owning worker before the final state's release store
   std::vector<std::unique_ptr<ISymbolProvider>> providers;
   std::vector<ResolvedAddress> memo;  // indexed by FrameIdx; slot written before its module's release store
+  // Return-address variant (rva - 1), only for frames that occur in a non-leaf stack position. callerSlot is
+  // indexed by FrameIdx (kNoSlot = never non-leaf); memoCaller is indexed by the slot. Written like `memo`.
+  std::vector<uint32_t> callerSlot;
+  std::vector<ResolvedAddress> memoCaller;
   std::vector<uint32_t> referenced;
   std::vector<std::vector<uint32_t>> framesOfModule;
   std::atomic<uint32_t> next{0};
@@ -24,6 +28,8 @@ struct SymbolService::Job {
 };
 
 namespace {
+
+constexpr uint32_t kNoSlot = 0xFFFFFFFFu;
 
 bool isFinal(SymbolState s) {
   return s == SymbolState::Resolved || s == SymbolState::NotFound || s == SymbolState::Failed;
@@ -80,6 +86,18 @@ void SymbolService::resolveAllAsync(model::TraceModel& model,
   job->providers.resize(moduleCount);
   job->memo.resize(model.frames.size());
   job->framesOfModule.resize(moduleCount);
+  // A frame is non-leaf when some callstack node referencing it has a child: the child's parent is that node.
+  job->callerSlot.assign(model.frames.size(), kNoSlot);
+  {
+    uint32_t slots = 0;
+    for (const model::CallstackNode& n : model.nodes) {
+      if (!n.parent.valid() || n.parent.get() == 0 || n.parent.get() >= model.nodes.size()) continue;
+      const FrameIdx pf = model.nodes[n.parent.get()].frame;
+      if (!pf.valid() || pf.get() >= model.frames.size() || job->callerSlot[pf.get()] != kNoSlot) continue;
+      job->callerSlot[pf.get()] = slots++;
+    }
+    job->memoCaller.resize(slots);
+  }
   for (size_t f = 0; f < model.frames.size(); ++f) {
     const ModuleIdx m = model.frames[f].module;
     if (m.valid() && m.get() < moduleCount) job->framesOfModule[m.get()].push_back(static_cast<uint32_t>(f));
@@ -161,7 +179,13 @@ void SymbolService::processModule(Job& job, uint32_t idx) {
   }
 
   // Memoize every frame of this module before publishing the Resolved state.
-  for (const uint32_t f : job.framesOfModule[idx]) job.memo[f] = provider->resolve(m_frames[f].addr_or_rva);
+  for (const uint32_t f : job.framesOfModule[idx]) {
+    const uint64_t addr = m_frames[f].addr_or_rva;
+    job.memo[f] = provider->resolve(addr);
+    // Return-address rule: a non-leaf frame is a return address; the call is at rva - 1.
+    if (job.callerSlot[f] != kNoSlot)
+      job.memoCaller[job.callerSlot[f]] = provider->resolve(addr != 0 ? addr - 1 : 0);
+  }
   job.providers[idx] = std::move(provider);
   setState(job, idx, SymbolState::Resolved, {});
 }
@@ -206,6 +230,18 @@ const ResolvedAddress& SymbolService::lookup(FrameIdx frameIdx) const {
     return unresolvedAddress();
   }
   return m_job->memo[frameIdx.get()];
+}
+
+const ResolvedAddress& SymbolService::lookupCaller(FrameIdx frameIdx) const {
+  if (!m_job || !frameIdx.valid() || frameIdx.get() >= m_frameCount) return unresolvedAddress();
+  const ModuleIdx module = m_frames[frameIdx.get()].module;
+  if (!module.valid() || module.get() >= m_moduleCount) return unresolvedAddress();
+  if (m_job->state[module.get()].load(std::memory_order_acquire) !=
+      static_cast<uint8_t>(SymbolState::Resolved)) {
+    return unresolvedAddress();
+  }
+  const uint32_t slot = m_job->callerSlot[frameIdx.get()];
+  return slot == kNoSlot ? unresolvedAddress() : m_job->memoCaller[slot];
 }
 
 model::Frame SymbolService::frame(FrameIdx frameIdx) const {

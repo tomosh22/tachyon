@@ -42,7 +42,7 @@ TEST(SelectionBus, CarriesStateAndField) {
   bus.setSelectedFunction(FunctionKey{ModuleIdx(2), 0x1000});
   EXPECT_EQ(seenField, SelectionField::SelectedFunction);
   EXPECT_FALSE(bus.state().selectedFunction->isScope());
-  bus.setSelectedFunction(FunctionKey{ModuleIdx(FunctionKey::kScopeModule), 5});
+  bus.setSelectedFunction(FunctionKey::scope(StringIdx(5)));
   EXPECT_TRUE(bus.state().selectedFunction->isScope());
 
   HoveredItem hover;

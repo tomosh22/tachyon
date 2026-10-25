@@ -4,6 +4,7 @@
 #include "viewer/selection_bus.h"
 #include "viewer/settings.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -11,12 +12,38 @@
 namespace tachyon::viewer {
 
 class Document;
+class JobQueue;
+}  // namespace tachyon::viewer
+namespace tachyon::symbols {
+class SymbolService;
+}  // namespace tachyon::symbols
+namespace tachyon::viewer {
 
 // What a panel may touch while drawing. `document` is null when no trace is open. Valid only during the call.
+// Panels must not cache anything derived from the document across calls except in explicit caches that they
+// invalidate when `documentGeneration` changes.
 struct PanelContext {
   const Document* document = nullptr;
   SelectionBus* selection = nullptr;
   const Settings* settings = nullptr;
+  // Main-thread only. Background jobs (completions are delivered on the main thread). Null in bare test
+  // setups.
+  JobQueue* jobs = nullptr;
+  // Increments every time a document is opened or closed; 0 while none was ever opened.
+  uint64_t documentGeneration = 0;
+  // The open document's symbol service (null without a document). Lookups are lock-free and may be used
+  // while modules are still resolving; keys of a frame change when its module resolves, which bumps
+  // `symbolGeneration`: caches keyed by function keys must be keyed by it.
+  const symbols::SymbolService* symbols = nullptr;
+  uint64_t symbolGeneration = 0;
+  // Hook behind requestRedraw(); set by App.
+  void (*redrawFn)(void*) = nullptr;
+  void* redrawUser = nullptr;
+
+  // Main-thread only. Asks App to draw a few more frames even if no input arrives (e.g. a job finished).
+  void requestRedraw() const {
+    if (redrawFn) redrawFn(redrawUser);
+  }
 };
 
 class IPanel {
