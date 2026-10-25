@@ -6,11 +6,51 @@
 #include "symbols/symbol_service.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace tachyon::analysis::testutil {
+
+// A function of the in-memory symbol table used by HandModel::finish(functions).
+struct TestFunction {
+  const char* name;
+  uint64_t start, size;
+};
+
+// Provider over a fixed function table (no lines, no inlines), identical for every module.
+class TableProvider final : public symbols::ISymbolProvider {
+ public:
+  TableProvider(symbols::SymbolStringTable& strings, std::vector<TestFunction> fns)
+      : m_strings(strings), m_fns(std::move(fns)) {}
+  Result<void> load(const model::Module&, const std::filesystem::path&) override { return {}; }
+  symbols::ResolvedAddress resolve(uint64_t rva) override {
+    symbols::ResolvedAddress r;
+    for (const TestFunction& f : m_fns) {
+      if (rva < f.start || rva >= f.start + f.size) continue;
+      r.function = m_strings.intern(f.name);
+      r.functionStartRva = f.start;
+      r.resolved = true;
+      break;
+    }
+    return r;
+  }
+  Result<std::vector<symbols::LineRange>> linesForFunction(uint64_t) override {
+    return makeError(ErrorCode::NotFound, "no lines");
+  }
+  Result<symbols::FunctionBounds> functionBounds(uint64_t rva) override {
+    for (const TestFunction& f : m_fns) {
+      if (rva >= f.start && rva < f.start + f.size)
+        return symbols::FunctionBounds{f.start, f.size, m_strings.intern(f.name)};
+    }
+    return makeError(ErrorCode::NotFound, "no function");
+  }
+
+ private:
+  symbols::SymbolStringTable& m_strings;
+  std::vector<TestFunction> m_fns;
+};
 
 // One process-less model with `threadCount` threads, one module ("game.exe", never resolved because no
 // symbol file exists, so every mapped frame keys as {module, rva}) and helpers to build stacks and samples.
@@ -72,17 +112,30 @@ class HandModel {
     m.statesByThread[thread].push_back(iv);
   }
 
-  void sample(uint32_t thread, uint64_t ts, CallstackIdx cs) {
+  void sample(uint32_t thread, uint64_t ts, CallstackIdx cs, uint16_t flags = 0) {
     auto& c = m.samplesByThread[thread];
     c.ts.push_back(ts);
     c.callstack.push_back(cs);
     c.cpu.push_back(0);
-    c.flags.push_back(0);
+    c.flags.push_back(flags);
   }
 
   // Must be called once, after building and before querying.
-  void finish() {
+  void finish() { finish({}); }
+  // As finish(), but modules resolve against `functions` (RVAs of every mapped module).
+  void finish(std::vector<TestFunction> functions) {
     svc = std::make_unique<symbols::SymbolService>(std::vector<std::string>{}, std::filesystem::path{});
+    if (!functions.empty()) {
+      svc->setLocate([](const model::Module&) -> Result<std::filesystem::path> {
+        return std::filesystem::path("t.sym");
+      });
+      symbols::SymbolStringTable& strings = svc->stringSink();
+      svc->setProviderFactory(
+          [&strings, functions](const model::Module&,
+                                const std::filesystem::path&) -> std::unique_ptr<symbols::ISymbolProvider> {
+            return std::make_unique<TableProvider>(strings, functions);
+          });
+    }
     svc->resolveAllAsync(m);
     svc->waitAll();
   }

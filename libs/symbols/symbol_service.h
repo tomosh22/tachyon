@@ -84,6 +84,15 @@ class SymbolService {
   // stays valid until the next resolveAllAsync() or destruction. StringIdx values index symbolStrings().
   const ResolvedAddress& lookup(FrameIdx frame) const;
 
+  // Return-address variant of lookup() (spec "Return-address rule"): resolves addr_or_rva - 1, i.e. the call
+  // instruction of a frame that is a return address (every non-leaf frame of a stack). Same guarantees and
+  // publication rules as lookup() (lock-free, memoized separately, static unresolved value until the module
+  // is published). It is computed in the same per-module worker pass, but only for frames that occur in a
+  // non-leaf position of the callstack node table (some node referencing the frame has a child); for any
+  // other frame, and for unmapped frames, it returns the unresolved value. Leaf frames, and the interrupted
+  // user frame of a kernel-leaf sample, use lookup().
+  const ResolvedAddress& lookupCaller(FrameIdx frame) const;
+
   // Thread-safe, lock-free. Copy of the frame record as seen by resolveAllAsync (module invalid if unknown).
   model::Frame frame(FrameIdx frame) const;
 

@@ -55,6 +55,13 @@ struct FunctionKeyHash {
 // Keys of a frame change when its module finishes resolving; build trees after SymbolService::waitAll().
 FunctionKey functionKeyFor(const SymbolService& symbols, FrameIdx frame, bool expandInline = false);
 
+// Thread-safe (reads only what SymbolService::lookupCaller reads). Return-address variant of functionKeyFor
+// for a frame in a non-leaf stack position: the function, inline chain and resolved state come from
+// lookupCaller (address - 1). The key of an unresolved or unmapped frame is the frame's own address, exactly
+// as functionKeyFor (the address - 1 is only the symbol lookup address, so unresolved frames still group
+// per {module, rva}).
+FunctionKey functionKeyForCaller(const SymbolService& symbols, FrameIdx frame, bool expandInline = false);
+
 }  // namespace tachyon::symbols
 
 template <>

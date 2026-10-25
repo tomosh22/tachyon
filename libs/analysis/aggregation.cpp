@@ -15,19 +15,12 @@ using symbols::kScopeModule;
 
 namespace {
 
-constexpr uint64_t kKernelBase = 0xFFFF800000000000ull;
 constexpr size_t kCacheEntries = 4;
 constexpr uint32_t kUnset = 0xFFFFFFFFu;
 
 std::string_view baseName(std::string_view path) {
   const size_t p = path.find_last_of("/\\");
   return p == std::string_view::npos ? path : path.substr(p + 1);
-}
-
-bool isKernelModulePath(std::string_view path) {
-  const std::string_view b = baseName(path);
-  return b == "ntoskrnl.exe" || b == "ntkrnlmp.exe" || b == "ntkrnlpa.exe" || b == "vmlinux" ||
-         b.substr(0, 7) == "[kernel";
 }
 
 std::string hex(uint64_t v) {
@@ -57,13 +50,20 @@ class KeyTable {
 class StackFlattener {
  public:
   StackFlattener(const QueryContext& ctx, KeyTable& table)
-      : m_ctx(ctx), m_model(ctx.model()), m_table(table), m_entries(ctx.model().frames.size()) {
+      : m_ctx(ctx),
+        m_model(ctx.model()),
+        m_table(table),
+        m_entries{std::vector<Entry>(ctx.model().frames.size()),
+                  std::vector<Entry>(ctx.model().frames.size())} {
     m_kernelId = m_table.intern(kKernelKey);
   }
 
   // Fills `out` (cleared first) with the keys of the stack of `node`, root first. With a valid `subtree`
   // (not node 0) the stack is cut above that node and false is returned when `node` is not below it.
-  bool flatten(CallstackIdx node, CallstackIdx subtree, std::vector<uint32_t>& out) {
+  // `kernelLeaf`: the samples carry kSampleFlagKernelLeaf (return-address rule exception). With
+  // KernelFrames::Hide a stack that ends up empty (empty, or only kernel frames) becomes the single frame
+  // kKernelKey, so every view counts it.
+  bool flatten(CallstackIdx node, CallstackIdx subtree, bool kernelLeaf, std::vector<uint32_t>& out) {
     out.clear();
     m_chain.clear();
     const size_t limit = m_model.nodes.size();
@@ -79,14 +79,21 @@ class StackFlattener {
       first = static_cast<size_t>(it - m_chain.begin()) + 1;
     }
     const bool group = m_ctx.options().kernelFrames == KernelFrames::Group;
+    // Return-address rule: chain index 0 is the leaf and uses its exact address; every other frame is a
+    // return address (rva - 1), except the first non-kernel frame of a kernel-leaf sample (interrupted IP).
+    size_t exactAt = 0;
+    if (kernelLeaf) {
+      while (exactAt < m_chain.size() && isKernelNode(m_chain[exactAt])) ++exactAt;
+    }
     for (size_t i = first; i-- > 0;) {
-      const Entry& e = entryFor(m_model.nodes[m_chain[i]].frame);
+      const Entry& e = entryFor(m_model.nodes[m_chain[i]].frame, i != 0 && i != exactAt);
       for (uint32_t k = 0; k < e.count; ++k) {
         const uint32_t id = m_flat[e.offset + k];
         if (group && id == m_kernelId && !out.empty() && out.back() == m_kernelId) continue;
         out.push_back(id);
       }
     }
+    if (out.empty() && m_ctx.options().kernelFrames == KernelFrames::Hide) out.push_back(m_kernelId);
     return true;
   }
 
@@ -96,16 +103,17 @@ class StackFlattener {
     uint32_t count = 0;
   };
 
-  bool isKernel(const model::Frame& f) const {
-    if (!f.module.valid()) return f.addr_or_rva >= kKernelBase;
-    return f.module.get() < m_model.modules.size() &&
-           isKernelModulePath(m_model.modules[f.module.get()].path);
+  bool isKernel(const model::Frame& f) const { return isKernelFrame(m_model, f); }
+
+  bool isKernelNode(uint32_t node) const {
+    const FrameIdx f = m_model.nodes[node].frame;
+    return f.valid() && f.get() < m_model.frames.size() && isKernel(m_model.frames[f.get()]);
   }
 
-  const Entry& entryFor(FrameIdx frame) {
+  const Entry& entryFor(FrameIdx frame, bool caller) {
     static const Entry kEmpty{0, 0};
-    if (!frame.valid() || frame.get() >= m_entries.size()) return kEmpty;
-    Entry& e = m_entries[frame.get()];
+    if (!frame.valid() || frame.get() >= m_entries[0].size()) return kEmpty;
+    Entry& e = m_entries[caller ? 1 : 0][frame.get()];
     if (e.offset != kUnset) return e;
     e.offset = static_cast<uint32_t>(m_flat.size());
     const model::Frame& f = m_model.frames[frame.get()];
@@ -122,7 +130,8 @@ class StackFlattener {
       e.count = 1;
       return e;
     }
-    const symbols::ResolvedAddress& r = m_ctx.symbols().lookup(frame);
+    const symbols::ResolvedAddress& r =
+        caller ? m_ctx.symbols().lookupCaller(frame) : m_ctx.symbols().lookup(frame);
     if (!r.resolved) {
       m_flat.push_back(m_table.intern(FunctionKey{f.module, f.addr_or_rva}));
       e.count = 1;
@@ -143,7 +152,7 @@ class StackFlattener {
   const QueryContext& m_ctx;
   const model::TraceModel& m_model;
   KeyTable& m_table;
-  std::vector<Entry> m_entries;
+  std::vector<Entry> m_entries[2];  // [0] exact address, [1] return address (caller variant)
   std::vector<uint32_t> m_flat;
   std::vector<uint32_t> m_chain;
   uint32_t m_kernelId = 0;
@@ -232,6 +241,19 @@ struct Lru {
 };
 
 }  // namespace
+
+NodeAgg::~NodeAgg() {
+  // Iterative: tear the tree down one level at a time so a very deep tree cannot overflow the stack.
+  if (children.empty()) return;
+  std::vector<std::vector<NodeAgg>> work;
+  work.push_back(std::move(children));
+  while (!work.empty()) {
+    std::vector<NodeAgg> level = std::move(work.back());
+    work.pop_back();
+    for (NodeAgg& n : level)
+      if (!n.children.empty()) work.push_back(std::move(n.children));
+  }  // `level` dies here; its elements have no children left, so their destructors return immediately
+}
 
 struct QueryContext::Impl {
   const model::TraceModel& model;
@@ -338,7 +360,7 @@ Result<std::vector<FunctionRow>> bottomUpFunctions(const QueryContext& ctx, cons
   for (const NodeWeight& nw : **w) {
     if (++counter % kCancelStride == 0 && cancel.requested())
       return makeError(ErrorCode::Cancelled, "query cancelled");
-    if (!flat.flatten(nw.node, rf->subtree, ids) || ids.empty()) continue;
+    if (!flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids) || ids.empty()) continue;
     if (table.size() > incl.size()) {
       incl.resize(table.size(), 0);
       excl.resize(table.size(), 0);
@@ -388,7 +410,7 @@ Result<NodeAgg> topDownTree(const QueryContext& ctx, const Filter& filter, Cance
   for (const NodeWeight& nw : **w) {
     if (++counter % kCancelStride == 0 && cancel.requested())
       return makeError(ErrorCode::Cancelled, "query cancelled");
-    if (!flat.flatten(nw.node, rf->subtree, ids)) continue;
+    if (!flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids)) continue;
     uint32_t cur = 0;
     for (uint32_t id : ids) {
       const uint64_t ck = (uint64_t{cur} << 32) | id;
@@ -454,7 +476,7 @@ Result<Butterfly> butterfly(const QueryContext& ctx, const Filter& filter, Funct
   for (const NodeWeight& nw : **w) {
     if (++counter % kCancelStride == 0 && cancel.requested())
       return makeError(ErrorCode::Cancelled, "query cancelled");
-    if (!flat.flatten(nw.node, rf->subtree, ids)) continue;
+    if (!flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids)) continue;
     const auto it = std::find(ids.begin(), ids.end(), target);  // outermost occurrence
     if (it == ids.end()) continue;
     const size_t pos = static_cast<size_t>(it - ids.begin());
