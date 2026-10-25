@@ -5,7 +5,7 @@ threads, and prints on stdout a JSON document stating what a profiler should see
 workload itself measured with `rdtsc` (`measured`). Diagnostics go to stderr; stdout is JSON only.
 
 ```
-tachyon-testbed [--scenario <name[,name...]|all>] [--duration <seconds>] [--hitch-interval-ms <ms>] [--pretty] [--list]
+tachyon-testbed [--scenario <name[,name...]|all>] [--duration <seconds>] [--hitch-interval-ms <ms>] [--instrument] [--pretty] [--list]
 ```
 
 Built with frame pointers (`-fno-omit-frame-pointer` / `/Oy-`), debug info, and no sibling-call optimization on the
@@ -28,6 +28,22 @@ code so identical-code folding cannot merge them.
 
 `inline_a/b/c` are `TACHYON_FORCEINLINE` and appear only as inline frames in an optimized build (never as real
 frames). Their share is still measured with `rdtsc` between the inlined bodies.
+
+## `--instrument` (WP-52)
+
+With `--instrument` the testbed also emits Tachyon SDK events, to the agent named by `TACHYON_AGENT_PIPE` (a
+`tachyon-agent` launching it sets that) or, without an agent, to a sidecar `<exe>-<pid>.tachyon-inst` file in the
+working directory (`TACHYON_SIDECAR=<path>` moves it, `TACHYON_SIDECAR=off` disables it). Without the flag the SDK
+runtime is never started. What is emitted:
+
+| scenario | events |
+|---|---|
+| all | thread names (`tb-*`), marker `testbed.scenario.begin/end` (data = scenario name) |
+| `spin` | scope `spin_cycle` around `hot_a`, `hot_b`, `hot_c`, `spin_rest` scopes |
+| `lock` | lock-wait scope (`testbed.lock`, lock sentinel colour) around `lock_wait`, scope `lock_critical_section` |
+| `jobs` | scopes `job_wait` and `job_execute` on each worker |
+| `frames` | scope `frame` around `frame_update`, `frame_render`, `frame_hitch`, `frame_wait`; frame mark `testbed.frame`, plot `testbed.frame_ms`, marker `testbed.hitch` |
+| `fibers` | fiber register / unregister, switch begin / end between the worker context (id 100) and fibers 1..4, scope `fiber_slice` |
 
 ## Running several scenarios (`all`)
 
@@ -87,7 +103,8 @@ samples only on-CPU time may legitimately differ on a loaded machine.
 
 * `testbed/` is the `tachyon::testbed_core` library (calibration, report/JSON, scenarios, platform shims) so unit
   tests can link it without running the full workload.
-* `testbed/hooks.h` holds no-op `onScenarioBegin/End` and `onFrameBegin/End` hooks; the future `--instrument` mode
-  (after WP-50) emits Tachyon scopes and frame marks from them.
+* `testbed/hooks.h` holds the instrumentation hooks (`TB_SCOPE`, `InstLockScope`, `onScenarioBegin/End`,
+  `onFrameEnd`, `onThreadNamed`, fiber switches, ...). They are no-ops unless `--instrument` is given, in which case they
+  call the public SDK (`sdk/include/tachyon/tachyon.h`) only.
 * Tests: `tests/unit/testbed/` (`testbed_tests` label `unit`, `testbed_integration_tests` label `integration`, which
   runs `tachyon-testbed --scenario all --duration 5`).
