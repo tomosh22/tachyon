@@ -44,6 +44,15 @@ class TraceReader {
   Result<std::vector<ProcessRec>> readProcesses() { return readRecords<ProcessRec>(ChunkType::Processes); }
   Result<std::vector<ThreadRec>> readThreads() { return readRecords<ThreadRec>(ChunkType::Threads); }
   Result<std::vector<ModuleRec>> readModules() { return readRecords<ModuleRec>(ChunkType::Modules); }
+  // Not thread-safe. Modules as naturally aligned ModuleInfo; prefer this over readModules() (see
+  // ModuleInfo).
+  Result<std::vector<ModuleInfo>> readModuleInfos() {
+    TACHYON_TRY_ASSIGN(std::vector<ModuleRec> recs, readModules());
+    std::vector<ModuleInfo> infos;
+    infos.reserve(recs.size());
+    for (const ModuleRec& r : recs) infos.push_back(toModuleInfo(r));
+    return infos;
+  }
   Result<std::vector<FrameRec>> readFrames() { return readRecords<FrameRec>(ChunkType::Frames); }
   Result<std::vector<CallstackNodeRec>> readCallstackNodes() {
     return readRecords<CallstackNodeRec>(ChunkType::CallstackNodes);
@@ -83,8 +92,20 @@ class TraceReader {
         payload.size() / sizeof(T) != chunk.record_count)
       return makeError(ErrorCode::CorruptData, "chunk payload size does not match record count");
     const size_t at = out.size();
-    out.resize(at + static_cast<size_t>(chunk.record_count));
-    if (!payload.empty()) std::memcpy(out.data() + at, payload.data(), payload.size());
+    const size_t n = static_cast<size_t>(chunk.record_count);
+    if constexpr (sizeof(T) % alignof(uint32_t) == 0) {
+      out.resize(at + n);
+      if (!payload.empty()) std::memcpy(out.data() + at, payload.data(), payload.size());
+    } else {
+      // Records whose size is not a multiple of 4 (ModuleRec, 78 bytes) leave StrongId members misaligned in
+      // arrays, so they must not be value-initialized in place; copy each from an aligned local instead.
+      out.reserve(at + n);
+      for (size_t i = 0; i < n; ++i) {
+        alignas(8) T rec;
+        std::memcpy(static_cast<void*>(&rec), payload.data() + i * sizeof(T), sizeof(T));
+        out.push_back(rec);
+      }
+    }
     return ok();
   }
   // Thread-safe: pure function. Appends the samples of one decoded Samples chunk payload to `out`.
