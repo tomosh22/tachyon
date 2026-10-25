@@ -10,6 +10,7 @@
 #include "viewer/selection_bus.h"
 #include "viewer/settings.h"
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <iosfwd>
@@ -68,6 +69,9 @@ class App {
   bool loading() const { return m_openJob != 0; }
   const std::string& lastError() const { return m_lastError; }
   const std::filesystem::path& settingsPath() const { return m_settingsPath; }
+  // Main-thread only. Draw a few more frames even without input (PanelContext::requestRedraw).
+  void requestRedraw() { m_redrawFrames = std::max(m_redrawFrames, 3); }
+  uint64_t documentGeneration() const { return m_documentGeneration; }
   void setTheme(ThemeKind theme);
   void setUserScale(float scale);
 
@@ -99,6 +103,7 @@ class App {
   CommandRegistry m_commands;
   FileBrowser m_fileBrowser;
   std::shared_ptr<Document> m_document;
+  uint64_t m_documentGeneration = 0;
 
   JobQueue::JobId m_openJob = 0;
   std::string m_lastError;
