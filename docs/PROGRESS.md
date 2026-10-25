@@ -132,7 +132,7 @@ API additions in query.h: `FunctionRegistry` (`ctx.functionIdx(key)`), `QueryCac
 
 ## Queued follow-ups
 
-- WP-02b: make TestbedScenarios.EveryScenarioRunsAndProducesValidReport load-tolerant (fails under ctest -j).
+- WP-02b: done by the orchestrator. testbed_tests are RUN_SERIAL (the CPU-share checks failed when ctest -j oversubscribed the cores; the verifier reproduced this on pre-existing binaries). LocatorTest.ConcurrentDownloadsAreBounded now asserts only the bound (≤ 2), not that the limit is reached. CancellationTest.TwentyMillion measured 42.6 ms against 50 ms under load average 10; watch it.
 - WP-21b: make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.
 - WP-36b: 64-row LOD frame under 4 ms.
 - `SymbolService::resolveAllAsync` should take `const TraceModel&` (the viewer const_casts today).

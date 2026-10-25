@@ -25,13 +25,13 @@ function(tachyon_add_executable name)
   tachyon_set_warnings(${name})
 endfunction()
 
-# tachyon_add_test(<name> SOURCES ... [DEPS ...] [LABELS ...])
+# tachyon_add_test(<name> [SERIAL] SOURCES ... [DEPS ...] [LABELS ...]); SERIAL sets RUN_SERIAL on the tests.
 # Unit test executable linked with GoogleTest; TACHYON_FIXTURE_DIR points at tests/fixtures.
 function(tachyon_add_test name)
   if(NOT TACHYON_BUILD_TESTS)
     return()
   endif()
-  cmake_parse_arguments(ARG "" "" "SOURCES;DEPS;LABELS" ${ARGN})
+  cmake_parse_arguments(ARG "SERIAL" "" "SOURCES;DEPS;LABELS" ${ARGN})
   add_executable(${name} ${ARG_SOURCES})
   target_link_libraries(${name} PRIVATE ${ARG_DEPS} GTest::gtest GTest::gmock GTest::gtest_main)
   target_compile_features(${name} PRIVATE cxx_std_20)
@@ -46,7 +46,12 @@ function(tachyon_add_test name)
   if(NOT ARG_LABELS)
     set(ARG_LABELS unit)
   endif()
-  gtest_discover_tests(${name} PROPERTIES LABELS "${ARG_LABELS}" DISCOVERY_TIMEOUT 60)
+  # SERIAL: the tests measure CPU shares and must not share cores with other tests (ctest -j).
+  if(ARG_SERIAL)
+    gtest_discover_tests(${name} PROPERTIES LABELS "${ARG_LABELS}" RUN_SERIAL TRUE DISCOVERY_TIMEOUT 60)
+  else()
+    gtest_discover_tests(${name} PROPERTIES LABELS "${ARG_LABELS}" DISCOVERY_TIMEOUT 60)
+  endif()
 endfunction()
 
 # tachyon_add_perf_test(<name> SOURCES ... [DEPS ...]): same as tachyon_add_test, labelled "perf".
