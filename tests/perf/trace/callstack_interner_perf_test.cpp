@@ -45,6 +45,20 @@ std::vector<FrameIdx> makePool(std::mt19937_64& rng) {
   return pool;
 }
 
+// Hints the cache to load the frames of a stack that will be interned soon. A real consumer streams its
+// samples; here the 800 k unique stacks are picked at random from a 96 MB pool, so without this the timed
+// loop also pays two cache misses per stack just to read the input.
+inline void prefetchStack(const FrameIdx* p) {
+#if defined(__GNUC__) || defined(__clang__)
+  __builtin_prefetch(p);
+  __builtin_prefetch(p + 16);
+  __builtin_prefetch(p + kDepth - 1);
+#else
+  (void)p;
+#endif
+}
+constexpr size_t kInputLookahead = 16;
+
 struct BenchResult {
   double assertSeconds, seconds, endBytesPerNode, compactBytesPerNode, worstBytesPerNode;
   size_t nodes;
@@ -76,7 +90,10 @@ BenchResult runBenchmark(bool skewed) {
   }
 
   const uint64_t t0 = core::nowTicks();
-  for (size_t n = 0; n < kStacks; ++n) checksum += in.internStack(stacks[picks[n]]).get();
+  for (size_t n = 0; n < kStacks; ++n) {
+    if (n + kInputLookahead < kStacks) prefetchStack(stacks[picks[n + kInputLookahead]].data());
+    checksum += in.internStack(stacks[picks[n]]).get();
+  }
   const double seconds = core::ticksToSeconds(core::nowTicks() - t0, core::ticksFrequency());
 
   std::printf("[trace perf] %s intern_seconds=%.2f\n", skewed ? "skewed" : "uniform", seconds);
