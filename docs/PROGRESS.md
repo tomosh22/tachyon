@@ -26,8 +26,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-33 | Filters, cancellation, query cache | C | not started | wp/33-filters | |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
 | WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
-| WP-36 | Timeline LOD | C | not started | wp/36-lod | |
-| WP-40 | Viewer shell | D | in progress | wp/40-viewer-shell | 2026-10-25 |
+| WP-36 | Timeline LOD | C | in progress | wp/36-lod | 2026-10-25 |
+| WP-40 | Viewer shell | D | in review | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | not started | wp/41-session-explorer | |
 | WP-42 | Threads timeline | D | not started | wp/42-timeline | |
 | WP-43 | Call graph panel | D | not started | wp/43-call-graph | |
