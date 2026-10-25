@@ -48,6 +48,9 @@ void StringTable::grow() {
 }
 
 StringIdx StringTable::intern(std::string_view s) {
+  // Lengths are stored as uint32 on disk; longer strings are rejected (invalid index, which get() maps to
+  // "").
+  if (s.size() > 0xFFFFFFFFull) return StringIdx::invalid();
   const StringIdx found = find(s);
   if (found.valid()) return found;
   const uint32_t idx = static_cast<uint32_t>(size());

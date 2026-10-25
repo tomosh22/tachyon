@@ -79,10 +79,11 @@ class TraceReader {
   template <typename T>
   static Result<void> decodeRecords(const FooterRec& chunk, std::span<const std::byte> payload,
                                     std::vector<T>& out) {
-    if (payload.size() != chunk.record_count * sizeof(T))
+    if (chunk.record_count > kMaxRecordsPerChunk || payload.size() % sizeof(T) != 0 ||
+        payload.size() / sizeof(T) != chunk.record_count)
       return makeError(ErrorCode::CorruptData, "chunk payload size does not match record count");
     const size_t at = out.size();
-    out.resize(at + chunk.record_count);
+    out.resize(at + static_cast<size_t>(chunk.record_count));
     if (!payload.empty()) std::memcpy(out.data() + at, payload.data(), payload.size());
     return ok();
   }

@@ -3,8 +3,8 @@
 //
 // Two access patterns over the same 800 k unique stacks (4% of 20 M):
 //   Uniform: every sample picks a uniformly random unique stack. Adversarial for caches (the working set is
-//            ~230 MB), a worst case no real capture has. Asserted at 4x the budget (40 s) as a safety net;
-//            the measured time is reported.
+//            ~230 MB), a worst case no real capture has. Asserted at 2x the budget (20 s);
+//            the measured time is also printed.
 //   Skewed:  picks follow index = N * u^4 (u uniform in [0,1)), i.e. a few hot stacks dominate, as in real
 //            sampling data. Asserted at 2x the budget (20 s).
 #include "core/time.h"
@@ -98,13 +98,8 @@ BenchResult runBenchmark(bool skewed) {
       skewed ? "skewed " : "uniform", kStacks, kUnique, nodes, seconds, endBytesPerNode,
       sizeBasedBytesPerNode, worstBytesPerNode, compactBytesPerNode, static_cast<double>(nodeCapBytes) / 1e6,
       static_cast<double>(tableBytes) / 1e6, slotCount);
-  return {skewed ? 2 * kBudgetSeconds : 4 * kBudgetSeconds,
-          seconds,
-          endBytesPerNode,
-          compactBytesPerNode,
-          worstBytesPerNode,
-          nodes,
-          checksum};
+  return {2 * kBudgetSeconds, seconds, endBytesPerNode, compactBytesPerNode,
+          worstBytesPerNode,  nodes,   checksum};
 }
 
 void check(const BenchResult& r) {

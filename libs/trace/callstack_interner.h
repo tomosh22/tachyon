@@ -5,6 +5,7 @@
 #include "core/strong_id.h"
 #include "trace/trace_format.h"
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -23,6 +24,7 @@ class CallstackInterner {
 
   // Not thread-safe. Returns the node for (parent, frame), creating it if needed.
   CallstackIdx intern(CallstackIdx parent, FrameIdx frame) {
+    assert(parent.get() < m_nodes.size());
     // Fast path: nodes created as one chain are adjacent, so the child of `parent` is very often parent + 1.
     // (parent, frame) is unique, so a match here is the node; the check touches memory we already loaded.
     const size_t guess = static_cast<size_t>(parent.get()) + 1;
