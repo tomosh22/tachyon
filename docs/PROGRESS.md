@@ -20,7 +20,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-20 | Symbol core | B | not started | wp/20-symbol-core | |
 | WP-21 | Symbol locator and HTTP client | B | not started | wp/21-symbol-locator | |
 | WP-22 | DIA symbol provider | B | not started | wp/22-dia | |
-| WP-30 | Model loader | C | in progress | wp/30-model | 2026-10-25 |
+| WP-30 | Model loader | C | in review | wp/30-model | 2026-10-25 |
 | WP-31 | Thread state intervals | C | not started | wp/31-thread-states | |
 | WP-32 | Attribution and aggregation | C | not started | wp/32-attribution | |
 | WP-33 | Filters, cancellation, query cache | C | not started | wp/33-filters | |
@@ -41,7 +41,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-52 | Agent-side ingestion and merge | — | not started | wp/52-ingestion | |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
-| WP-55 | Engine integration guide and samples | E | in progress | wp/55-integration-guide | 2026-10-25 |
+| WP-55 | Engine integration guide and samples | E | in review | wp/55-integration-guide | 2026-10-25 |
 | WP-60 | Flight recorder mode | — | not started | wp/60-flight-recorder | |
 | WP-61 | Remote capture | — | not started | wp/61-remote | |
 | WP-62 | CI report tool | — | not started | wp/62-report | |
@@ -147,6 +147,12 @@ Confirm in the summary: the hot_a > hot_b > hot_c ranking was asserted, not "ski
 
 - WP-03 bytes/node budget: with 8-byte nodes and 4-byte hash slots at load factor ≤ 0.7 and doubling growth, worst case right after a resize is ≈ 8 + 4/0.35 ≈ 19.4 bytes/node. Proposed: assert ≤ 20 bytes/node at worst-case table size, or allow a non-doubling growth factor. Proceeding with the plan as written; the WP-03 report must state the measured worst case.
   - Measured in WP-03: as-grown 22.4 bytes/node, worst after resize 22.9 (std::vector slack adds to the hash overhead). Orchestrator decision: the ≤ 16 bytes/node budget is measured after `CallstackInterner::compact()` (13.7 bytes/node), because the interner only lives during conversion. Confirmed by user 2026-10-25.
+
+## Plan concerns awaiting user decision (raised 2026-10-25)
+
+- WP-51 connected overhead target of 40 ns is dominated by two clock reads (≈27 ns each on the CI VM). Proposed: an 80 ns binding budget until a TSC fast-path WP exists.
+- WP-30 "resident ≤ 3× compressed" conflicts with the fixed 16 B/sample layout whenever compression exceeds about 3.75:1. The synthetic fixtures compress 8:1, giving 6.95–7.33×. Proposed: resident ≤ 1× the uncompressed on-disk payload, or measure 3× on a real engine capture in WP-64.
+- The M5 gate "overhead under 1% at 100 k scopes/frame" is physically infeasible. 1% of a 16.6 ms frame is 166 µs, about 1.7 ns per scope, which is less than a single timestamp read. At the measured 46.9 ns, 100 k scopes/frame costs 28% of a frame. Proposed: "under 1% at 100 k scopes per second" (≈0.47% at the measured cost), or "under 1% at 3 k scopes/frame".
 
 ## Environment notes
 
