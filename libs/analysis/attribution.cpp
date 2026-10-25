@@ -1,8 +1,11 @@
 #include "analysis/attribution.h"
 
+#include "analysis/query_executor.h"
 #include "trace/trace_format.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <string_view>
 #include <thread>
 
@@ -75,7 +78,7 @@ Result<void> checkAttributable(const model::TraceModel& m) {
 
 Result<std::vector<NodeWeight>> accumulateNodeWeights(const model::TraceModel& m, uint64_t t0, uint64_t t1,
                                                       std::span<const ThreadIdx> threads, unsigned workers,
-                                                      Cancel cancel) {
+                                                      Cancel cancel, QueryExecutor* executor) {
   if (auto ok = checkAttributable(m); !ok) return ok.error();
   for (ThreadIdx t : threads)
     if (!t.valid() || t.get() >= m.threads.size())
@@ -87,6 +90,7 @@ Result<std::vector<NodeWeight>> accumulateNodeWeights(const model::TraceModel& m
   // Budget the regular and the lazily allocated kernel-leaf arrays so the worst case stays in the cap.
   const size_t perWorker = 2 * nodeCount * (sizeof(uint64_t) + sizeof(uint32_t));
   w = static_cast<unsigned>(std::max<size_t>(1, std::min<size_t>(w, kWorkerMemoryBudget / perWorker)));
+  if (executor != nullptr) w = std::min(w, executor->threadCount() + 1);
 
   struct Local {
     std::vector<uint64_t> ticks;
@@ -134,6 +138,42 @@ Result<std::vector<NodeWeight>> accumulateNodeWeights(const model::TraceModel& m
   };
   if (w == 1) {
     work(0);
+  } else if (executor != nullptr) {
+    // See the header comment: helpers are optional, the caller never waits for one that has not started.
+    struct Sync {
+      std::mutex mutex;
+      std::condition_variable cv;
+      unsigned nextSlot = 1;
+      unsigned active = 0;
+      bool closed = false;
+    };
+    auto sync = std::make_shared<Sync>();
+    std::vector<TaskHandle> helpers;
+    helpers.reserve(w - 1);
+    for (unsigned i = 1; i < w; ++i) {
+      helpers.push_back(executor->submit(QueryExecutor::currentPriority(), [sync, w, &work](Cancel) {
+        unsigned slot;
+        {
+          std::lock_guard lock(sync->mutex);
+          if (sync->closed || sync->nextSlot >= w) return;  // too late: the scan is over, touch nothing
+          slot = sync->nextSlot++;
+          ++sync->active;
+        }
+        work(slot);
+        {
+          std::lock_guard lock(sync->mutex);
+          --sync->active;
+        }
+        sync->cv.notify_all();
+      }));
+    }
+    work(0);
+    {
+      std::unique_lock lock(sync->mutex);
+      sync->closed = true;
+      sync->cv.wait(lock, [&] { return sync->active == 0; });
+    }
+    for (const TaskHandle& h : helpers) executor->cancel(h);  // drop helpers that never got a thread
   } else {
     std::vector<std::thread> pool;
     pool.reserve(w - 1);
@@ -145,6 +185,7 @@ Result<std::vector<NodeWeight>> accumulateNodeWeights(const model::TraceModel& m
 
   std::vector<NodeWeight> out;
   for (size_t n = 0; n < nodeCount; ++n) {
+    if ((n & 0xFFFu) == 0 && cancel.requested()) return makeError(ErrorCode::Cancelled, "query cancelled");
     for (const bool kernel : {false, true}) {
       uint64_t ticks = 0;
       uint64_t samples = 0;
