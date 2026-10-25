@@ -42,7 +42,7 @@ struct HugePageAllocator {
   }
 
   // Thread-safe.
-  void deallocate(T* p, size_t n) {
+  void deallocate(T* p, [[maybe_unused]] size_t n) {
 #if TACHYON_PLATFORM_LINUX
     if (n * sizeof(T) >= kHugeSize) {
       std::free(p);
