@@ -21,12 +21,15 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace tachyon::symbols {
@@ -102,6 +105,38 @@ class TimingOpener final : public IDiaSessionOpener {
   CallStats& m_stats;
 };
 
+// Aborts the process (so ctest shows the captured output) when a test hangs instead of waiting for the ctest
+// timeout.
+class Watchdog {
+ public:
+  explicit Watchdog(std::chrono::seconds limit) {
+    m_thread = std::thread([this, limit] {
+      std::unique_lock<std::mutex> lock(m_mutex);
+      if (!m_cv.wait_for(lock, limit, [this] { return m_done; })) {
+        std::fprintf(stderr, "[watchdog] test exceeded %lld s, aborting\n",
+                     static_cast<long long>(limit.count()));
+        std::fflush(stderr);
+        std::fflush(stdout);
+        std::_Exit(3);
+      }
+    });
+  }
+  ~Watchdog() {
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_done = true;
+    }
+    m_cv.notify_all();
+    m_thread.join();
+  }
+
+ private:
+  std::mutex m_mutex;
+  std::condition_variable m_cv;
+  bool m_done = false;
+  std::thread m_thread;
+};
+
 struct PerfModule {
   std::string name;
   fs::path image;
@@ -143,6 +178,7 @@ bool prepare(PerfModule& pm, SymbolLocator* locator, std::string& why) {
 }
 
 TEST(DiaPerf, ResolveOneMillionRvasWarmCache) {
+  Watchdog watchdog(std::chrono::seconds(240));
   std::string err;
   auto realOpener = makeComDiaOpener(&err);
   ASSERT_NE(realOpener, nullptr) << err;

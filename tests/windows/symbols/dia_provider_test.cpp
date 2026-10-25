@@ -12,9 +12,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <set>
 #include <thread>
 
@@ -22,6 +26,38 @@ namespace tachyon::symbols {
 namespace {
 
 namespace fs = std::filesystem;
+
+// Aborts the process (so ctest shows the captured output) when a test hangs instead of waiting for the ctest
+// timeout.
+class Watchdog {
+ public:
+  explicit Watchdog(std::chrono::seconds limit) {
+    m_thread = std::thread([this, limit] {
+      std::unique_lock<std::mutex> lock(m_mutex);
+      if (!m_cv.wait_for(lock, limit, [this] { return m_done; })) {
+        std::fprintf(stderr, "[watchdog] test exceeded %lld s, aborting\n",
+                     static_cast<long long>(limit.count()));
+        std::fflush(stderr);
+        std::fflush(stdout);
+        std::_Exit(3);
+      }
+    });
+  }
+  ~Watchdog() {
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_done = true;
+    }
+    m_cv.notify_all();
+    m_thread.join();
+  }
+
+ private:
+  std::mutex m_mutex;
+  std::condition_variable m_cv;
+  bool m_done = false;
+  std::thread m_thread;
+};
 
 std::string lower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(),
@@ -83,6 +119,7 @@ Testbed loadTestbed() {
 class DiaWindows : public ::testing::Test {
  protected:
   void SetUp() override {
+    m_watchdog = std::make_unique<Watchdog>(std::chrono::seconds(100));
     std::string err;
     m_opener = makeComDiaOpener(&err);
     ASSERT_NE(m_opener, nullptr) << err;
@@ -112,6 +149,9 @@ class DiaWindows : public ::testing::Test {
                 m_tb.ranges.size());
   }
 
+  void TearDown() override { m_watchdog.reset(); }
+
+  std::unique_ptr<Watchdog> m_watchdog;
   SymbolStringTable m_strings;
   std::shared_ptr<IDiaSessionOpener> m_opener;
   Testbed m_tb;
