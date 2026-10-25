@@ -4,6 +4,7 @@
 
 #include "core/strong_id.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -34,6 +35,14 @@ inline constexpr uint16_t kSampleFlagKernelLeaf = 1u << 0;
 // ModuleRec::id_kind values.
 inline constexpr uint8_t kModuleIdPdb = 1;
 inline constexpr uint8_t kModuleIdGnuBuildId = 2;
+// PE image identified only by IMAGE_FILE_HEADER.TimeDateStamp + OptionalHeader.SizeOfImage (no CodeView
+// record or file unavailable): id_len 8, u32 TimeDateStamp then u32 SizeOfImage, little-endian; age 0.
+inline constexpr uint8_t kModuleIdPeTimestampSize = 3;
+
+// ContextSwitchRec::reserved / ReadyRec::reserved bits.
+// Set when the attached stack (old_thread_stack / readying_stack) was walked on a thread other than old_tid /
+// readying_tid (which thread ETW walks for CSwitch is still being verified on real captures).
+inline constexpr uint32_t kSwitchFlagStackFromOtherThread = 1u << 0;
 
 // ScopeEventRec::kind values.
 inline constexpr uint8_t kScopeBegin = 0;
@@ -237,6 +246,41 @@ struct FooterRec {
 };
 
 #pragma pack(pop)
+
+// Naturally aligned in-memory copy of ModuleRec. ModuleRec is 78 bytes, so in arrays its StrongId member is
+// misaligned and calling members on it (path.get(), operator==) is undefined behaviour. Consumers should hold
+// modules as ModuleInfo (TraceReader::readModuleInfos) and copy any packed record to a local before use.
+struct ModuleInfo {
+  uint32_t pid = 0;
+  uint64_t base = 0, size = 0;
+  StringIdx path;
+  uint8_t id_kind = 0;
+  uint8_t id_len = 0;
+  std::array<uint8_t, 32> id{};
+  uint32_t age = 0;
+  uint64_t load_ts = 0, unload_ts = 0;
+  bool operator==(const ModuleInfo&) const = default;
+};
+
+// Thread-safe: pure function. Field-wise copy of a (possibly misaligned) ModuleRec via memcpy.
+inline ModuleInfo toModuleInfo(const ModuleRec& rec) {
+  alignas(8) ModuleRec r;
+  std::memcpy(static_cast<void*>(&r), static_cast<const void*>(&rec), sizeof(ModuleRec));
+  ModuleInfo m;
+  m.pid = r.pid;
+  m.base = r.base;
+  m.size = r.size;
+  uint32_t path = 0;
+  std::memcpy(&path, reinterpret_cast<const std::byte*>(&r) + offsetof(ModuleRec, path), sizeof(path));
+  m.path = StringIdx(path);
+  m.id_kind = r.id_kind;
+  m.id_len = r.id_len;
+  std::memcpy(m.id.data(), r.id, sizeof(r.id));
+  m.age = r.age;
+  m.load_ts = r.load_ts;
+  m.unload_ts = r.unload_ts;
+  return m;
+}
 
 static_assert(sizeof(FileHeader) == 64);
 static_assert(sizeof(ChunkHeader) == 32);

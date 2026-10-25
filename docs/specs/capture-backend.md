@@ -12,3 +12,7 @@ class ICaptureBackend { public:
   virtual void setProgressCallback(std::function<void(CaptureState,float)>) = 0; };
 ```
 Implementations: `WindowsEtwBackend` (WP-11/12), `LinuxPerfBackend` (WP-70), `MockBackend` (WP-10; copies a fixture to `outPath`).
+
+## Orchestrator clarifications (binding; merged with WP-10, 2026-10-25)
+Header: `libs/capture/capture_backend.h` (`tachyon::capture`), now orchestrator-owned. Adds `enum class CaptureMode { Launch, Attach, System }`, `enum class CaptureState { Idle, Starting, Capturing, Converting, Done }` (names match protocol states), `struct CaptureResult { std::filesystem::path tracePath; uint64_t eventsLost; std::filesystem::path rawPath; double durationS; }`, and name/parse helpers. `MockBackend` lives in `libs/capture/mock/`.
+- Backends may call the progress callback from any thread, including from inside `stop()`/`flush()`; the agent must not hold its state lock across backend calls (fix scheduled in WP-11).

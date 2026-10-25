@@ -12,9 +12,9 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-03 | Trace format library | — | merged (CI green incl. windows; interning-time target split to WP-03b) | wp/03-trace | 2026-10-25 |
 | WP-03b | Callstack interning throughput (10 s target) | — | merged (skewed 8.66 s met with streaming-input harness; uniform 11.99 s best effort) | wp/03b-intern-speed | 2026-10-25 |
 | WP-04 | Synthetic trace generator `tracegen` | C | in progress | wp/04-tracegen | 2026-10-25 |
-| WP-10 | Agent skeleton and control protocol | A | in progress | wp/10-agent | 2026-10-25 |
+| WP-10 | Agent skeleton and control protocol | A | merged (CI green incl. windows named-pipe tests; Windows console checks queued) | wp/10-agent | 2026-10-25 |
 | WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
-| WP-12 | ETL to `.tachyon` converter | A | not started | wp/12-etlconvert | |
+| WP-12 | ETL to `.tachyon` converter | A | in progress | wp/12-etlconvert | 2026-10-25 |
 | WP-13 | Launch, attach, process tree, CLI | A | not started | wp/13-launch-cli | |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | not started | wp/20-symbol-core | |
@@ -37,7 +37,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
-| WP-51 | Client runtime | E | not started | wp/51-sdk-runtime | |
+| WP-51 | Client runtime | E | in progress | wp/51-sdk-runtime | 2026-10-25 |
 | WP-52 | Agent-side ingestion and merge | — | not started | wp/52-ingestion | |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
@@ -100,6 +100,14 @@ build\windows-release\bin\etlstat.exe stats testbed.etl --pid <pid> --json > tes
 build\windows-release\bin\etlstat.exe stats testbed.etl --dump-hex 3 --dump-out testbed.hexevents
 ```
 Pass: ≥ 7,500 samples/s per busy core and > 95% SampledProfile with matched stacks (the report's last section prints PASS/FAIL). Then fill the [VERIFY] items and Measurements table in `docs/etw-notes.md`, and commit `testbed.hexevents` under `tests/fixtures/etw/` for WP-12. Also record which interval call worked (session handle or 0) and the CSwitch stack-thread role histogram.
+
+### WP-10
+CI already runs the named-pipe and acceptance tests on Windows. Manual checks on a Windows console:
+```
+build\windows-release\bin\tachyon-agent.exe --backend mock --pipe \\.\pipe\x      (press Ctrl+C; expect exit 0)
+build\windows-release\bin\tachyon-agent.exe --backend etw                          (unelevated: expect ENOPRIV, exit 3)
+```
+Known follow-ups assigned to WP-11: named-pipe DACL so a non-elevated client can talk to an elevated agent; broadcast outside the agent lock with a write timeout (a stalled client can currently wedge state changes); don't hold the agent lock across `backend->flush()`.
 
 ## Open questions (Part 7) and assumed defaults
 
