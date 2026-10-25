@@ -24,6 +24,18 @@ using model::ThreadState;
 using testutil::HandModel;
 using testutil::TestFunction;
 
+#if defined(__SANITIZE_ADDRESS__)
+constexpr bool kSanitized = true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+constexpr bool kSanitized = true;
+#else
+constexpr bool kSanitized = false;
+#endif
+#else
+constexpr bool kSanitized = false;
+#endif
+
 const std::vector<TestFunction> kFns = {{"A", 0x1000, 0x100}, {"B", 0x1100, 0x100}};
 constexpr uint64_t kA = 0x1000, kB = 0x1100;
 
@@ -267,9 +279,20 @@ std::string compareToStats(const std::vector<Instance>& inst, const Stats& s) {
 TEST(InstancesFixture, EveryFunctionOfMediumEqualsItsStats) {
   Loaded l("medium");
   QueryContext ctx(l.m, l.svc);
-  auto rows = bottomUpFunctions(ctx, {});
-  ASSERT_TRUE(rows.ok());
-  ASSERT_GT(rows->size(), 100u);
+  auto allRows = bottomUpFunctions(ctx, {});
+  ASSERT_TRUE(allRows.ok());
+  ASSERT_GT(allRows->size(), 100u);
+  // Every function takes a sample scan per query (~20 s for the ~400 functions in a release build). Under a
+  // sanitizer that is far beyond the test timeout, so only the first rows (by exclusive time) and every 60th
+  // after them are checked there.
+  std::vector<FunctionRow> rowStorage;
+  const std::vector<FunctionRow>* rowsPtr = &*allRows;
+  if (kSanitized) {
+    for (size_t i = 0; i < allRows->size(); ++i)
+      if (i < 8 || i % 60 == 0) rowStorage.push_back((*allRows)[i]);
+    rowsPtr = &rowStorage;
+  }
+  const std::vector<FunctionRow>* rows = rowsPtr;
 
   const auto check = [&](const Filter& f, const char* what) {
     std::atomic<size_t> withInstances{0};
