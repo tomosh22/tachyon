@@ -696,14 +696,6 @@ TEST_F(EtwCaptureTest, AgentDrivesTheEtwBackendOverTheControlPipe) {
   core.shutdown();
 }
 
-// TEMPORARY: prints the summary through a failing assertion so CI logs show the numbers.
-TEST(ZzSummary, DumpNumbers) {
-  std::ifstream f(fs::path(TACHYON_BINARY_DIR) / "etw_capture_summary.txt");
-  std::stringstream ss;
-  ss << f.rdbuf();
-  FAIL() << "\nSUMMARY-BEGIN\n" << ss.str() << "SUMMARY-END";
-}
-
 }  // namespace
 }  // namespace tachyon::capture
 
