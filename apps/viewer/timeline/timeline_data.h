@@ -79,9 +79,9 @@ size_t firstFrameTickAtOrAfter(const std::vector<FrameTick>& ticks, uint64_t t);
 enum class FramePosition : uint8_t { Leaf, NonLeaf };
 
 // Thread-safe (reads what SymbolService::lookup reads). THE one place where the timeline turns a frame into a
-// function key (selection, hover, highlight, by-function colours): when WP-32b's caller variant of
-// functionKeyFor lands, only the body of this function changes. `position` and `kernelLeaf` (the sample's
-// kernel-leaf flag) are the inputs that rule needs; until then every frame is resolved as a leaf.
+// function key (selection, hover, highlight, by-function colours). Non-leaf frames use the caller variant
+// of functionKeyFor (rva-1); `kernelLeaf` = true marks the interrupted user frame of a kernel-leaf sample,
+// which is resolved exactly like a leaf.
 //
 // Returns the key of the function the frame of `node` belongs to (spec 3.7, WP-20): symbols::functionKeyFor
 // when `symbols` is given, otherwise the unresolved form

@@ -96,12 +96,14 @@ std::optional<symbols::FunctionKey> functionKeyForNode(const model::TraceModel& 
                                                        const symbols::SymbolService* symbols,
                                                        CallstackIdx node, FramePosition position,
                                                        bool kernelLeaf) {
-  (void)position;    // WP-32b: non-leaf frames resolve at rva-1 via the caller variant of functionKeyFor
-  (void)kernelLeaf;  // WP-32b: a kernel-mode leaf is resolved as a leaf
   FrameIdx fi;
   const model::Frame* f = frameOf(model, node, fi);
   if (!f) return std::nullopt;
-  if (symbols) return symbols::functionKeyFor(*symbols, fi);
+  if (symbols) {
+    // Return-address rule: non-leaf frames resolve at rva-1, except the interrupted user IP.
+    const bool exact = position == FramePosition::Leaf || kernelLeaf;
+    return exact ? symbols::functionKeyFor(*symbols, fi) : symbols::functionKeyForCaller(*symbols, fi);
+  }
   return symbols::FunctionKey{f->module.valid() ? f->module : ModuleIdx::invalid(), f->addr_or_rva};
 }
 
