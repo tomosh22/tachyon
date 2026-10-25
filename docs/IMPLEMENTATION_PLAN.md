@@ -226,7 +226,7 @@ Record schemas (one record per `record_count`, SoA chunks noted):
 // Strings: concatenated UTF-8, each prefixed by uint32 length; StringIdx is the ordinal. Index 0 is "".
 struct ProcessRec  { uint32_t pid; uint32_t parent_pid; uint64_t start_ts, end_ts; StringIdx name; StringIdx command_line; };
 struct ThreadRec   { uint32_t tid; uint32_t pid; uint64_t start_ts, end_ts; StringIdx name; uint32_t flags; }; // flags bit0 = is_target_process
-struct ModuleRec   { uint32_t pid; uint64_t base; uint64_t size; StringIdx path; uint8_t id_kind; /*1 pdb guid+age, 2 gnu build-id*/ uint8_t id_len; uint8_t id[32]; uint32_t age; uint64_t load_ts, unload_ts; };
+struct ModuleRec   { uint32_t pid; uint64_t base; uint64_t size; StringIdx path; uint8_t id_kind; /*1 pdb guid+age, 2 gnu build-id, 3 pe timestamp+size*/ uint8_t id_len; uint8_t id[32]; uint32_t age; uint64_t load_ts, unload_ts; };
 struct FrameRec    { ModuleIdx module; uint64_t addr_or_rva; };         // module == kInvalidIdx: absolute address (unmapped); else RVA within module
 struct CallstackNodeRec { CallstackIdx parent; FrameIdx frame; };       // index 0 reserved as root (parent=kInvalidIdx)
 // Samples: SoA, record_count N: uint64 ts[N]; uint32 tid[N]; uint32 callstack[N]; uint16 cpu[N]; uint16 flags[N] (bit0 kernel-mode leaf)
