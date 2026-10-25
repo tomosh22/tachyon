@@ -18,7 +18,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-13 | Launch, attach, process tree, CLI | A | in review (CI green incl. Windows launch acceptance) | wp/13-launch-cli | 2026-10-25 |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | merged (oracle 0/929 mismatches; cold resolve 11.5 ms, memo 2.2 ns on CI) | wp/20-symbol-core | 2026-10-25 |
-| WP-21 | Symbol locator and HTTP client | B | in review (verifier fixes in; awaiting Windows CI) | wp/21-symbol-locator | 2026-10-25 |
+| WP-21 | Symbol locator and HTTP client | B | merged (CI green incl. msdl.microsoft.com ntdll.pdb fetch) | wp/21-symbol-locator | 2026-10-25 |
 | WP-22 | DIA symbol provider | B | not started | wp/22-dia | |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
@@ -95,6 +95,10 @@ Noted for later: `Begin/EndFiberSwitch` take a sharded mutex (not Begin/End).
 | Medium 16-row frame incl. flame | < 4 ms | 2.45 ms CI, 3.9–6.2 ms dev VM |
 
 Merged because the WP-36 per-query criterion is met and correctness probes (random coverage, LOD vs direct, TSan/ASan build-vs-query races, cancel/resume hash) are clean. The spec 3.9 frame target is carried by WP-36b: cut the per-column band/strip cost about 2× (fuse band+strip, avoid 64-bit divisions in moveTo), make the sub-base strip path cheaper, and assert the 64-row band+strip frame with a non-flaky metric. Notes: entry points are `TimelineLod::prepare()/build()` rather than `lod::build(TraceModel&)`; progress fires per finished thread; no thread build priority yet (a WP-42 need).
+
+## WP-21 notes
+
+Verifier FAIL on the first commit (HTTP two-tier servers not handled), plus security hardening; all fixed in 05df6da: index2.txt probed once per server; remote `file.ptr` PATH followed only under configured roots (never UNC); 4 KiB file.ptr cap and a 2 GiB default download cap; curl protocols limited to http/https; percent-encoded URL components; WinHTTP truncated-body and timeout handling. Windows CI fetched ntdll.pdb from msdl.microsoft.com. Follow-ups: nothing calls `unpin()` yet (WP-22 or SymbolService should when providers close); the PDB name falls back to `<image stem>.pdb` because Module/ModuleRec has no PDB name field (proposal pending: carry the RSDS pdb file name).
 
 ## Windows / privileged verification queue
 
