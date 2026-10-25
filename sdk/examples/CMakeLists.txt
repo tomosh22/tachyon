@@ -40,3 +40,10 @@ add_test(NAME sdk_example_engine_hooks_disabled COMMAND engine_hooks_example_dis
 set_tests_properties(
   sdk_example_engine_hooks_sidecar sdk_example_dynamic_load_sidecar sdk_example_engine_hooks_disabled
   PROPERTIES ENVIRONMENT "TACHYON_AGENT_PIPE=${CMAKE_CURRENT_BINARY_DIR}/no-agent.sock" TIMEOUT 60)
+
+# MSVC deprecates getenv (C4996); the examples only read plain environment variables.
+if(MSVC)
+  foreach(t engine_hooks_example engine_hooks_example_disabled dynamic_load_example)
+    target_compile_definitions(${t} PRIVATE _CRT_SECURE_NO_WARNINGS)
+  endforeach()
+endif()
