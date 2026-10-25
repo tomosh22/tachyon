@@ -23,7 +23,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-22 | DIA symbol provider | B | in progress | wp/22-dia-provider | 2026-10-25 |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
-| WP-32 | Attribution and aggregation | C | in progress | wp/32-attribution | 2026-10-25 |
+| WP-32 | Attribution and aggregation | C | merged | wp/32-attribution | 2026-10-25 |
+| WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | not started | wp/32b-return-address | 2026-10-25 |
 | WP-33 | Filters, cancellation, query cache | C | not started | wp/33-filters | |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
 | WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
@@ -101,6 +102,17 @@ Merged because the WP-36 per-query criterion is met and correctness probes (rand
 ## WP-21 notes
 
 Verifier FAIL on the first commit (HTTP two-tier servers not handled), plus security hardening; all fixed in 05df6da: index2.txt probed once per server; remote `file.ptr` PATH followed only under configured roots (never UNC); 4 KiB file.ptr cap and a 2 GiB default download cap; curl protocols limited to http/https; percent-encoded URL components; WinHTTP truncated-body and timeout handling. Windows CI fetched ntdll.pdb from msdl.microsoft.com. Follow-ups: nothing calls `unpin()` yet (WP-22 or SymbolService should when providers close); the PDB name falls back to `<image stem>.pdb` because Module/ModuleRec has no PDB name field (proposal pending: carry the RSDS pdb file name).
+
+## WP-32 measured numbers (verifier, 4-vCPU VM, cold = fresh QueryContext after load + thread states + symbols)
+
+| Query | Fixture | Measured | Budget |
+|---|---|---|---|
+| bottomUpFunctions full range | medium (7.49 M samples) | 12–17 ms | 300 ms |
+| bottomUpFunctions full range | large (299.5 M samples) | 0.26–0.51 s | 3 s |
+| memoized repeat | medium / large | 11 µs / 32 µs | — |
+
+All 8 fixtures match expected.json exactly. Large also matches exactly (verifier probe, 1055 functions). TSan is clean on concurrent queries. Spec 3.7 signature changed to `QueryContext` (see docs/specs/analysis-query.md), and the return-address rule is added, implemented by WP-32b.
+Recurring load flake: TestbedScenarios.EveryScenarioRunsAndProducesValidReport fails under `ctest -j` (seen 4 times) and passes alone. Queued as WP-02b (make the scenario assertions load-tolerant).
 
 ## Windows / privileged verification queue
 
