@@ -25,6 +25,7 @@
 #pragma warning(pop)
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -190,8 +191,14 @@ class ComSession final : public IDiaSymbolSession {
     ComPtr<IDiaSymbol> global;
     HRESULT hr = m_session->get_globalScope(global.put());
     if (FAILED(hr) || !global) return FAILED(hr) ? hr : E_FAIL;
+    const auto t0 = GetTickCount64();
+    std::fprintf(stderr, "[dia-trace] enumerating functions\n");
     enumerate(global.get(), SymTagFunction, /*isPublic=*/false, m_functions);
+    std::fprintf(stderr, "[dia-trace] %zu functions after %llu ms; enumerating publics\n", m_functions.size(),
+                 static_cast<unsigned long long>(GetTickCount64() - t0));
     enumerate(global.get(), SymTagPublicSymbol, /*isPublic=*/true, m_publics);
+    std::fprintf(stderr, "[dia-trace] %zu publics after %llu ms\n", m_publics.size(),
+                 static_cast<unsigned long long>(GetTickCount64() - t0));
     return S_OK;
   }
 
