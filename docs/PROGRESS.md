@@ -7,7 +7,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP | Title | Lane | Status | Branch | Date |
 |---|---|---|---|---|---|
 | WP-00 | Repository skeleton and CI | — | merged (CI green: linux-release, linux-asan, windows-release) | main | 2026-10-24 |
-| WP-01 | ETW spike tool `etlstat` | A | in review | wp/01-etlstat | 2026-10-25 |
+| WP-01 | ETW spike tool `etlstat` | A | needs Windows verification (code merged; CI windows job ran a real elevated record+consume round trip) | wp/01-etlstat | 2026-10-25 |
 | WP-02 | Profiler testbed | — | merged (CI green incl. windows-release; Windows timing splits to confirm, see queue) | wp/02-testbed | 2026-10-25 |
 | WP-03 | Trace format library | — | merged (CI green incl. windows; interning-time target split to WP-03b) | wp/03-trace | 2026-10-25 |
 | WP-03b | Callstack interning throughput (10 s target) | — | not started (split from WP-03) | wp/03b-intern-speed | |
@@ -88,6 +88,17 @@ build\windows-release\bin\tachyon-testbed.exe --scenario all --duration 5 --pret
 build\windows-release\bin\tachyon-testbed.exe --scenario sleep --duration 5 --pretty
 ```
 Confirm the `sleep` split is within ±0.05 of 0.70/0.30 (Windows timer granularity may need `timeBeginPeriod(1)`), the fibers split is ~0.25 each, and thread names show in a debugger or Task Manager.
+
+### WP-01 (acceptance numbers; elevated prompt, ≥8-core machine)
+```
+cmake --preset windows-release && cmake --build --preset windows-release
+build\windows-release\bin\etlstat.exe record --out testbed.etl --seconds 30 --hz 8000 --exe build\windows-release\bin\tachyon-testbed.exe
+build\windows-release\bin\etlstat.exe stats testbed.etl --pid <pid printed by record>
+build\windows-release\bin\etlstat.exe stats testbed.etl --pid <pid> --json > testbed-stats.json
+build\windows-release\bin\etlstat.exe stats testbed.etl --dump-hex 3 --dump-out testbed.hexevents
+```
+(The testbed needs `--scenario all --duration 30`; if `record --exe` takes no args for the exe, start the testbed manually with those args right after `record` starts and pass its pid.)
+Pass: ≥ 7,500 samples/s per busy core and > 95% SampledProfile with matched stacks (the report's last section prints PASS/FAIL). Then fill the [VERIFY] items and Measurements table in `docs/etw-notes.md`, and commit `testbed.hexevents` under `tests/fixtures/etw/` for WP-12. Also record which interval call worked (session handle or 0) and the CSwitch stack-thread role histogram.
 
 ## Open questions (Part 7) and assumed defaults
 
