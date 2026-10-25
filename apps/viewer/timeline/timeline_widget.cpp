@@ -248,6 +248,9 @@ void TimelineWidget::resetDocument() {
   m_pendingNav.reset();
   m_scrollToThread = ThreadIdx();
   m_arrows.clear();
+  m_highlightIndex.reset();
+  m_highlightGeneration = 0;
+  m_highlightRects.clear();
 }
 
 void TimelineWidget::startDocument(const PanelContext& context) {
@@ -607,6 +610,67 @@ void TimelineWidget::drawStatusLine(const PanelContext& context) {
   ImGui::TextDisabled("%s", fps);
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Instance highlight (WP-47)
+
+void TimelineWidget::drawInstanceHighlights(ImDrawList* dl, const PanelContext& context,
+                                            const RowRange& visible, float originY) {
+  m_highlightRects.clear();
+  if (!m_doc || !context.selection) return;
+  const InstanceHighlight& h = context.selection->state().instanceHighlight;
+  if (!h.active()) {
+    m_highlightIndex.reset();
+    m_highlightGeneration = 0;
+    return;
+  }
+  DocState& d = *m_doc;
+  if (!m_highlightIndex || m_highlightGeneration != h.generation) {
+    m_highlightIndex = std::make_unique<stats::InstanceIndex>(h.instances, d.model->threads.size());
+    m_highlightGeneration = h.generation;
+  }
+  // Bounded work per frame: a cap on the rects of one frame (a row never produces more than its pixel width).
+  constexpr size_t kMaxRectsPerFrame = 20000;
+  size_t budget = kMaxRectsPerFrame;
+  const ImU32 fill = IM_COL32(255, 190, 40, 80), edge = IM_COL32(255, 205, 70, 255);
+  std::vector<stats::OverlayRect> rects;
+  std::optional<HighlightRectInfo> current;
+  for (size_t i = visible.first; i < visible.last && budget > 0; ++i) {
+    const RowLayout& row = d.layout[i];
+    rects.clear();
+    m_highlightIndex->rectsFor(row.thread, d.view, d.limits, m_geometry.plotX0, m_geometry.plotWidth, budget,
+                               rects);
+    if (rects.empty()) continue;
+    budget -= std::min(budget, rects.size());
+    const float top = originY + row.y0;
+    const float bottom = top + row.height;
+    {
+      RectBatch batch(dl, rects.size() * 2);
+      for (const stats::OverlayRect& r : rects) {
+        batch.add(r.x0, top, r.x1, bottom, fill);
+        if (r.x1 - r.x0 >= 4.0f) batch.add(r.x0, top, r.x1, top + 2.0f, edge);  // a marker for real instances
+      }
+    }
+    for (const stats::OverlayRect& r : rects) {
+      HighlightRectInfo info;
+      info.thread = row.thread;
+      info.instance = r.instance;
+      info.x0 = r.x0;
+      info.x1 = r.x1;
+      info.count = r.count;
+      info.y0 = top;
+      info.y1 = bottom;
+      info.current = h.current && *h.current == r.instance;
+      if (info.current) current = info;
+      m_highlightRects.push_back(info);
+    }
+  }
+  m_stats.highlightRects = static_cast<uint32_t>(m_highlightRects.size());
+  if (current) {
+    dl->AddRect(ImVec2(current->x0 - 1.0f, current->y0), ImVec2(current->x1 + 1.0f, current->y1),
+                IM_COL32(255, 255, 255, 255), 0.0f, 0, 2.0f);
+  }
+}
+
 void TimelineWidget::drawRangeOverlays(ImDrawList* dl, const PanelContext& context, float y0, float y1) {
   DocState& d = *m_doc;
   const float x0 = m_geometry.plotX0, w = m_geometry.plotWidth;
@@ -853,6 +917,7 @@ void TimelineWidget::drawRows(const PanelContext& context) {
     ++m_stats.rowsDrawn;
     if (cache.pending) ++m_stats.rowsPending;
   }
+  drawInstanceHighlights(dl, context, vis, origin.y);
   drawRangeOverlays(dl, context, m_geometry.rowsY0, m_geometry.rowsY1);
 
   // Cursor hairline and tooltip.

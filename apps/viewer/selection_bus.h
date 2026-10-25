@@ -1,11 +1,13 @@
 // SelectionBus: the viewer's shared "what is selected" state; panels subscribe and are told what changed.
 #pragma once
 
+#include "analysis/instances.h"
 #include "core/strong_id.h"
 #include "symbols/function_key.h"
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -66,6 +68,17 @@ struct PanelRequest {
   bool operator==(const PanelRequest&) const = default;
 };
 
+// The instances of one function / scope that the timeline highlights (WP-47). `generation` identifies the
+// instance list (0 = nothing highlighted; a new list gets a new generation, a change of `current` does not).
+struct InstanceHighlight {
+  uint64_t generation = 0;
+  std::optional<FunctionKey> key;
+  std::shared_ptr<const std::vector<analysis::Instance>> instances;  // sorted by begin
+  std::optional<uint32_t> current;  // index into *instances of the instance last navigated to
+
+  bool active() const { return generation != 0 && instances != nullptr; }
+};
+
 struct SelectionState {
   // Current time filter; nullopt means "whole trace".
   std::optional<ViewFilter> timeFilter;
@@ -76,6 +89,8 @@ struct SelectionState {
   std::optional<WaitSelection> selectedWait;
   NavigationRequest navigation;  // the last request; serial 0 after clear()
   PanelRequest panelRequest;     // the last request; serial 0 after clear()
+  // WP-47.
+  InstanceHighlight instanceHighlight;
 };
 
 // SelectedWait, Navigation and PanelRequest were added by WP-46 after All; All still means "everything".
@@ -87,7 +102,8 @@ enum class SelectionField : uint8_t {
   All,
   SelectedWait,
   Navigation,
-  PanelRequest
+  PanelRequest,
+  InstanceHighlight  // WP-47
 };
 
 // Main-thread only. Dispatch is synchronous, in subscription order. A callback may unsubscribe itself or any
@@ -118,6 +134,13 @@ class SelectionBus {
   uint64_t requestNavigation(ThreadIdx thread, uint64_t t0, uint64_t t1);
   // Main-thread only. Always publishes; assigns the next serial and returns it.
   uint64_t requestPanel(std::string name);
+  // Main-thread only (WP-47). Highlights `instances` of `key` in the timeline. Always publishes (an event):
+  // assigns and returns a new generation; `current` is reset. A null list clears the highlight (returns 0).
+  uint64_t setInstanceHighlight(std::optional<FunctionKey> key,
+                                std::shared_ptr<const std::vector<analysis::Instance>> instances);
+  // Main-thread only (WP-47). Marks one instance of the active highlight as the current one (the generation
+  // is unchanged). Publishes only if the value changed and a highlight is active.
+  void setHighlightCurrent(std::optional<uint32_t> index);
   // Main-thread only. Resets everything (e.g. a new document) and publishes SelectionField::All once.
   void clear();
 

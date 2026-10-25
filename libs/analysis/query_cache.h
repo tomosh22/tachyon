@@ -27,6 +27,7 @@ enum class QueryKind : uint8_t {
   Frames,
   SlowestFrames,  // WP-35
   ScopePairs,     // WP-35: paired Begin/End instances of the whole model (scope_pairing.h)
+  Instances,      // WP-47: instance lists of a function or scope (instances.h)
 };
 
 // Identity of a cached result: the query, its extra arguments, and the (canonical) filter. A hit requires
@@ -118,7 +119,7 @@ class QueryCache {
   void evictLocked();
   List::iterator lookupLocked(const QueryKey& key, uint64_t hash);
 
-  static constexpr size_t kKinds = 12;
+  static constexpr size_t kKinds = 13;
   mutable std::mutex m_mutex;
   List m_lru;  // front = most recently used
   std::unordered_multimap<uint64_t, List::iterator> m_index;

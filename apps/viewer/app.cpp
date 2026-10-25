@@ -92,6 +92,7 @@ bool App::init(std::string& error) {
   m_panels.add(makeCallGraphPanel());
   m_panels.add(makeFunctionListPanel());
   m_panels.add(makeButterflyPanel());
+  m_panels.add(makeFunctionStatsPanel(), false);  // opened by Ctrl+F or from the View menu
   m_selectionSub = m_selection.subscribe([this](const SelectionState& state, SelectionField field) {
     // WP-46: a panel asked for another panel to be shown (the panel itself takes the focus).
     if (field == SelectionField::PanelRequest) {
@@ -139,6 +140,8 @@ void App::registerCommands() {
   m_commands.add({"view.scale.down", "View: Decrease UI Scale", "",
                   [this] { setUserScale(m_settings.uiScale / 1.1f); }});
   m_commands.add({"view.scale.reset", "View: Reset UI Scale", "", [this] { setUserScale(1.0f); }});
+  m_commands.add({"stats.search", "Function Statistics: Search Functions", "Ctrl+F",
+                  [this] { m_selection.requestPanel(kFunctionStatsPanelName); }});
   m_commands.add({"help.palette", "Help: Command Palette", "Ctrl+P", [this] { m_paletteRequested = true; }});
 }
 
@@ -342,7 +345,11 @@ void App::drawUi() {
   if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_P)) m_paletteRequested = true;
   if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) m_commands.run("file.open");
   if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Q)) requestQuit();
-  (void)io;
+  // Ctrl+F opens the Function Statistics search, but never steals the keys from a text field.
+  if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F) && !io.WantTextInput && !m_paletteOpen &&
+      m_document) {
+    m_commands.run("stats.search");
+  }
 
   drawMenuBar();
   drawStatusBar();

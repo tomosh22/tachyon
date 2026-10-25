@@ -35,6 +35,10 @@ add_library(tachyon_viewer_core STATIC
   sdl_gl_renderer.cpp
   selection_bus.cpp
   settings.cpp
+  stats/fuzzy_matcher.cpp
+  stats/function_stats_panel.cpp
+  stats/instance_index.cpp
+  stats/stats_model.cpp
   theme.cpp
   timeline/timeline_colors.cpp
   timeline/timeline_data.cpp
