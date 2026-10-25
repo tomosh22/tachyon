@@ -34,7 +34,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-41 | Session explorer and capture dialogs | D | not started | wp/41-session-explorer | |
 | WP-42 | Threads timeline | D | merged; needs GPU verification (60 fps) | wp/42-threads-timeline | 2026-10-25 |
 | WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | merged | wp/42b-timeline-symbols | 2026-10-25 |
-| WP-43 | Call graph panel | D | not started | wp/43-call-graph | |
+| WP-43 | Call graph panel | D | merged | wp/43-call-graph | 2026-10-25 |
 | WP-44 | Function list and butterfly | D | not started | wp/44-function-list | |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
 | WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
@@ -145,7 +145,14 @@ The first verifier pass FAILed on agent robustness: a crash when thread creation
 | merge | 8.8–11.9 M events/s |
 | merging a 310 MB sidecar | 4.7 s, peak RSS 768 MB (about 2.5× the sidecar) |
 
+## WP-43 notes
+
+Verifier PASS. The panel tree equals topDownTree node by node on tiny and medium in all 6 inline × kernel modes. It is ASan-clean under document close/reopen and App destruction with queries in flight, and a 100k-deep chain is safe everywhere. Flattening 100k expanded rows takes 2.1 ms (budget 20 ms), and a panel frame with 5000 rows 0.06 ms (budget 4 ms). The viewer keeps one QueryContext per (inline, kernel) option set per symbol generation (accepted deviation from "one per document"). `Document::analysis()`, `snapshot()` and `submit<T>()` are the reuse API for WP-44, WP-45 and WP-47. Orchestrator fix: lod.h's `Cancel` alias was renamed `LodCancel`, so lod.h and query.h can share a TU.
+Known gap: "Filter to subtree" resolves a merged top-down node to ONE callstack node. A function reached from two call sites keeps only about half its time, and more generally about 1/N. WP-33b fixes this by adding `Filter::subtreePath` to the analysis API.
+
 ## Queued follow-ups
+
+- WP-33b: `Filter::subtreePath` (FunctionKey path prefix, applied after flatten; hashed in QueryCache), then switch the Call Graph "Filter to subtree" to it and drop the main-thread subtree resolver. Also: pie chart gets a "self" slice; selected-row deep-cap message.
 
 - WP-02b: done by the orchestrator. testbed_tests are RUN_SERIAL (the CPU-share checks failed when ctest -j oversubscribed the cores; the verifier reproduced this on pre-existing binaries). LocatorTest.ConcurrentDownloadsAreBounded now asserts only the bound (≤ 2), not that the limit is reached. CancellationTest.TwentyMillion measured 42.6 ms against 50 ms under load average 10; watch it.
 - WP-21b (in progress, wp/21b-cancellable-symbols): make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.

@@ -10,7 +10,7 @@
 
 namespace tachyon::viewer {
 
-class AnalysisContext;  // analysis_context.h (kept out of this header: analysis/query.h clashes with lod.h)
+class AnalysisContext;  // analysis_context.h
 
 // Extension slots. Each is an empty interface for now; the owning work package replaces the body (adds
 // methods) and installs an implementation with Document::setSymbols() etc. App and existing panels need no

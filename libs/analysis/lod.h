@@ -72,7 +72,7 @@
 namespace tachyon::analysis {
 
 // Optional cancellation flag polled between work items; when it becomes true the call returns Cancelled.
-using Cancel = const std::atomic<bool>*;
+using LodCancel = const std::atomic<bool>*;  // distinct from analysis::Cancel (query.h)
 
 inline constexpr uint8_t kNoWaitCategory = 0xFF;  // BandColumn::waitCategory when nothing waited
 inline constexpr uint8_t kDirectLevel = 0xFF;     // result `level` when the answer was computed directly
@@ -206,7 +206,7 @@ class TimelineLod {
   // Builds all threads that are not ready on options.threads workers (the caller is one of them and the only
   // one calling `progress`, with a monotonic value in [0,1], 1.0 on success). On cancellation returns
   // Cancelled; threads finished before stay ready.
-  Result<void> build(Cancel cancel = nullptr, const std::function<void(float)>& progress = {});
+  Result<void> build(LodCancel cancel = nullptr, const std::function<void(float)>& progress = {});
 
   // Thread-safe.
   size_t threadCount() const;
@@ -242,6 +242,6 @@ uint64_t pixelEdge(uint64_t t0, uint64_t t1, uint32_t pixelWidth, uint32_t colum
 // Thread-safe for distinct models: prepare() + build() on the calling thread plus options.threads - 1
 // workers. Convenience for batch use; the viewer calls prepare() and build() on a worker instead.
 Result<TimelineLod> buildLod(const model::TraceModel& model, const LodOptions& options = {},
-                             Cancel cancel = nullptr, const std::function<void(float)>& progress = {});
+                             LodCancel cancel = nullptr, const std::function<void(float)>& progress = {});
 
 }  // namespace tachyon::analysis

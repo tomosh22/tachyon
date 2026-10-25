@@ -302,7 +302,7 @@ struct Agg {
 class ThreadBuilder {
  public:
   ThreadBuilder(const TraceModel& m, const Geometry& g, const NodeTable& nt, const LodOptions& opt,
-                Cancel cancel)
+                LodCancel cancel)
       : m_m(m), m_g(g), m_nt(nt), m_cap(std::max<uint32_t>(opt.maxStacksPerBucket, 1)), m_cancel(cancel) {}
 
   Result<void> run(size_t thread, ThreadLod& out) {
@@ -464,7 +464,7 @@ class ThreadBuilder {
   const Geometry& m_g;
   const NodeTable& m_nt;
   size_t m_cap;
-  Cancel m_cancel;
+  LodCancel m_cancel;
   ThreadLod* m_out = nullptr;
   std::vector<Agg> m_acc;
   std::vector<Entry> m_scratch;
@@ -880,7 +880,7 @@ Result<TimelineLod> TimelineLod::prepare(const TraceModel& model, const LodOptio
   return lod;
 }
 
-Result<void> TimelineLod::build(Cancel cancel, const std::function<void(float)>& progress) {
+Result<void> TimelineLod::build(LodCancel cancel, const std::function<void(float)>& progress) {
   if (!m_impl) return makeError(ErrorCode::InvalidArgument, "TimelineLod is not prepared");
   Impl& im = *m_impl;
   std::vector<size_t> todo;
@@ -1614,7 +1614,7 @@ Result<void> TimelineLod::timeline(const TimelineQuery& q, TimelineResult& out) 
   return {};
 }
 
-Result<TimelineLod> buildLod(const TraceModel& model, const LodOptions& options, Cancel cancel,
+Result<TimelineLod> buildLod(const TraceModel& model, const LodOptions& options, LodCancel cancel,
                              const std::function<void(float)>& progress) {
   auto lod = TimelineLod::prepare(model, options);
   if (!lod.ok()) return lod;
