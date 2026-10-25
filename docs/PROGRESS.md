@@ -17,7 +17,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-12 | ETL to `.tachyon` converter | A | needs Windows verification (merged; CI windows job converted a real ETL; hot_a/b/c ranking and 2 GB timing unconfirmed) | wp/12-etlconvert | 2026-10-25 |
 | WP-13 | Launch, attach, process tree, CLI | A | not started | wp/13-launch-cli | |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
-| WP-20 | Symbol core | B | not started | wp/20-symbol-core | |
+| WP-20 | Symbol core | B | in progress | wp/20-symbol-core | 2026-10-25 |
 | WP-21 | Symbol locator and HTTP client | B | not started | wp/21-symbol-locator | |
 | WP-22 | DIA symbol provider | B | not started | wp/22-dia | |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
