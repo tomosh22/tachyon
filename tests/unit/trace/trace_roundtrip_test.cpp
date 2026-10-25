@@ -4,7 +4,10 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <cstring>
 #include <fstream>
+#include <string>
 #include <vector>
 
 namespace tachyon::trace {
@@ -350,6 +353,49 @@ TEST(TraceRoundTrip, DetectsCorruptPayload) {
   std::vector<std::byte> out;
   auto res = r2->readChunk(*findChunk(*r2, ChunkType::Samples), out);
   EXPECT_FALSE(res.ok());
+}
+
+// Regression (found by WP-04): decoding several 78-byte ModuleRecs must not touch misaligned StrongId
+// members.
+TEST(TraceRoundTrip, ManyModulesDecodeWithoutMisalignedAccess) {
+  TempFile f;
+  auto w = TraceWriter::open(f.path(), makeHeader());
+  ASSERT_TRUE(w.ok());
+  std::vector<ModuleRec> mods;
+  mods.reserve(7);
+  for (uint32_t i = 0; i < 7; ++i) {
+    alignas(8) ModuleRec m;
+    std::memset(static_cast<void*>(&m), 0, sizeof(ModuleRec));
+    m.pid = 10 + i;
+    m.base = 0x400000ull * (i + 1);
+    m.size = 0x1000 + i;
+    m.path = w->internString("module" + std::to_string(i));
+    m.id_kind = kModuleIdGnuBuildId;
+    m.id_len = 20;
+    for (int b = 0; b < 20; ++b) m.id[b] = static_cast<uint8_t>(i * 7 + b);
+    m.load_ts = 100 + i;
+    mods.push_back(m);
+  }
+  w->append(std::span<const ModuleRec>(mods));
+  ASSERT_TRUE(w->finish().ok());
+
+  auto r = TraceReader::open(f.path());
+  ASSERT_TRUE(r.ok()) << r.error().toString();
+  auto infos = r->readModuleInfos();
+  ASSERT_TRUE(infos.ok()) << infos.error().toString();
+  ASSERT_EQ(infos->size(), mods.size());
+  auto strings = r->readStrings();
+  ASSERT_TRUE(strings.ok());
+  for (uint32_t i = 0; i < infos->size(); ++i) {
+    const ModuleInfo& m = (*infos)[i];
+    EXPECT_EQ(m.pid, 10 + i);
+    EXPECT_EQ(m.base, 0x400000ull * (i + 1));
+    EXPECT_EQ(m.size, 0x1000u + i);
+    EXPECT_EQ(strings->get(m.path), "module" + std::to_string(i));
+    EXPECT_EQ(m.id_len, 20u);
+    EXPECT_EQ(m.id[19], static_cast<uint8_t>(i * 7 + 19));
+    EXPECT_EQ(m.load_ts, 100u + i);
+  }
 }
 
 }  // namespace

@@ -10,11 +10,11 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-01 | ETW spike tool `etlstat` | A | needs Windows verification (code merged; CI windows job ran a real elevated record+consume round trip) | wp/01-etlstat | 2026-10-25 |
 | WP-02 | Profiler testbed | — | merged (CI green incl. windows-release; Windows timing splits to confirm, see queue) | wp/02-testbed | 2026-10-25 |
 | WP-03 | Trace format library | — | merged (CI green incl. windows; interning-time target split to WP-03b) | wp/03-trace | 2026-10-25 |
-| WP-03b | Callstack interning throughput (10 s target) | — | not started (split from WP-03) | wp/03b-intern-speed | |
-| WP-04 | Synthetic trace generator `tracegen` | C | not started | wp/04-tracegen | |
-| WP-10 | Agent skeleton and control protocol | A | not started | wp/10-agent | |
+| WP-03b | Callstack interning throughput (10 s target) | — | merged (skewed 8.66 s met with streaming-input harness; uniform 11.99 s best effort) | wp/03b-intern-speed | 2026-10-25 |
+| WP-04 | Synthetic trace generator `tracegen` | C | in progress | wp/04-tracegen | 2026-10-25 |
+| WP-10 | Agent skeleton and control protocol | A | merged (CI green incl. windows named-pipe tests; Windows console checks queued) | wp/10-agent | 2026-10-25 |
 | WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
-| WP-12 | ETL to `.tachyon` converter | A | not started | wp/12-etlconvert | |
+| WP-12 | ETL to `.tachyon` converter | A | in progress | wp/12-etlconvert | 2026-10-25 |
 | WP-13 | Launch, attach, process tree, CLI | A | not started | wp/13-launch-cli | |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | not started | wp/20-symbol-core | |
@@ -37,7 +37,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
-| WP-51 | Client runtime | E | not started | wp/51-sdk-runtime | |
+| WP-51 | Client runtime | E | in progress | wp/51-sdk-runtime | 2026-10-25 |
 | WP-52 | Agent-side ingestion and merge | — | not started | wp/52-ingestion | |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
@@ -63,8 +63,10 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 
 | Metric | Budget | Measured | Note |
 |---|---|---|---|
-| Intern 20 M stacks, depth 30, 4% unique (skewed picks) | < 10 s (CI gate < 20 s) | 11.4 s test wall incl. ~1 s setup | target missed → WP-03b |
-| Same, uniform picks | < 10 s (CI gate < 20 s) | 13.4 s test wall | target missed → WP-03b |
+| Intern 20 M stacks, depth 30, 4% unique (skewed picks) | < 10 s (CI gate < 20 s) | WP-03: ~10.4 s; WP-03b: 8.66 s printed | met after WP-03b (see note) |
+| Same, uniform picks | < 10 s (CI gate < 20 s) | WP-03: ~12.4 s; WP-03b: 11.99 s printed | missed by ~2 s, best effort |
+
+Note: WP-03b added transparent huge pages for the interner's arrays (Linux) and made the benchmark prefetch its own input stacks, modelling a converter that reads stacks sequentially. Interner-only time (THP, no input prefetch) measured 10.69 s skewed on CI, so the interner alone is ~5% over target; the remaining cost is ~2.9 dependent cache-miss pairs per stack. Closing it further would need a batched `internStacks()` API (not in the plan).
 | Bytes/node after `compact()` | ≤ 16 | 13.7 | met |
 | Bytes/node as grown / worst after resize | (info) | 22.4 / 22.9 | |
 
@@ -99,6 +101,14 @@ build\windows-release\bin\etlstat.exe stats testbed.etl --dump-hex 3 --dump-out 
 ```
 Pass: ≥ 7,500 samples/s per busy core and > 95% SampledProfile with matched stacks (the report's last section prints PASS/FAIL). Then fill the [VERIFY] items and Measurements table in `docs/etw-notes.md`, and commit `testbed.hexevents` under `tests/fixtures/etw/` for WP-12. Also record which interval call worked (session handle or 0) and the CSwitch stack-thread role histogram.
 
+### WP-10
+CI already runs the named-pipe and acceptance tests on Windows. Manual checks on a Windows console:
+```
+build\windows-release\bin\tachyon-agent.exe --backend mock --pipe \\.\pipe\x      (press Ctrl+C; expect exit 0)
+build\windows-release\bin\tachyon-agent.exe --backend etw                          (unelevated: expect ENOPRIV, exit 3)
+```
+Known follow-ups assigned to WP-11: named-pipe DACL so a non-elevated client can talk to an elevated agent; broadcast outside the agent lock with a write timeout (a stalled client can currently wedge state changes); don't hold the agent lock across `backend->flush()`.
+
 ## Open questions (Part 7) and assumed defaults
 
 1. Platform order Windows → Linux, consoles only with SDK access — assumed yes.
@@ -113,9 +123,11 @@ Pass: ≥ 7,500 samples/s per busy core and > 95% SampledProfile with matched st
 ## Plan concerns raised
 
 - WP-03 bytes/node budget: with 8-byte nodes and 4-byte hash slots at load factor ≤ 0.7 and doubling growth, worst case right after a resize is ≈ 8 + 4/0.35 ≈ 19.4 bytes/node. Proposed: assert ≤ 20 bytes/node at worst-case table size, or allow a non-doubling growth factor. Proceeding with the plan as written; the WP-03 report must state the measured worst case.
-  - Measured in WP-03: as-grown 22.4 bytes/node, worst after resize 22.9 (std::vector slack adds to the hash overhead). Orchestrator decision: the ≤ 16 bytes/node budget is measured after `CallstackInterner::compact()` (13.7 bytes/node), because the interner only lives during conversion. Awaiting user confirmation.
+  - Measured in WP-03: as-grown 22.4 bytes/node, worst after resize 22.9 (std::vector slack adds to the hash overhead). Orchestrator decision: the ≤ 16 bytes/node budget is measured after `CallstackInterner::compact()` (13.7 bytes/node), because the interner only lives during conversion. Confirmed by user 2026-10-25.
 
 ## Environment notes
+
+- Git LFS push is blocked by this environment's network policy (`lfs.github.com` returns 403 at the verify step). WP-04 therefore commits scenario JSON + SHA256 manifests and generates binary fixtures at build time (`tachyon_fixtures` target into `build/<preset>/fixtures`). To commit binaries via LFS instead, allow `lfs.github.com` in the environment's network settings.
 
 - Linux dev container: Clang 18.1.3, CMake 3.28, Ninja; libdw/libelf, libcurl, SDL2 2.30.0, libGL, libclang-rt-18 installed via apt.
 - Network: GitHub release assets and git clones work; `github.com/<o>/<r>/archive/...` source tarballs are blocked by the proxy, so dependencies use release archives (with SHA256) or pinned git commits.

@@ -28,7 +28,7 @@ CallstackIdx CallstackInterner::insertNew(size_t slot, CallstackIdx parent, Fram
 }
 
 void CallstackInterner::rehash(size_t newSlots) {
-  std::vector<uint32_t> fresh(newSlots, kInvalidIdx);
+  std::vector<uint32_t, HugePageAllocator<uint32_t>> fresh(newSlots, kInvalidIdx);
   for (size_t i = 1; i < m_nodes.size(); ++i) {
     size_t slot = slotFor(m_nodes[i].parent, m_nodes[i].frame, newSlots);
     while (fresh[slot] != kInvalidIdx) slot = (slot + 1 == newSlots) ? 0 : slot + 1;
