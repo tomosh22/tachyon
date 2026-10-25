@@ -1,0 +1,72 @@
+{
+  "name": "fibers",
+  "seed": 4,
+  "platform": "windows",
+  "clock_frequency_hz": 10000000,
+  "sampling_hz": 8000,
+  "start_ts": 3000000,
+  "duration_s": 1,
+  "detail": false,
+  "process": { "pid": 6000, "name": "fibers.exe" },
+  "modules": [
+    {
+      "name": "game.exe",
+      "functions": [
+        { "name": "main", "rva": "0x1000", "size": 256 },
+        { "name": "Fiber::entry", "rva": "0x1100", "size": 256 },
+        { "name": "Job::run", "rva": "0x1200", "size": 256 }
+      ]
+    }
+  ],
+  "stacks": [
+    { "name": "entry", "frames": [ "game.exe!main", "game.exe!Fiber::entry+0x10" ] },
+    { "name": "job", "frames": [ "game.exe!main", "game.exe!Fiber::entry+0x20", "game.exe!Job::run+0x8" ] }
+  ],
+  "fibers": [
+    { "id": 1, "tid": 401, "register_us": 0 },
+    { "id": 2, "tid": 401, "register_us": 0 },
+    { "id": 3, "tid": 401, "register_us": 0, "unregister_us": 900000 },
+    { "id": 10, "tid": 402, "register_us": 0 },
+    { "id": 11, "tid": 402, "register_us": 0 }
+  ],
+  "threads": [
+    {
+      "tid": 401,
+      "name": "FiberThread0",
+      "mix": [ { "stack": "entry", "weight": 1 }, { "stack": "job", "weight": 3 } ],
+      "intervals": [ { "state": "running", "dur_us": 500000 }, { "state": "waiting", "dur_us": 100 }, { "state": "running" } ],
+      "fiber": {
+        "initial": 1,
+        "switches": [
+          { "at_us": 100000, "to": 2, "gap_us": 20 },
+          { "at_us": 200000, "to": 1, "gap_us": 20 },
+          { "at_us": 300000, "to": 3, "gap_us": 20 },
+          { "at_us": 400000, "to": 1, "gap_us": 20 }
+        ]
+      }
+    },
+    {
+      "tid": 402,
+      "name": "FiberThread1",
+      "mix": [ { "stack": "job", "weight": 1 } ],
+      "pattern": { "run_us": [ 10000, 20000 ], "wait_us": [ 1000, 3000 ] },
+      "intervals": [ { "state": "running", "dur_us": 12000 }, { "state": "waiting", "dur_us": 2000 } ],
+      "fiber": {
+        "initial": 10,
+        "switches": [ { "at_us": 250000, "to": 11, "gap_us": 50 }, { "at_us": 500000, "to": 10, "gap_us": 50 } ]
+      }
+    }
+  ],
+  "scopes": [
+    {
+      "tid": 401, "fiber": 1, "id": "Outer", "begin_us": 50000, "dur_us": 400000,
+      "children": [ { "id": "Inner", "begin_us": 170000, "dur_us": 50000 } ]
+    },
+    { "tid": 401, "fiber": 2, "id": "TwoWork", "begin_us": 120000, "dur_us": 60000,
+      "children": [ { "id": "TwoChild", "begin_us": 10000, "dur_us": 20000 } ] },
+    { "tid": 401, "fiber": 3, "id": "ThreeWork", "begin_us": 320000, "dur_us": 50000 },
+    { "tid": 401, "fiber": 1, "id": "AfterAll", "begin_us": 600000, "dur_us": 100000 },
+    { "tid": 402, "fiber": 10, "id": "TenSpan", "begin_us": 100000, "dur_us": 140000 },
+    { "tid": 402, "fiber": 11, "id": "ElevenSpan", "begin_us": 260000, "dur_us": 200000 }
+  ]
+}

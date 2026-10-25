@@ -1,0 +1,45 @@
+{
+  "scenarios": {
+    "fibers": {
+      "fibers.expected.json": "40029ec001e3c6dd66e4d2cceaad87f579dbf829d0b0c9b28d24d7ec480cabed",
+      "fibers.symbols.json": "5662a12d5a3d9ce095c38be2f69826fcfb3fa2b7f83e4d39bb969fe72de30bd1",
+      "fibers.tachyon": "9e2ad33d3aa6fe8ef88ff0bfdb558a342d11a4b5b00324da32096f782d2c998f"
+    },
+    "frames": {
+      "frames.expected.json": "8108a0dd07c24d76222104e54cf800c0f3052ba3db58c37f9488c38dac302c45",
+      "frames.symbols.json": "efaa82bc677e43b21734e8b3eaa1a15095f5ce90d4efe01dda11bcd0e6c7ad7d",
+      "frames.tachyon": "9e5ac40e8c4f059d0faefd4a149d3693cfabe98460bf11219bf9d7e45d08f44c"
+    },
+    "medium": {
+      "medium.expected.json": "97f08f82e19fe4a342a7d048c0dc72857c1a40497a486c769715699365e81513",
+      "medium.symbols.json": "d528bed6834ae7510ad30b24c75eb7a990ec9c17db44b103a919497a8be7dac6",
+      "medium.tachyon": "96a40080c88b2f4b33b843983058083d0e2687b4e15798caacdf0baa3a166a00"
+    },
+    "partial": {
+      "partial.expected.json": "8d41f14d7c532bc1a1feb26367e81903b94dce56e22289d1442f844d8db911fe",
+      "partial.symbols.json": "5094df92a340439728e55303b8e32db78be18b1827d67375b556ae790fe55926",
+      "partial.tachyon": "2abbbecfe622b0cb950a89020f374cb673282d3a5f4d4a79f10e8fed9c51e8b0"
+    },
+    "partial_torn": {
+      "partial_torn.expected.json": "f1d94ad05907304c83e7f2684959c9b3f509972ab535fcda4ed1c711d7353cc9",
+      "partial_torn.symbols.json": "3c658cf97e655b37df32702fd1da37617f014d7b89a68586fac225c5b59f0267",
+      "partial_torn.tachyon": "02ab56da50ec80c28ca86371a776633b568581c42f397331383ea72b7ade7476"
+    },
+    "recursion": {
+      "recursion.expected.json": "fbc6c5d1ca2758c49b739e1da44b4e6ce428b2a13243017478b8431fe86a55a6",
+      "recursion.symbols.json": "e0a45b7319f9a10a8fc25a5e7acb979a8c56aebfcfc990167696178e4a1ac784",
+      "recursion.tachyon": "dc2deff6167e3a2d1b3757f69af7ce34e2cdca629f30a7aa772d9cbb58731913"
+    },
+    "scopes": {
+      "scopes.expected.json": "67b4a55c54b7fe3131fbe5920892bb610ea5e763d813c9d632fbeabee9cfbd65",
+      "scopes.symbols.json": "95eeac04bffdcdf224ecd263f7c8426d30a9a51afc80d6f70380945852b03aa0",
+      "scopes.tachyon": "9d5b8a5b4b85b9e7f5db6e6d376afa04ef36daef0222ac7a1628fd2bb0c8bce0"
+    },
+    "tiny": {
+      "tiny.expected.json": "e8b95c31ef0e56536c43ad93c88ff651bc16c35a6e2c9cd849657b84596edd71",
+      "tiny.symbols.json": "21a423efeed4ef912374ebe455f7dd1d5f6ce8c2f42fcaa8b8aaaa61f7fd0447",
+      "tiny.tachyon": "edb65e63030781ab2d28d60ebe5f11b6d84669753e5e2c436e47b8b711193a76"
+    }
+  },
+  "schema": "tachyon-fixture-manifest-1"
+}

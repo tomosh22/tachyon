@@ -1,0 +1,118 @@
+{
+  "name": "tiny",
+  "seed": 1,
+  "platform": "windows",
+  "clock_frequency_hz": 10000000,
+  "sampling_hz": 8000,
+  "start_ts": 1000000,
+  "duration_s": 1,
+  "detail": true,
+  "process": { "pid": 4242, "parent_pid": 4000, "name": "tiny.exe", "command_line": "tiny.exe --fixture" },
+  "modules": [
+    {
+      "name": "game.exe",
+      "base": "0x140000000",
+      "functions": [
+        { "name": "main", "rva": "0x1000", "size": 512, "file": "src/main.cpp", "line": 10 },
+        {
+          "name": "Engine::update", "rva": "0x1200", "size": 768, "file": "src/engine.cpp", "line": 100,
+          "lines": [
+            { "rva_offset": 0, "size": 128, "line": 100 },
+            { "rva_offset": 128, "size": 128, "line": 104 },
+            { "rva_offset": 256, "size": 512, "line": 110 }
+          ],
+          "inlines": [
+            { "rva_offset": 144, "size": 32,
+              "chain": [ { "function": "Vec3::length", "file": "src/vec3.h", "line": 42 },
+                         { "function": "Entity::distance", "file": "src/entity.h", "line": 77 } ] }
+          ]
+        },
+        { "name": "Engine::physics", "rva": "0x1500", "size": 1024, "file": "src/physics.cpp", "line": 200 },
+        { "name": "Render::draw", "rva": "0x1900", "size": 512, "file": "src/render.cpp", "line": 300 },
+        { "name": "Util::fib", "rva": "0x1b00", "size": 256, "file": "src/util.cpp", "line": 400 },
+        { "name": "Job::wait", "rva": "0x1c00", "size": 128, "file": "src/job.cpp", "line": 500 },
+        { "name": "Sys::signal", "rva": "0x1c80", "size": 128, "file": "src/job.cpp", "line": 520 }
+      ]
+    },
+    {
+      "name": "ntdll.dll",
+      "base": "0x7ff800000000",
+      "functions": [
+        { "name": "NtWaitForSingleObject", "rva": "0x2000", "size": 128, "file": "ntdll.c", "line": 1 },
+        { "name": "RtlUserThreadStart", "rva": "0x2100", "size": 64, "file": "ntdll.c", "line": 50 }
+      ]
+    }
+  ],
+  "stacks": [
+    { "name": "update", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Engine::update+0x20" ] },
+    { "name": "physics", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Engine::update+0x40", "game.exe!Engine::physics+0x80" ] },
+    { "name": "draw", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Render::draw+0x10" ] },
+    { "name": "recursion", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Util::fib+0x10", "game.exe!Util::fib+0x30", "game.exe!Util::fib+0x10", "game.exe!Util::fib+0x30" ] },
+    { "name": "unmapped", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", { "abs": "0x7ffe12345678" }, "game.exe!Render::draw+0x20" ] },
+    { "name": "wait_block", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Job::wait+0x10", "ntdll.dll!NtWaitForSingleObject+0x4" ] },
+    { "name": "preempted", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Engine::physics+0x10" ] },
+    { "name": "wake", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!Sys::signal+0x8" ] }
+  ],
+  "threads": [
+    {
+      "tid": 101,
+      "name": "Main",
+      "from_start": true,
+      "mix": [
+        { "stack": "update", "weight": 40 },
+        { "stack": "physics", "weight": 30 },
+        { "stack": "draw", "weight": 20 },
+        { "stack": "recursion", "weight": 10 }
+      ],
+      "intervals": [
+        { "state": "running", "dur_us": 40000 },
+        { "state": "waiting", "dur_us": 8000, "wait_reason": 6, "blocking_stack": "wait_block",
+          "ready_after_us": 7500, "waker_tid": 102, "waker_stack": "wake" },
+        { "state": "running", "dur_us": 300100,
+          "mix": [ { "stack": "unmapped", "weight": 1 }, { "stack": "update", "weight": 3 } ] },
+        { "state": "waiting", "dur_us": 20000, "wait_reason": 9, "blocking_stack": "wait_block" },
+        { "state": "running", "dur_us": 70000 },
+        { "state": "ready", "dur_us": 3000, "blocking_stack": "preempted" }
+      ],
+      "pattern": {
+        "run_us": [ 20000, 60000 ],
+        "wait_us": [ 1000, 5000 ],
+        "wait_reasons": [ 6, 9 ],
+        "blocking_stacks": [ "wait_block" ],
+        "ready_pct": 50,
+        "preempt_pct": 10,
+        "waker_tids": [ 102 ],
+        "waker_stack": "wake",
+        "latency_us": [ 50, 400 ]
+      },
+      "extra_samples": [ { "at_us": 41000, "stack": "draw" } ]
+    },
+    {
+      "tid": 102,
+      "name": "Worker",
+      "start_us": 150000,
+      "mix": [
+        { "stack": "update", "weight": 25 },
+        { "stack": "physics", "weight": 50 },
+        { "stack": "recursion", "weight": 25 }
+      ],
+      "pattern": {
+        "run_us": [ 10000, 30000 ],
+        "wait_us": [ 2000, 8000 ],
+        "wait_reasons": [ 6 ],
+        "blocking_stacks": [ "wait_block" ],
+        "ready_pct": 60,
+        "waker_tids": [ 101 ],
+        "waker_stack": "wake",
+        "latency_us": [ 100, 900 ]
+      },
+      "extra_samples": [ { "at_us": 50000, "stack": "update" }, { "at_us": 100000, "stack": "unmapped" } ]
+    }
+  ],
+  "thread_names": [ { "tid": 102, "at_us": 500000, "name": "Worker-renamed" } ],
+  "markers": [
+    { "tid": 101, "at_us": 100000, "name": "LevelLoaded", "data": "forest", "color": "0xff00ff00" },
+    { "tid": 0, "at_us": 900000, "name": "Shutdown" }
+  ],
+  "plots": [ { "name": "fps", "period_us": 100000, "count": 10, "kind": "noise", "min": 30, "max": 60 } ]
+}

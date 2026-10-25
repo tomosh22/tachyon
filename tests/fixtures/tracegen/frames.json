@@ -1,0 +1,74 @@
+{
+  "name": "frames",
+  "seed": 5,
+  "platform": "windows",
+  "clock_frequency_hz": 10000000,
+  "sampling_hz": 8000,
+  "start_ts": 4000000,
+  "duration_s": 2,
+  "process": { "pid": 7000, "name": "frames.exe" },
+  "modules": [
+    {
+      "name": "game.exe",
+      "functions": [
+        { "name": "main", "rva": "0x1000", "size": 256 },
+        { "name": "Game::tick", "rva": "0x1100", "size": 256 },
+        { "name": "Render::submit", "rva": "0x1200", "size": 256 },
+        { "name": "Job::run", "rva": "0x1300", "size": 256 },
+        { "name": "Audio::mix", "rva": "0x1400", "size": 256 }
+      ]
+    }
+  ],
+  "stacks": [
+    { "name": "tick", "frames": [ "game.exe!main", "game.exe!Game::tick+0x10" ] },
+    { "name": "submit", "frames": [ "game.exe!main", "game.exe!Render::submit+0x10" ] },
+    { "name": "job", "frames": [ "game.exe!Job::run+0x10" ] },
+    { "name": "audio", "frames": [ "game.exe!Audio::mix+0x10" ] },
+    { "name": "block", "frames": [ "game.exe!Job::run+0x40" ] },
+    { "name": "hitch", "frames": [ "game.exe!main", "game.exe!Game::tick+0x40" ] }
+  ],
+  "markers": [ { "tid": 501, "at_us": 983294, "name": "Hitch", "data": "frame 59 takes 50.666 ms" } ],
+  "threads": [
+    {
+      "tid": 501,
+      "name": "Main",
+      "mix": [ { "stack": "tick", "weight": 3 }, { "stack": "submit", "weight": 2 } ],
+      "intervals": [
+        { "group": [ { "state": "running", "dur_us": 10000 },
+                     { "state": "waiting", "dur_us": 6666, "blocking_stack": "block" } ], "repeat": 59 },
+        { "state": "running", "dur_us": 44000, "mix": [ { "stack": "hitch", "weight": 1 } ] },
+        { "state": "waiting", "dur_us": 6666, "blocking_stack": "block" },
+        { "group": [ { "state": "running", "dur_us": 10000 },
+                     { "state": "waiting", "dur_us": 6666, "blocking_stack": "block" } ], "repeat": 57 },
+        { "state": "running" }
+      ]
+    },
+    {
+      "tid": 502,
+      "name": "Render",
+      "start_us": 2000,
+      "mix": [ { "stack": "submit", "weight": 1 } ],
+      "pattern": { "run_us": [ 4000, 9000 ], "wait_us": [ 2000, 7000 ], "blocking_stacks": [ "block" ], "ready_pct": 70, "waker_tids": [ 501 ], "latency_us": [ 20, 200 ] }
+    },
+    {
+      "tid": 503,
+      "name": "Worker0",
+      "start_us": 500,
+      "mix": [ { "stack": "job", "weight": 1 } ],
+      "pattern": { "run_us": [ 1000, 12000 ], "wait_us": [ 500, 6000 ], "blocking_stacks": [ "block" ] }
+    },
+    {
+      "tid": 504,
+      "name": "Audio",
+      "start_us": 1000,
+      "mix": [ { "stack": "audio", "weight": 1 } ],
+      "pattern": { "run_us": [ 500, 2500 ], "wait_us": [ 3000, 6000 ], "blocking_stacks": [ "block" ] }
+    }
+  ],
+  "frame_marks": [
+    { "tid": 501, "name": "Frame", "start_us": 0, "period_us": 16666, "count": 117,
+      "hitches": [ { "frame": 59, "extra_us": 34000 } ] },
+    { "tid": 502, "name": "RenderFrame", "start_us": 5000, "period_us": 33333, "count": 59, "jitter_us": 500 }
+  ],
+  "plots": [ { "name": "frame_ms", "period_us": 16666, "count": 117, "kind": "ramp", "min": 10, "max": 20 } ]
+}

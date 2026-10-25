@@ -1,0 +1,89 @@
+{
+  "name": "scopes",
+  "seed": 3,
+  "platform": "windows",
+  "clock_frequency_hz": 10000000,
+  "sampling_hz": 8000,
+  "start_ts": 2000000,
+  "duration_s": 2,
+  "blend": true,
+  "detail": false,
+  "process": { "pid": 5000, "name": "scopes.exe" },
+  "modules": [
+    {
+      "name": "game.exe",
+      "functions": [
+        { "name": "main", "rva": "0x1000", "size": 512 },
+        { "name": "Engine::update", "rva": "0x1200", "size": 768 },
+        { "name": "Engine::physics", "rva": "0x1500", "size": 1024 },
+        { "name": "Physics::step", "rva": "0x1900", "size": 512 },
+        { "name": "Physics::solve", "rva": "0x1b00", "size": 256 },
+        { "name": "Render::draw", "rva": "0x1c00", "size": 512 },
+        { "name": "Util::unused", "rva": "0x1e00", "size": 64 },
+        { "name": "Job::run", "rva": "0x1e80", "size": 128 },
+        { "name": "Job::wait", "rva": "0x1f00", "size": 128 }
+      ]
+    },
+    { "name": "ntdll.dll", "functions": [ { "name": "RtlUserThreadStart", "rva": "0x2000", "size": 64 } ] }
+  ],
+  "stacks": [
+    { "name": "idle", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main" ] },
+    { "name": "update", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Engine::update+0x20" ] },
+    { "name": "physics", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Engine::update+0x40", "game.exe!Engine::physics+0x80" ] },
+    { "name": "step", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Engine::update+0x40", "game.exe!Engine::physics+0x90", "game.exe!Physics::step+0x10" ] },
+    { "name": "solve", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Engine::update+0x40", "game.exe!Engine::physics+0x90", "game.exe!Physics::step+0x40", "game.exe!Physics::solve+0x8" ] },
+    { "name": "draw", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Render::draw+0x10" ] },
+    { "name": "unmapped_leaf", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!main", "game.exe!Render::draw+0x18", { "abs": "0x7ffe00001000" } ] },
+    { "name": "job", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!Job::run+0x10" ] },
+    { "name": "job_wait", "frames": [ "ntdll.dll!RtlUserThreadStart", "game.exe!Job::run+0x20", "game.exe!Job::wait+0x4" ] }
+  ],
+  "threads": [
+    {
+      "tid": 301,
+      "name": "Main",
+      "mix": [
+        { "stack": "idle", "weight": 10 },
+        { "stack": "update", "weight": 25 },
+        { "stack": "physics", "weight": 15 },
+        { "stack": "step", "weight": 15 },
+        { "stack": "solve", "weight": 15 },
+        { "stack": "draw", "weight": 15 },
+        { "stack": "unmapped_leaf", "weight": 5 }
+      ],
+      "intervals": [ { "state": "running", "dur_us": 500000 }, { "state": "waiting", "dur_us": 100 }, { "state": "running" } ]
+    },
+    {
+      "tid": 302,
+      "name": "Worker",
+      "mix": [ { "stack": "job", "weight": 60 }, { "stack": "job_wait", "weight": 30 }, { "stack": "idle", "weight": 10 } ],
+      "pattern": { "run_us": [ 5000, 15000 ], "wait_us": [ 500, 2000 ] },
+      "intervals": [ { "state": "running", "dur_us": 8000 }, { "state": "waiting", "dur_us": 1000 } ]
+    }
+  ],
+  "scopes": [
+    {
+      "tid": 301, "id": "Frame", "caller": "game.exe!main+0x10", "begin_us": 0, "dur_us": 18000,
+      "repeat": { "count": 99, "period_us": 20000, "dur_jitter_us": 1000 },
+      "children": [
+        {
+          "id": "Update", "caller": "game.exe!Engine::update+0x20", "begin_us": 1000, "dur_us": 6000,
+          "children": [
+            { "id": "Physics", "caller": "game.exe!Engine::physics+0x8", "begin_us": 1000, "dur_us": 3000,
+              "children": [
+                { "id": "Solve", "caller": "game.exe!Physics::solve+0x4", "begin_us": 500, "dur_us": 1000 }
+              ] }
+          ]
+        },
+        { "id": "Render", "caller": "game.exe!Render::draw+0x10", "begin_us": 8000, "dur_us": 5000 },
+        { "id": "Orphan", "caller": "game.exe!Util::unused+0x4", "begin_us": 14000, "dur_us": 2000 },
+        { "id": "SameFunction", "caller": "game.exe!Engine::update+0x30", "begin_us": 7200, "dur_us": 600 },
+        { "id": "UnmappedCaller", "caller": "abs:0x7ffe00001000", "begin_us": 16200, "dur_us": 500 }
+      ]
+    },
+    {
+      "tid": 302, "id": "JobRun", "caller": "game.exe!Job::run+0x10", "begin_us": 100, "dur_us": 3000,
+      "repeat": { "count": 150, "period_us": 8000, "dur_jitter_us": 400 },
+      "children": [ { "id": "JobWait", "caller": "game.exe!Job::wait+0x4", "begin_us": 1000, "dur_us": 1500 } ]
+    }
+  ]
+}

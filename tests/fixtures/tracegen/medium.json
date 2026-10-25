@@ -1,0 +1,55 @@
+{
+  "name": "medium",
+  "seed": 2,
+  "platform": "windows",
+  "clock_frequency_hz": 10000000,
+  "sampling_hz": 8000,
+  "start_ts": 10000000,
+  "duration_s": 60,
+  "chunk_records": 1000000,
+  "process": { "pid": 1234, "name": "engine.exe" },
+  "modules": [
+    {
+      "name": "engine.exe",
+      "functions": [ { "name": "main", "rva": "0x1000", "size": 256 } ],
+      "functions_generated": { "count": 300, "min_size": 64, "max_size": 2048, "name_prefix": "Engine::fn", "files": 12, "inline_pct": 30 }
+    },
+    { "name": "render.dll", "functions_generated": { "count": 150, "min_size": 64, "max_size": 4096, "name_prefix": "Render::fn", "files": 8, "inline_pct": 25 } },
+    { "name": "physics.dll", "functions_generated": { "count": 100, "min_size": 64, "max_size": 2048, "name_prefix": "Physics::fn", "files": 6, "inline_pct": 40 } },
+    {
+      "name": "ntdll.dll",
+      "functions": [
+        { "name": "NtWaitForSingleObject", "rva": "0x2000", "size": 128 },
+        { "name": "NtSetEvent", "rva": "0x2100", "size": 128 },
+        { "name": "RtlUserThreadStart", "rva": "0x2200", "size": 64 }
+      ]
+    }
+  ],
+  "stacks": [
+    { "name": "wait_event", "frames": [ "ntdll.dll!RtlUserThreadStart", "engine.exe!main", "ntdll.dll!NtWaitForSingleObject+0x8" ] },
+    { "name": "wait_sleep", "frames": [ "ntdll.dll!RtlUserThreadStart", "engine.exe!main", "ntdll.dll!NtWaitForSingleObject+0x20" ] },
+    { "name": "signal", "frames": [ "ntdll.dll!RtlUserThreadStart", "engine.exe!main", "ntdll.dll!NtSetEvent+0x10" ] }
+  ],
+  "stack_gen": [
+    { "prefix": "gs", "count": 64, "min_depth": 6, "max_depth": 24, "root": "engine.exe!main", "modules": [ "engine.exe", "render.dll", "physics.dll" ] }
+  ],
+  "threads": [
+    {
+      "count": 16,
+      "tid_base": 2000,
+      "name": "worker{i}",
+      "mix": { "gen": { "prefix": "gs", "pick": 8 } },
+      "pattern": {
+        "run_us": [ 5000, 30000 ],
+        "wait_us": [ 100, 800 ],
+        "wait_reasons": [ 0, 6, 9 ],
+        "blocking_stacks": [ "wait_event", "wait_sleep" ],
+        "ready_pct": 80,
+        "preempt_pct": 5,
+        "waker_tids": [ 2000, 2001, 2002 ],
+        "waker_stack": "signal",
+        "latency_us": [ 5, 50 ]
+      }
+    }
+  ]
+}
