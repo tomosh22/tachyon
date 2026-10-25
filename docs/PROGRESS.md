@@ -37,7 +37,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-43 | Call graph panel | D | not started | wp/43-call-graph | |
 | WP-44 | Function list and butterfly | D | not started | wp/44-function-list | |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
-| WP-46 | Thread interaction | D | in progress | wp/46-thread-interaction | 2026-10-25 |
+| WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
@@ -129,6 +129,10 @@ Merged after the verifier FAIL was fixed in 71a9d73 (lost wakeup in waitIdle, ra
 | full-range bottomUp, medium (post-merge main) | 14.6 ms | 300 ms |
 
 API additions in query.h: `FunctionRegistry` (`ctx.functionIdx(key)`), `QueryCacheConfig`, the `*Shared` queries, `QueryExecutor` with `GenerationToken`, and `setExecutor`. Subtree root 0 now means no subtree. `Filter::function` tests the stack after the subtree cut. A FunctionIdx from another context is not detected (documented).
+
+## WP-46 notes
+
+Verifier PASS. Wait episodes were checked against brute force on 4 fixtures; the Waiting and Ready pieces form one episode, nothing is double-counted, and the scan is ASan-clean on document close. Longest-waits scan on medium: 0.46–0.50 ms (N=50), 2.6 ms (N=5000), budget 50 ms. The timeline frame medians over 5 ms come from machine load; main's binary shows the same spread. Low follow-ups: a ReadyRec at the switch-out ts is labelled "Preempted"; arrow clipping is done in float, so it misplaces markers beyond about 1e8 px (clip in double).
 
 ## Queued follow-ups
 
