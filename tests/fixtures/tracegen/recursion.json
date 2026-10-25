@@ -1,0 +1,52 @@
+{
+  "name": "recursion",
+  "seed": 6,
+  "platform": "linux",
+  "clock_frequency_hz": 1000000000,
+  "sampling_hz": 8000,
+  "start_ts": 5000000000,
+  "duration_s": 1,
+  "process": { "pid": 8000, "name": "recursion" },
+  "modules": [
+    {
+      "name": "recursion",
+      "functions": [
+        { "name": "main", "rva": "0x1000", "size": 256 },
+        { "name": "fib", "rva": "0x1100", "size": 256 },
+        { "name": "ping", "rva": "0x1200", "size": 128 },
+        { "name": "pong", "rva": "0x1280", "size": 128 },
+        { "name": "leaf", "rva": "0x1300", "size": 128 }
+      ]
+    }
+  ],
+  "stacks": [
+    { "name": "fib_identical", "frames": [ "recursion!main", "recursion!fib+0x10", "recursion!fib+0x10", "recursion!fib+0x10", "recursion!fib+0x10" ] },
+    { "name": "fib_distinct", "frames": [ "recursion!main", "recursion!fib+0x10", "recursion!fib+0x20", "recursion!fib+0x30", "recursion!fib+0x40", "recursion!fib+0x50" ] },
+    { "name": "mutual", "frames": [ "recursion!main", "recursion!ping+0x4", "recursion!pong+0x4", "recursion!ping+0x8", "recursion!pong+0x8", "recursion!ping+0xc" ] },
+    { "name": "recursive_into_leaf", "frames": [ "recursion!main", "recursion!fib+0x10", "recursion!fib+0x20", "recursion!leaf+0x8" ] },
+    { "name": "plain", "frames": [ "recursion!main", "recursion!leaf+0x4" ] }
+  ],
+  "threads": [
+    {
+      "tid": 601,
+      "name": "main",
+      "from_start": true,
+      "mix": [
+        { "stack": "fib_identical", "weight": 2 },
+        { "stack": "fib_distinct", "weight": 2 },
+        { "stack": "mutual", "weight": 3 },
+        { "stack": "recursive_into_leaf", "weight": 2 },
+        { "stack": "plain", "weight": 1 }
+      ],
+      "intervals": [ { "state": "running", "dur_us": 500000 }, { "state": "waiting", "dur_us": 100 }, { "state": "running" } ]
+    },
+    {
+      "tid": 602,
+      "name": "other",
+      "from_start": true,
+      "mix": [ { "stack": "fib_identical", "weight": 1 }, { "stack": "mutual", "weight": 1 } ],
+      "pattern": { "run_us": [ 3000, 9000 ], "wait_us": [ 500, 1500 ], "preempt_pct": 25 },
+      "intervals": [ { "state": "running", "dur_us": 5000 }, { "state": "ready", "dur_us": 600 } ]
+    }
+  ]
+}

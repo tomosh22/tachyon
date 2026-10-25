@@ -1,0 +1,1 @@
+tachyon_add_perf_test(tracegen_perf_tests SOURCES generate_perf_test.cpp DEPS tachyon::tracegen_core)

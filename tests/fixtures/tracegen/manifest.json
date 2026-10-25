@@ -1,0 +1,40 @@
+{
+  "scenarios": {
+    "fibers": {
+      "fibers.expected.json": "6ddadf482140a2b67e7952b31b1c7dd75eb7917bdfa70142dc94600bf21d38ad",
+      "fibers.symbols.json": "5662a12d5a3d9ce095c38be2f69826fcfb3fa2b7f83e4d39bb969fe72de30bd1",
+      "fibers.tachyon": "80c4357ec4f05f81be72b49ccff6498a27a3441c37b8d527e65533b1c7ee9346"
+    },
+    "frames": {
+      "frames.expected.json": "996623026f99674a1e841ceb4b9bac9f40f6f7484106a6a3931c63d319a7be62",
+      "frames.symbols.json": "efaa82bc677e43b21734e8b3eaa1a15095f5ce90d4efe01dda11bcd0e6c7ad7d",
+      "frames.tachyon": "e56855ba25c3f9c1b38deeba119e009ecaa7ecdf3f70ef48da1b082921ee7555"
+    },
+    "medium": {
+      "medium.expected.json": "c700469f83dc710d3aa8cf7c25ae09f841a06263cba74d2ee53b5a2628d4fb74",
+      "medium.symbols.json": "d528bed6834ae7510ad30b24c75eb7a990ec9c17db44b103a919497a8be7dac6",
+      "medium.tachyon": "d40f1416e2383a42b44378ab27360e14b26ed74c09d7dce40a69750612941b3b"
+    },
+    "partial": {
+      "partial.expected.json": "23587d45480c1dac375de57547f53b85db9c5a2707577d6942d625a1d3939448",
+      "partial.symbols.json": "5094df92a340439728e55303b8e32db78be18b1827d67375b556ae790fe55926",
+      "partial.tachyon": "dac46e6f14882c8b762a7ee327f67dd80f57837f3b8b8300922d1bf401b7d055"
+    },
+    "recursion": {
+      "recursion.expected.json": "ea01202c0ae0e571b764c2435fc4f1363a2ccc73c8534669d0ce01d179e7bb43",
+      "recursion.symbols.json": "e0a45b7319f9a10a8fc25a5e7acb979a8c56aebfcfc990167696178e4a1ac784",
+      "recursion.tachyon": "4e762222f382e24ca31165c905526c38b1d13f202bf55f761e3b1c6510ea8eb2"
+    },
+    "scopes": {
+      "scopes.expected.json": "a3a9e6811f2c6cf7b6997e4045980bd8342e7cd889daa26926c00c11146e81de",
+      "scopes.symbols.json": "95eeac04bffdcdf224ecd263f7c8426d30a9a51afc80d6f70380945852b03aa0",
+      "scopes.tachyon": "14f089be787ad3bbfb83c9b303fe9978da0f82ad33a54aa64b5489ae23e89147"
+    },
+    "tiny": {
+      "tiny.expected.json": "a1e5504e3d83d32de2043a54ea9f2bc035cc187cddd25d58333a735e8787ef7a",
+      "tiny.symbols.json": "21a423efeed4ef912374ebe455f7dd1d5f6ce8c2f42fcaa8b8aaaa61f7fd0447",
+      "tiny.tachyon": "63a17ea119a3ca7523a656c4e1b4dc1832c1d779de275d4c11e431dab277222f"
+    }
+  },
+  "schema": "tachyon-fixture-manifest-1"
+}
