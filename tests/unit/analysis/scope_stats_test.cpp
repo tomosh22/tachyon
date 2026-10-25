@@ -139,7 +139,7 @@ TEST(ScopeStats, ExactStatisticsOfNestedScopes) {
   EXPECT_EQ(u->min, 50);
   EXPECT_EQ(u->max, 100);
   EXPECT_EQ(u->median, 100);
-  EXPECT_DOUBLE_EQ(u->p25, 75);
+  EXPECT_DOUBLE_EQ(u->p25, 50);
   EXPECT_EQ(u->p75, 100);
   EXPECT_EQ(u->totalTicks, 250u);
   EXPECT_DOUBLE_EQ(u->mean, 250.0 / 3);
@@ -154,7 +154,7 @@ TEST(ScopeStats, ExactStatisticsOfNestedScopes) {
   EXPECT_EQ(f->count, 2u);
   EXPECT_EQ(f->min, 100);
   EXPECT_EQ(f->max, 900);
-  EXPECT_EQ(f->median, 500);
+  EXPECT_EQ(f->median, 100);
 
   auto none = scopeStats(ctx, {}, e.other);
   ASSERT_TRUE(none.ok());
@@ -384,10 +384,7 @@ TEST(ScopeStatsFixture, ExactAgainstExpectedAndBruteForce) {
     EXPECT_DOUBLE_EQ(s->mean,
                      static_cast<double>(es["total_ticks"].get<uint64_t>()) / es["instances"].get<double>())
         << id;
-    // expected.json's median is the lower middle value; ours interpolates between the two middle values.
-    const double lowerMedian = static_cast<double>(es["median_ticks"].get<uint64_t>());
-    EXPECT_GE(s->median, lowerMedian) << id;
-    if (s->count % 2 == 1) EXPECT_EQ(s->median, lowerMedian) << id;
+    EXPECT_EQ(s->median, static_cast<double>(es["median_ticks"].get<uint64_t>())) << id;
     // brute force from the raw events, full statistics
     const auto it = brute.find(id);
     ASSERT_NE(it, brute.end()) << id;

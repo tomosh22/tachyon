@@ -79,11 +79,11 @@ TEST(MakeStats, OddAndEvenCounts) {
   EXPECT_EQ(s.mean, 30);
   EXPECT_EQ(s.totalTicks, 150u);
 
-  std::vector<uint64_t> even = {4, 1, 3, 2};  // median 2.5, p25 = 1.75, p75 = 3.25
+  std::vector<uint64_t> even = {4, 1, 3, 2};  // lower order statistics: median 2, p25 = 1, p75 = 3
   s = makeStats(even);
-  EXPECT_DOUBLE_EQ(s.median, 2.5);
-  EXPECT_DOUBLE_EQ(s.p25, 1.75);
-  EXPECT_DOUBLE_EQ(s.p75, 3.25);
+  EXPECT_DOUBLE_EQ(s.median, 2);
+  EXPECT_DOUBLE_EQ(s.p25, 1);
+  EXPECT_DOUBLE_EQ(s.p75, 3);
 
   std::vector<uint64_t> one = {7};
   s = makeStats(one);
@@ -158,8 +158,8 @@ TEST(FunctionStats, RunsSplitOnAbsenceAndOnGapsAboveTwoIntervals) {
   EXPECT_EQ(b->totalTicks, 699u);
   EXPECT_DOUBLE_EQ(b->mean, 233.0);
   EXPECT_EQ(b->median, 200);
-  EXPECT_DOUBLE_EQ(b->p25, 199.5);
-  EXPECT_DOUBLE_EQ(b->p75, 250);
+  EXPECT_DOUBLE_EQ(b->p25, 199);
+  EXPECT_DOUBLE_EQ(b->p75, 200);
   ASSERT_EQ(b->histogram.size(), 10u);  // 300 -> bucket 9
   EXPECT_EQ(b->histogram[8], 2u);       // 199, 200 in [128, 256)
   EXPECT_EQ(b->histogram[9], 1u);       // 300 in [256, 512)

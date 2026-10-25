@@ -205,13 +205,13 @@ Result<Butterfly> butterfly(const QueryContext& ctx, const Filter& filter, Funct
 // derivable with the helpers below; ticks convert to time with TraceHeader.clock_frequency_hz at the UI edge.
 struct Stats {
   uint32_t count = 0;  // number of instances
-  // All in ticks. Quartiles use linear interpolation between order statistics (the "type 7" definition: the
-  // q quantile sits at position q * (count - 1) of the sorted durations), so the median of an even count is
-  // the mean of the two middle values. mean = totalTicks / count. All zero when count == 0.
+  // All in ticks. Quartiles are lower order statistics, without interpolation: the q quantile is
+  // d[floor(q * (count - 1))] of the sorted durations, so the median of an even count is the lower of the two
+  // middle values (matches tracegen's median_ticks). mean = totalTicks / count. All zero when count == 0.
   double min = 0, p25 = 0, median = 0, p75 = 0, max = 0, mean = 0;
   std::vector<uint32_t> histogram;
   // WP-35 additions to 3.7:
-  uint64_t totalTicks = 0;    // sum of all durations
+  uint64_t totalTicks = 0;    // sum of all durations (wraps modulo 2^64)
   uint32_t unterminated = 0;  // scopeStats: instances counted in `count` whose Begin has no End (they end at
                               // the trace end); 0 for functionStats
   uint32_t orphanEnds = 0;    // scopeStats: End events with no open Begin on the selected threads (ignored,

@@ -38,37 +38,20 @@ Stats makeStats(std::vector<uint64_t>& d) {
   s.max = static_cast<double>(hi);
   s.mean = static_cast<double>(total) / static_cast<double>(n);
 
-  // Quantile q at position h = q * (n - 1): d[floor(h)] + frac * (d[floor(h) + 1] - d[floor(h)]).
-  struct Q {
-    size_t lo, hi;
-    double frac;
-  };
+  // Lower order-statistic quantiles: q is d[floor(q * (n - 1))] of the sorted durations (no interpolation).
   const double qs[3] = {0.25, 0.5, 0.75};
-  Q q[3];
-  size_t need[6];
-  for (int i = 0; i < 3; ++i) {
-    const double h = qs[i] * static_cast<double>(n - 1);
-    const size_t l = static_cast<size_t>(std::floor(h));
-    q[i] = Q{l, std::min(l + 1, n - 1), h - static_cast<double>(l)};
-    need[2 * i] = q[i].lo;
-    need[2 * i + 1] = q[i].hi;
-  }
-  std::sort(need, need + 6);
+  size_t pos[3];
+  for (int i = 0; i < 3; ++i) pos[i] = static_cast<size_t>(std::floor(qs[i] * static_cast<double>(n - 1)));
   size_t start = 0;
-  for (size_t idx : need) {
+  for (size_t idx : pos) {      // ascending
     if (idx < start) continue;  // already in place
     std::nth_element(d.begin() + static_cast<std::ptrdiff_t>(start),
                      d.begin() + static_cast<std::ptrdiff_t>(idx), d.end());
     start = idx + 1;
   }
-  auto at = [&](const Q& x) {
-    const double a = static_cast<double>(d[x.lo]);
-    const double b = static_cast<double>(d[x.hi]);
-    return a + x.frac * (b - a);
-  };
-  s.p25 = at(q[0]);
-  s.median = at(q[1]);
-  s.p75 = at(q[2]);
+  s.p25 = static_cast<double>(d[pos[0]]);
+  s.median = static_cast<double>(d[pos[1]]);
+  s.p75 = static_cast<double>(d[pos[2]]);
   return s;
 }
 
