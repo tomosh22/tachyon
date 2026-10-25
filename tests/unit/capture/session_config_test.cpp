@@ -257,9 +257,10 @@ TEST(ValidateOptions, ModesAndRequiredFields) {
 
   o.mode = CaptureMode::Launch;
   r = validateCaptureOptions(o);
-  ASSERT_FALSE(r.ok());
-  EXPECT_EQ(r.error().code, ErrorCode::Unsupported);
-  EXPECT_NE(r.error().message.find("WP-13"), std::string::npos);
+  ASSERT_FALSE(r.ok()) << "launch needs an exe";
+  EXPECT_EQ(r.error().code, ErrorCode::InvalidArgument);
+  o.exe = "game.exe";
+  EXPECT_TRUE(validateCaptureOptions(o).ok());
 
   o = systemOptions();
   o.outPath.clear();

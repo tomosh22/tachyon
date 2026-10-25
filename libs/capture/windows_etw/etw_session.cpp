@@ -221,17 +221,16 @@ Result<std::unique_ptr<EtwSession>> EtwSession::start(const SessionConfig& confi
   std::unique_ptr<EtwSession> session(new EtwSession(config, handle, std::move(props)));
   session->m_startInfo.kernelGuidFallback = kernelGuidFallback;
 
-  // Sampling interval. The handle to pass is not documented clearly: try the session handle first and fall
-  // back to 0 (system-wide); record which one worked.
+  // Sampling interval. The handle must be 0 (system-wide setting): CI showed that the session handle is
+  // rejected. The result is recorded in startInfo and logged.
   TRACE_PROFILE_INTERVAL interval{};
   interval.Source = 0;  // ProfileTime
   interval.Interval = config.profileIntervalUnits;
-  status = TraceSetInformation(handle, TraceSampledProfileIntervalInfo, &interval,
+  status = TraceSetInformation(0, TraceSampledProfileIntervalInfo, &interval,
                                static_cast<ULONG>(sizeof(interval)));
-  session->m_startInfo.intervalSetWithSessionHandle = status == ERROR_SUCCESS;
-  if (status != ERROR_SUCCESS)
-    status = TraceSetInformation(0, TraceSampledProfileIntervalInfo, &interval,
-                                 static_cast<ULONG>(sizeof(interval)));
+  session->m_startInfo.intervalSetWithSessionHandle = false;
+  TACHYON_LOG_INFO("etw: TraceSetInformation(SampledProfileInterval, handle 0, {} x 100 ns) -> {}",
+                   config.profileIntervalUnits, status);
   if (status != ERROR_SUCCESS)
     return winError(ErrorCode::NoPrivilege, "TraceSetInformation(TraceSampledProfileIntervalInfo)", status);
 

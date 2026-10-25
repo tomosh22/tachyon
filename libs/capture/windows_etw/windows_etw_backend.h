@@ -1,8 +1,31 @@
 // WindowsEtwBackend: ICaptureBackend over an ETW kernel logger session (WP-11), converting with WP-12's
 // EtlConverter on stop.
 //
-// Modes: System (whole machine) and Attach (pid becomes the converter's target filter). Launch is WP-13 and
-// returns Unsupported. On non-Windows platforms start() returns Unsupported.
+// Modes: System (whole machine), Attach (the pid becomes the converter's target) and Launch (WP-13). On
+// non-Windows platforms start() returns Unsupported.
+//
+// Launch: the kernel session is started FIRST, then the exe is created with CREATE_SUSPENDED (environment =
+// agent environment + options.env, so the agent can inject TACHYON_AGENT_PIPE), then its main thread is
+// resumed, so the loader and static initialisation are inside the capture. (The work package lists
+// CreateProcess before the session; creating the process after the session is deliberate: only then are the
+// process start and the image loads of the exe and ntdll logged live. A process created earlier shows up
+// only in the end rundown, which does not exist for a process that has already exited when the capture
+// stops, and its user-mode frames could not be resolved to modules.) The process joins a job object when
+// possible, which lets targetExited() see the whole tree. With startImmediately == false the process is
+// created at once and parked (suspended, state Starting, launchPending()) and no session runs; a second
+// start() call starts the session and resumes it, and that call's other fields are ignored. In that case
+// the exe/ntdll mappings pre-date the session and are known from the stop-time rundown only, so stop the
+// capture while the process is still alive (see the proposal in the WP-13 report for etlconvert). stop() on a
+// pending launch terminates the process and reports NotFound. A launched process is never killed by a normal
+// stop(): the capture ends, the game keeps running.
+//
+// Child following (followChildren): the converter takes a fixed pid list, so the list is completed at
+// conversion time. stop() / flush() first scan the ETL's Process Start/End events (extra ProcessTrace pass,
+// process events only) with a ProcessTreeTracker: a Start whose parent is a live target and whose image
+// matches childFilter (glob, case-insensitive; see process_tree.h) joins the target set, recursively.
+// There is no live tracking of the target list (that needs a real-time consumer, a v1.1 option). Live
+// tracking exists only for exit detection, through the job object. Children that existed before an attach
+// are not followed.
 //
 // Files: the ETL of a capture is "<outPath>.etl" (see etlSegmentPath); flush restarts on "<outPath>.<n>.etl".
 // A flush writes "<dir of outPath>/<name>.tachyon" (+ "<name>.etl" when keepRawEtl).
@@ -17,8 +40,11 @@
 
 #include "capture/capture_backend.h"
 #include "capture/windows_etw/etw_session.h"
+#include "capture/windows_etw/launch.h"
+#include "capture/windows_etw/process_tree.h"
 #include "capture/windows_etw/session_config.h"
 #include "capture/windows_etw/session_lifecycle.h"
+#include "capture/windows_etw/target_watch.h"
 #include "etlconvert/etl_converter.h"
 
 #include <atomic>
@@ -27,6 +53,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace tachyon::capture {
 
@@ -46,12 +73,15 @@ struct WindowsEtwDiagnostics {
   etlconvert::ConvertStats lastConvertStats;  // of the last stop() conversion
   uint32_t flushCount = 0;
   etw::OrphanReport lastOrphanReport;
+  uint32_t rootPid = 0;                              // launched or attached pid of the last start (0: system)
+  std::vector<etw::FollowedChild> followedChildren;  // children found by the last conversion scan
+  std::vector<uint32_t> targetPids;                  // pids handed to the last conversion
 };
 
 // Thread-safe: all members may be called from any thread. start / stop / flush are serialised through the
 // phase logic (a second call while one is in flight gets Busy). The progress callback is invoked without
 // internal locks held, from the thread calling stop().
-class WindowsEtwBackend final : public ICaptureBackend {
+class WindowsEtwBackend final : public ICaptureBackend, public ITargetWatch {
  public:
   explicit WindowsEtwBackend(WindowsEtwBackendConfig config = {});
   ~WindowsEtwBackend() override;
@@ -68,12 +98,22 @@ class WindowsEtwBackend final : public ICaptureBackend {
   // Thread-safe. A copy of the diagnostics.
   WindowsEtwDiagnostics diagnostics() const;
 
+  // ITargetWatch. Thread-safe.
+  bool launchPending() const override;
+  bool targetExited() const override;
+  uint32_t rootPid() const override;
+
  private:
   void notify(CaptureState state, float progress);
   Result<etw::SessionConfig> configureSegment(const CaptureOptions& options, uint32_t segment);
   Result<std::unique_ptr<etw::EtwSession>> startSegment(const CaptureOptions& options, uint32_t segment);
+  static etw::LaunchSpec launchSpecFor(const CaptureOptions& options);
+  // Lifecycle is already in Starting. Starts the session; then, for Launch mode, creates the suspended
+  // process (launchNow) or takes the parked one, and resumes it.
+  Result<void> startRecording(const CaptureOptions& options, std::unique_ptr<etw::TargetProcess> target,
+                              bool launchNow);
   etlconvert::ConvertOptions convertOptionsFor(const CaptureOptions& options, const etw::SessionConfig& cfg,
-                                               const etw::SessionCounters& counters) const;
+                                               const etw::SessionCounters& counters);
 
   mutable std::mutex m_mutex;
   WindowsEtwBackendConfig m_config;
@@ -82,6 +122,8 @@ class WindowsEtwBackend final : public ICaptureBackend {
   CaptureOptions m_options;
   etw::SessionConfig m_sessionConfig;  // config of the live session (for the converter's JSON)
   std::unique_ptr<etw::EtwSession> m_session;
+  std::unique_ptr<etw::TargetProcess> m_target;  // launched (or attached) root process, if any
+  bool m_pending = false;                        // launched suspended, waiting for the second start()
   std::atomic<uint32_t> m_nameCounter{0};
   std::chrono::steady_clock::time_point m_startTime;
   std::function<void(CaptureState, float)> m_callback;

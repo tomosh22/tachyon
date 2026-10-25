@@ -148,7 +148,7 @@ Result<SessionConfig> makeSessionConfig(const CaptureOptions& options, std::stri
                                         uint32_t logicalCores, const BufferOverrides& overrides = {});
 
 // Thread-safe: pure function. Validates the parts of CaptureOptions the ETW backend supports: System needs
-// nothing more, Attach needs a pid, Launch is Unsupported (WP-13); outPath must be set.
+// nothing more, Attach needs a pid, Launch needs an exe; outPath must be set.
 Result<void> validateCaptureOptions(const CaptureOptions& options);
 
 // Thread-safe: pure function. Segment 0 is "<out>.etl" (for example "capture.tachyon.etl"); segment N > 0 is
@@ -158,7 +158,9 @@ std::filesystem::path etlSegmentPath(const std::filesystem::path& out, uint32_t 
 // Thread-safe: pure function. A flush name is a bare file stem: not empty, no separators, not "." or "..".
 bool isValidFlushName(std::string_view name);
 
-// Thread-safe: pure function. JSON object embedded in the trace as capture_options.
-std::string captureOptionsJson(const CaptureOptions& options, const SessionConfig& config);
+// Thread-safe: pure function. JSON object embedded in the trace as capture_options. `targetPids` are the pids
+// handed to the converter (roots plus followed children); empty in system mode.
+std::string captureOptionsJson(const CaptureOptions& options, const SessionConfig& config,
+                               const std::vector<uint32_t>& targetPids = {});
 
 }  // namespace tachyon::capture::etw

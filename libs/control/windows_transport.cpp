@@ -290,8 +290,10 @@ Result<std::unique_ptr<IConnection>> connectTo(const std::string& address) {
   // the next instance (WaitNamedPipe then fails at once). Keep trying for a few seconds.
   const ULONGLONG deadline = GetTickCount64() + 5000;
   do {
+    // SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION: the server may learn who we are but cannot impersonate
+    // us, so a fake pipe server cannot borrow an elevated client's token.
     HANDLE h = CreateFileA(address.c_str(), kPipeClientAccess, 0, nullptr, OPEN_EXISTING,
-                           FILE_FLAG_OVERLAPPED, nullptr);
+                           FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
       DWORD mode = PIPE_READMODE_BYTE;
       SetNamedPipeHandleState(h, &mode, nullptr, nullptr);
