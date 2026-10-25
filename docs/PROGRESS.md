@@ -44,7 +44,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-51 | Client runtime | E | merged (CI green incl. windows; connected overhead 46.9 ns Linux / 68 ns Windows vs 40 ns target, under 80 ns gate; disabled 4.7 / 16 ns) | wp/51-sdk-runtime | 2026-10-25 |
 | WP-51b | SDK runtime fixes (flaky AgentLossFallsBack test, sidecar truncation, perf flake) | E | merged (root cause: fake-agent race; 20× ctest repeats green under load) | wp/51b-sdk-fixes | 2026-10-25 |
 | WP-52 | Agent-side ingestion and merge | A | merged (Windows CI ran a real ETW + --instrument capture) | wp/52-ingestion | 2026-10-25 |
-| WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
+| WP-53 | Scope pairing, blending, fibers | C | in progress | wp/53-scope-blending | 2026-10-25 |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
 | WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
 | WP-60 | Flight recorder mode | — | not started | wp/60-flight-recorder | |
