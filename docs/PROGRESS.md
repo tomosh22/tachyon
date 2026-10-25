@@ -13,7 +13,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-03b | Callstack interning throughput (10 s target) | — | merged (skewed 8.66 s met with streaming-input harness; uniform 11.99 s best effort) | wp/03b-intern-speed | 2026-10-25 |
 | WP-04 | Synthetic trace generator `tracegen` | C | merged (CI green incl. windows manifest; independent oracle 0 mismatches) | wp/04-tracegen | 2026-10-25 |
 | WP-10 | Agent skeleton and control protocol | A | merged (CI green incl. windows named-pipe tests; Windows console checks queued) | wp/10-agent | 2026-10-25 |
-| WP-11 | ETW session controller | A | in progress | wp/11-etw-session | 2026-10-25 |
+| WP-11 | ETW session controller | A | in review | wp/11-etw-session | 2026-10-25 |
 | WP-12 | ETL to `.tachyon` converter | A | needs Windows verification (merged; CI windows job converted a real ETL; hot_a/b/c ranking and 2 GB timing unconfirmed) | wp/12-etlconvert | 2026-10-25 |
 | WP-13 | Launch, attach, process tree, CLI | A | not started | wp/13-launch-cli | |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
