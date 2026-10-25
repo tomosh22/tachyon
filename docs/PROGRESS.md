@@ -7,8 +7,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP | Title | Lane | Status | Branch | Date |
 |---|---|---|---|---|---|
 | WP-00 | Repository skeleton and CI | — | merged (CI green: linux-release, linux-asan, windows-release) | main | 2026-10-24 |
-| WP-01 | ETW spike tool `etlstat` | A | not started | wp/01-etlstat | |
-| WP-02 | Profiler testbed | — | in progress | wp/02-testbed | 2026-10-24 |
+| WP-01 | ETW spike tool `etlstat` | A | in progress | wp/01-etlstat | 2026-10-25 |
+| WP-02 | Profiler testbed | — | in review | wp/02-testbed | 2026-10-25 |
 | WP-03 | Trace format library | — | in progress | wp/03-trace | 2026-10-24 |
 | WP-04 | Synthetic trace generator `tracegen` | C | not started | wp/04-tracegen | |
 | WP-10 | Agent skeleton and control protocol | A | not started | wp/10-agent | |
