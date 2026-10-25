@@ -29,3 +29,12 @@ typedef int (*Tachyon_GetAPI_Func)(int version, TachyonFunctions* out);         
 ```
 C++ wrapper: `tachyon::Scope` RAII type and macros `TACHYON_SCOPE(id)`, `TACHYON_SCOPE_DATA(id,data)`, `TACHYON_SCOPE_COLOR(id,color)`, `TACHYON_FUNCTION()`, `TACHYON_FRAME(name,num)`, `TACHYON_LOCK_SCOPE(lock,name)`. All compile to nothing when `TACHYON_ENABLED == 0`.
 Contracts: Begin/End pairs in the same function; `id` pointer identity is used as the interning key (static string requirement); strings UTF-8; maximum `data` length 4096 bytes (truncated); thread-safe; re-entrant from any thread including fibers; no allocation on the hot path after first call per thread.
+
+## Orchestrator clarifications (binding; merged with WP-50, 2026-10-25)
+- `TachyonSuppressTailCall` is `struct { uint64_t reserved[3]; }` (24 bytes), size-checked with a C99-compatible negative-array typedef.
+- `TachyonFunctions` holds exactly one pointer per function above, in the listed order (16 members). `Tachyon_GetAPI(version, out)` returns 1 and fills `out` only when `version == TACHYON_API_VERSION`; otherwise it returns 0 and zero-fills `out`.
+- `TACHYON_ENABLED` defaults to 1 when `_WIN32` or `__linux__` is defined, else 0. Disabled macros expand to `static_assert(true, "")`.
+- Lock events: `Tachyon_LockAcquireBegin` is a BeginEvent with `id = lockName` (static) or the reserved id `"Tachyon.LockAcquire"` when NULL, `data = "0x<hex lock address>"`, and color `TACHYON_LOCK_COLOR_SENTINEL` (`0x4C4F43FF`), which is the kind flag analysis uses to recognize lock waits. `TACHYON_LOCK_SCOPE(lock, name)` takes an lvalue and uses its address.
+- `tachyon_loader.h`: header-only `int Tachyon_LoadFrom(const char* path, TachyonFunctions* out)`; returns 1 on success, zero-fills on any failure.
+- Export control: `TACHYON_SDK_API`; define `TACHYON_SDK_USE_SHARED` on Windows when linking the DLL import library.
+- The public API is frozen as of this merge (Part 0.3); later changes bump `TACHYON_API_VERSION`.

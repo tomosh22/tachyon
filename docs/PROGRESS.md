@@ -35,7 +35,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-46 | Thread interaction | D | not started | wp/46-thread-interaction | |
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
-| WP-50 | Public SDK header and loader | E | in progress | wp/50-sdk-header | 2026-10-24 |
+| WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
 | WP-51 | Client runtime | E | not started | wp/51-sdk-runtime | |
 | WP-52 | Agent-side ingestion and merge | — | not started | wp/52-ingestion | |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
