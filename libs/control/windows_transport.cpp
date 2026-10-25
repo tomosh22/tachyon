@@ -13,9 +13,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+// sddl.h needs windows.h first.
+#include <sddl.h>
 
 #include <atomic>
 #include <cstdlib>
+#include <vector>
 
 namespace tachyon::control {
 
@@ -108,12 +111,68 @@ class PipeConnection final : public detail::FramedConnection {
   std::atomic<bool> m_closed{false};
 };
 
+// SDDL for the agent pipe. The agent is elevated, the client (CLI / viewer) is usually the interactive user's
+// non-elevated process, so the default DACL (full control for creator, SYSTEM, Administrators; read for
+// Everyone and Anonymous) is replaced by:
+//   D:P                  protected: nothing is inherited from a parent object
+//   (D;;GA;;;NU)         deny every network logon (belt and braces next to PIPE_REJECT_REMOTE_CLIENTS)
+//   (A;;GA;;;SY)         SYSTEM
+//   (A;;GA;;;BA)         Administrators
+//   (A;;GA;;;<user>)     the account that runs the agent (needed so a non-elevated agent can create the next
+//                        pipe instance)
+//   (A;;0x12019b;;;AU)   Authenticated Users: FILE_GENERIC_READ | FILE_GENERIC_WRITE without
+//                        FILE_APPEND_DATA (= FILE_CREATE_PIPE_INSTANCE), so a client can talk to the agent
+//                        but cannot create a competing instance of the pipe. Anonymous and guests are not
+//                        Authenticated Users. Clients must therefore open the pipe with kPipeClientAccess,
+//                        not GENERIC_READ | GENERIC_WRITE.
+constexpr DWORD kPipeClientAccess = FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES;
+
+std::wstring currentUserSidString() {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return {};
+  DWORD size = 0;
+  GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+  std::wstring result;
+  if (size > 0) {
+    std::vector<char> buf(size);
+    if (GetTokenInformation(token, TokenUser, buf.data(), size, &size)) {
+      LPWSTR text = nullptr;
+      if (ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid, &text)) {
+        result = text;
+        LocalFree(text);
+      }
+    }
+  }
+  CloseHandle(token);
+  return result;
+}
+
+std::wstring pipeSddl() {
+  std::wstring sddl = L"D:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)";
+  const std::wstring user = currentUserSidString();
+  if (!user.empty()) sddl += L"(A;;GA;;;" + user + L")";
+  sddl += L"(A;;0x12019b;;;AU)";
+  return sddl;
+}
+
 HANDLE createInstance(const std::string& name, bool first) {
   DWORD openMode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
   if (first) openMode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
-  return CreateNamedPipeA(name.c_str(), openMode,
-                          PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                          PIPE_UNLIMITED_INSTANCES, kPipeBufferBytes, kPipeBufferBytes, 0, nullptr);
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(pipeSddl().c_str(), SDDL_REVISION_1, &descriptor,
+                                                            nullptr))
+    return INVALID_HANDLE_VALUE;
+  SECURITY_ATTRIBUTES attributes{};
+  attributes.nLength = sizeof(attributes);
+  attributes.lpSecurityDescriptor = descriptor;
+  attributes.bInheritHandle = FALSE;
+  HANDLE pipe = CreateNamedPipeA(
+      name.c_str(), openMode, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+      PIPE_UNLIMITED_INSTANCES, kPipeBufferBytes, kPipeBufferBytes, 0, &attributes);
+  const DWORD err = GetLastError();
+  LocalFree(descriptor);
+  SetLastError(err);
+  return pipe;
 }
 
 class PipeListener final : public IListener {
@@ -208,7 +267,7 @@ Result<std::unique_ptr<IListener>> listenOn(const std::string& address) {
 
 Result<std::unique_ptr<IConnection>> connectTo(const std::string& address) {
   for (int attempt = 0; attempt < 5; ++attempt) {
-    HANDLE h = CreateFileA(address.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+    HANDLE h = CreateFileA(address.c_str(), kPipeClientAccess, 0, nullptr, OPEN_EXISTING,
                            FILE_FLAG_OVERLAPPED, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
       DWORD mode = PIPE_READMODE_BYTE;

@@ -128,7 +128,8 @@ Response Agent::handleStart(const StartRequest& req) {
 }
 
 Response Agent::handleStop() {
-  std::lock_guard lock(m_mutex);
+  std::unique_lock lock(m_mutex);
+  m_flushDone.wait(lock, [this] { return !m_flushing; });  // a flush in flight finishes first
   switch (m_state.load()) {
     case CaptureState::Idle:
       return makeErrorResponse(std::nullopt, makeError(ErrorCode::NotFound, "no capture is running"));
@@ -159,24 +160,35 @@ void Agent::conversionWorker() {
 }
 
 Response Agent::handleFlush(const FlushRequest& req) {
-  std::lock_guard lock(m_mutex);
-  switch (m_state.load()) {
-    case CaptureState::Idle:
-      return makeErrorResponse(std::nullopt, makeError(ErrorCode::NotFound, "no capture is running"));
-    case CaptureState::Capturing: break;
-    default:
-      return makeErrorResponse(std::nullopt,
-                               makeError(ErrorCode::Busy, "capture is not in a flushable state"));
+  {
+    std::lock_guard lock(m_mutex);
+    switch (m_state.load()) {
+      case CaptureState::Idle:
+        return makeErrorResponse(std::nullopt, makeError(ErrorCode::NotFound, "no capture is running"));
+      case CaptureState::Capturing: break;
+      default:
+        return makeErrorResponse(std::nullopt,
+                                 makeError(ErrorCode::Busy, "capture is not in a flushable state"));
+    }
+    if (m_flushing)
+      return makeErrorResponse(std::nullopt, makeError(ErrorCode::Busy, "a flush is already in progress"));
+    m_flushing = true;  // stop / cancel / shutdown wait for it instead of interleaving
   }
-  // The lock is held across the (circular-buffer snapshot) flush so stop/cancel cannot interleave.
+  // No lock across the backend call (it may take seconds and may call the progress callback).
   auto result = m_backend->flush(req.name, req.seconds);
+  {
+    std::lock_guard lock(m_mutex);
+    m_flushing = false;
+  }
+  m_flushDone.notify_all();
   if (!result.ok()) return makeErrorResponse(std::nullopt, result.error());
   return makeOkResponse(std::nullopt, toSummary(*result));
 }
 
 Response Agent::handleCancel() {
   {
-    std::lock_guard lock(m_mutex);
+    std::unique_lock lock(m_mutex);
+    m_flushDone.wait(lock, [this] { return !m_flushing; });
     switch (m_state.load()) {
       case CaptureState::Idle:
         return makeErrorResponse(std::nullopt, makeError(ErrorCode::NotFound, "no capture is running"));
@@ -211,7 +223,8 @@ Response Agent::handleInstHello(const InstHelloRequest& req) {
 void Agent::shutdown() {
   bool needStop = false;
   {
-    std::lock_guard lock(m_mutex);
+    std::unique_lock lock(m_mutex);
+    m_flushDone.wait(lock, [this] { return !m_flushing; });
     if (m_state.load() == CaptureState::Capturing) {
       setStateLocked(CaptureState::Converting, 0.0);
       needStop = true;
