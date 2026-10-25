@@ -13,3 +13,6 @@ Verbatim copies of `docs/IMPLEMENTATION_PLAN.md` Part 3. Work packages conform t
 | 3.7 | analysis-query.md | libs/analysis/query.h |
 | 3.8 | attribution-rules.md | (normative rules, no header) |
 | 3.9 | timeline-lod.md | libs/analysis/lod.h |
+
+## Fixture schemas (orchestrator-owned since the WP-04 merge, 2026-10-25)
+`tools/tracegen/README.md` defines the scenario schema plus `tachyon-symbols-1` (`<name>.symbols.json`, the contract for WP-20's JsonSymbolProvider) and `tachyon-expected-1` (`<name>.expected.json`, the ground truth for WP-30–36 and WP-53). Changes to those two schemas go through the orchestrator. Fixtures are generated at build time into `build/<preset>/fixtures/` (target `tachyon_fixtures`; `tachyon_fixtures_large` is opt-in) and checked byte-for-byte against `tests/fixtures/tracegen/manifest.json`. Tests reach them through the `TACHYON_GENERATED_FIXTURE_DIR` compile definition.

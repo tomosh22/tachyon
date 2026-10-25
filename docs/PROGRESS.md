@@ -11,7 +11,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-02 | Profiler testbed | — | merged (CI green incl. windows-release; Windows timing splits to confirm, see queue) | wp/02-testbed | 2026-10-25 |
 | WP-03 | Trace format library | — | merged (CI green incl. windows; interning-time target split to WP-03b) | wp/03-trace | 2026-10-25 |
 | WP-03b | Callstack interning throughput (10 s target) | — | merged (skewed 8.66 s met with streaming-input harness; uniform 11.99 s best effort) | wp/03b-intern-speed | 2026-10-25 |
-| WP-04 | Synthetic trace generator `tracegen` | C | in progress | wp/04-tracegen | 2026-10-25 |
+| WP-04 | Synthetic trace generator `tracegen` | C | merged (CI green incl. windows manifest; independent oracle 0 mismatches) | wp/04-tracegen | 2026-10-25 |
 | WP-10 | Agent skeleton and control protocol | A | merged (CI green incl. windows named-pipe tests; Windows console checks queued) | wp/10-agent | 2026-10-25 |
 | WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
 | WP-12 | ETL to `.tachyon` converter | A | needs Windows verification (merged; CI windows job converted a real ETL; hot_a/b/c ranking and 2 GB timing unconfirmed) | wp/12-etlconvert | 2026-10-25 |
@@ -57,7 +57,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 
 | Gate | Result | Date | Notes |
 |---|---|---|---|
-| M0 | not run | | |
+| M0 | passed with exceptions | 2026-10-25 | CI green on Linux and Windows. etlstat numbers pending the user's Windows run (WP-01). Fixtures are generated at build time and checked against SHA256s, because LFS push is blocked. Trace round-trip/interning budget: skewed met (8.66 s), uniform 11.99 s against 10 s, memory met after compact. |
 
 ## WP-03 measured numbers (GitHub ubuntu-24.04 runner)
 
