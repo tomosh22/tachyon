@@ -25,7 +25,7 @@ function(sdk_header_test name source enabled)
     target_compile_options(${name} PRIVATE /wd4127)
   endif()
   add_test(NAME ${name} COMMAND ${name})
-  set_tests_properties(${name} PROPERTIES LABELS unit)
+  set_tests_properties(${name} PROPERTIES LABELS unit ENVIRONMENT "TACHYON_SIDECAR=off")
 endfunction()
 
 sdk_header_test(sdk_header_c99_enabled header_c_test.c 1)

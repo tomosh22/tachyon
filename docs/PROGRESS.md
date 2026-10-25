@@ -37,7 +37,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
-| WP-51 | Client runtime | E | in review | wp/51-sdk-runtime | 2026-10-25 |
+| WP-51 | Client runtime | E | merged (CI green incl. windows; connected overhead 46.9 ns Linux / 68 ns Windows vs 40 ns target, under 80 ns gate; disabled 4.7 / 16 ns) | wp/51-sdk-runtime | 2026-10-25 |
 | WP-52 | Agent-side ingestion and merge | — | not started | wp/52-ingestion | |
 | WP-53 | Scope pairing, blending, fibers | C | not started | wp/53-scopes | |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | not started | wp/54-inst-lanes | |
@@ -69,6 +69,20 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 Note: WP-03b added transparent huge pages for the interner's arrays (Linux) and made the benchmark prefetch its own input stacks, modelling a converter that reads stacks sequentially. Interner-only time (THP, no input prefetch) measured 10.69 s skewed on CI, so the interner alone is ~5% over target; the remaining cost is ~2.9 dependent cache-miss pairs per stack. Closing it further would need a batched `internStacks()` API (not in the plan).
 | Bytes/node after `compact()` | ≤ 16 | 13.7 | met |
 | Bytes/node as grown / worst after resize | (info) | 22.4 / 22.9 | |
+
+## WP-51 measured numbers and follow-ups
+
+| Metric | Target | CI gate | Linux CI | Windows CI |
+|---|---|---|---|---|
+| Begin+End median, connected | < 40 ns | < 80 ns | 46.9 ns | 68 ns |
+| Begin+End median, disabled at runtime | < 10 ns | < 20 ns | 4.66 ns | 16 ns |
+| 16 threads × 1 M scopes stress | no corruption | — | passes; received + dropped == emitted exactly | passes |
+
+The connected target is dominated by two `CLOCK_MONOTONIC_RAW`/QPC reads (about 27 ns each on the CI VM). The implementation's own cost is about 15 ns. The plan concern was raised with the user; the proposal is an 80 ns binding budget until a TSC fast-path WP exists.
+Follow-ups assigned to WP-52:
+- reopening the sidecar after agent loss truncates it (`O_TRUNC`); use a new file or append;
+- the connected perf test asserts drops == 0 with no retry and is flaky under load.
+Noted for later: `Begin/EndFiberSwitch` take a sharded mutex (not Begin/End).
 
 ## Windows / privileged verification queue
 

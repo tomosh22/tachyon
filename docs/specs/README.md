@@ -16,3 +16,6 @@ Verbatim copies of `docs/IMPLEMENTATION_PLAN.md` Part 3. Work packages conform t
 
 ## Fixture schemas (orchestrator-owned since the WP-04 merge, 2026-10-25)
 `tools/tracegen/README.md` defines the scenario schema plus `tachyon-symbols-1` (`<name>.symbols.json`, the contract for WP-20's JsonSymbolProvider) and `tachyon-expected-1` (`<name>.expected.json`, the ground truth for WP-30–36 and WP-53). Changes to those two schemas go through the orchestrator. Fixtures are generated at build time into `build/<preset>/fixtures/` (target `tachyon_fixtures`; `tachyon_fixtures_large` is opt-in) and checked byte-for-byte against `tests/fixtures/tracegen/manifest.json`. Tests reach them through the `TACHYON_GENERATED_FIXTURE_DIR` compile definition.
+
+## Instrumentation wire format (orchestrator-owned since the WP-51 merge, 2026-10-25)
+`sdk/src/inst_wire.h` and `sdk/src/inst_wire.md` (copied to `docs/specs/inst-wire.md`) define the SDK → agent stream and the identical `.tachyon-inst` sidecar format. WP-52 (agent ingestion) and later tools must follow it. `Dropped` frames are converted to `Marker("tachyon.dropped", data = count)`.
