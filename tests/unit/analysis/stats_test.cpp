@@ -29,11 +29,7 @@ FunctionKey fk(uint64_t start) {
 // A Stats built by makeStats from an unsorted list, as the reference for quartile definitions.
 double quantile(std::vector<uint64_t> v, double q) {
   std::sort(v.begin(), v.end());
-  const double h = q * static_cast<double>(v.size() - 1);
-  const size_t lo = static_cast<size_t>(h);
-  const size_t hi = std::min(lo + 1, v.size() - 1);
-  return static_cast<double>(v[lo]) +
-         (h - static_cast<double>(lo)) * (static_cast<double>(v[hi]) - static_cast<double>(v[lo]));
+  return static_cast<double>(v[static_cast<size_t>(q * static_cast<double>(v.size() - 1))]);
 }
 
 TEST(StatsBuckets, EdgesAreLog2AndConsistent) {
