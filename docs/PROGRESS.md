@@ -38,7 +38,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-44 | Function list and butterfly | D | merged | wp/44-function-list | 2026-10-25 |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
 | WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
-| WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
+| WP-47 | Search and Function Statistics | D | in progress | wp/47-function-stats | 2026-10-25 |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
 | WP-51 | Client runtime | E | merged (CI green incl. windows; connected overhead 46.9 ns Linux / 68 ns Windows vs 40 ns target, under 80 ns gate; disabled 4.7 / 16 ns) | wp/51-sdk-runtime | 2026-10-25 |
