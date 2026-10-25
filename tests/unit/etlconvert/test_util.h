@@ -311,8 +311,13 @@ struct ReadBack {
   std::vector<std::pair<uint32_t, uint64_t>> stackOf(CallstackIdx cs) const {
     std::vector<std::pair<uint32_t, uint64_t>> out;
     for (uint32_t n = cs.get(); n != 0 && n != kInvalidIdx; n = nodes[n].parent.get()) {
-      const trace::FrameRec& fr = frames[nodes[n].frame.get()];
-      out.emplace_back(fr.module.get(), fr.addr_or_rva);
+      // FrameRec is packed (12 bytes): copy to an aligned local before touching members.
+      alignas(8) trace::FrameRec fr;
+      std::memcpy(static_cast<void*>(&fr), static_cast<const void*>(&frames[nodes[n].frame.get()]),
+                  sizeof(fr));
+      const uint32_t module = fr.module.get();
+      const uint64_t addr = fr.addr_or_rva;
+      out.emplace_back(module, addr);
     }
     return out;
   }

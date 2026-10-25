@@ -56,7 +56,7 @@ LoadedModule ModuleTable::identify(uint32_t pid, uint64_t base, uint64_t size, c
                                    uint32_t timeDateStamp) {
   LoadedModule info;
   info.path = m_mapper.toDosPath(loggedPath);
-  trace::ModuleRec& rec = info.rec;
+  trace::ModuleInfo& rec = info.rec;
   rec.pid = pid;
   rec.base = base;
   rec.size = size;
@@ -88,7 +88,7 @@ LoadedModule ModuleTable::identify(uint32_t pid, uint64_t base, uint64_t size, c
   if (pe.ok && !mismatch && pe.info.hasCodeView) {
     rec.id_kind = trace::kModuleIdPdb;
     rec.id_len = 16;
-    std::memcpy(rec.id, pe.info.guid, 16);
+    std::memcpy(rec.id.data(), pe.info.guid, 16);
     rec.age = pe.info.age;
     ++m_counters.rsds;
     return info;
@@ -100,8 +100,8 @@ LoadedModule ModuleTable::identify(uint32_t pid, uint64_t base, uint64_t size, c
   const uint32_t imageSize = size != 0 ? static_cast<uint32_t>(size) : (pe.ok ? pe.info.sizeOfImage : 0);
   rec.id_kind = trace::kModuleIdPeTimestampSize;
   rec.id_len = 8;
-  std::memcpy(rec.id, &stamp, 4);
-  std::memcpy(rec.id + 4, &imageSize, 4);
+  std::memcpy(rec.id.data(), &stamp, 4);
+  std::memcpy(rec.id.data() + 4, &imageSize, 4);
   rec.age = 0;
   ++m_counters.fallback;
   if (!pe.ok) {

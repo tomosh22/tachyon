@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <numeric>
@@ -793,10 +794,18 @@ Result<ConvertStats> ConversionPipeline::finish() {
   std::vector<trace::ModuleRec> moduleRecs;
   moduleRecs.reserve(s.modules->modules().size());
   for (const LoadedModule& m : s.modules->modules()) {
-    trace::ModuleRec rec = m.rec;
+    // The on-disk record is packed; build it in an aligned local and copy it into the array as bytes.
+    alignas(8) trace::ModuleRec rec{};
+    rec.pid = m.rec.pid;
+    rec.base = m.rec.base;
+    rec.size = m.rec.size;
     rec.path = w.internString(m.path);
-    if (rec.load_ts == 0) rec.load_ts = startTs;
-    if (rec.unload_ts == kOpenEnded) rec.unload_ts = endTs;
+    rec.id_kind = m.rec.id_kind;
+    rec.id_len = m.rec.id_len;
+    std::memcpy(rec.id, m.rec.id.data(), sizeof(rec.id));
+    rec.age = m.rec.age;
+    rec.load_ts = m.rec.load_ts == 0 ? startTs : m.rec.load_ts;
+    rec.unload_ts = m.rec.unload_ts == kOpenEnded ? endTs : m.rec.unload_ts;
     moduleRecs.push_back(rec);
   }
 

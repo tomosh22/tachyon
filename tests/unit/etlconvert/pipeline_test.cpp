@@ -231,8 +231,8 @@ TEST(Pipeline, ThreadsProcessesAndNames) {
   EXPECT_EQ(threads[0].pid, 0u);
   EXPECT_EQ(rb.str(threads[0].name), "Idle");
   EXPECT_EQ(rb.str(threads[101].name), "Main");
-  EXPECT_EQ(threads[102].end_ts, 9900u);
-  EXPECT_EQ(threads[101].end_ts, 9000u);  // still alive: trace end
+  EXPECT_EQ(uint64_t{threads[102].end_ts}, 9900u);
+  EXPECT_EQ(uint64_t{threads[101].end_ts}, 9000u);  // still alive: trace end
 
   std::map<uint32_t, trace::ProcessRec> procs;
   for (const auto& p : rb.processes) procs[p.pid] = p;
@@ -508,7 +508,7 @@ TEST(HexFixtures, WP01SyntheticBasicConverts) {
   ASSERT_EQ(rb->modules.size(), 1u);
   EXPECT_EQ(rb->str(rb->modules[0].path), "\\Device\\HarddiskVolume3\\game\\game.exe");
   EXPECT_EQ(rb->modules[0].id_kind, trace::kModuleIdPeTimestampSize);  // no such file here: fallback
-  EXPECT_EQ(0x7ff600000000ull);
+  EXPECT_EQ(rb->modules[0].base, 0x7ff600000000ull);
   EXPECT_EQ(rb->modules[0].size, 0x10000u);
   bool renamed = false;
   for (const auto& n : rb->names) renamed |= rb->str(n.name) == "RenderThread";

@@ -70,7 +70,7 @@ TEST(ModuleTable, IdentifiesRsdsFromPeFile) {
   EXPECT_EQ(m.path, "C:\\game\\game.exe");
   EXPECT_EQ(m.rec.id_kind, trace::kModuleIdPdb);
   EXPECT_EQ(m.rec.id_len, 16);
-  EXPECT_EQ(std::memcmp(m.rec.id, game.guid, 16), 0);
+  EXPECT_EQ(std::memcmp(m.rec.id.data(), game.guid, 16), 0);
   EXPECT_EQ(m.rec.age, 3u);
   EXPECT_EQ(m.rec.pid, 100u);
   EXPECT_EQ(t.counters().rsds, 1u);
@@ -80,13 +80,13 @@ TEST(ModuleTable, IdentifiesRsdsFromPeFile) {
 TEST(ModuleTable, FallbackWhenFileMissing) {
   ModuleTable t(lookupFrom({}), DevicePathMapper{});
   t.load(100, 0x400000, 0x20000, "C:\\gone.dll", 0, 0xAABBCCDD, 0);
-  const trace::ModuleRec& r = t.modules()[0].rec;
+  const trace::ModuleInfo& r = t.modules()[0].rec;
   EXPECT_EQ(r.id_kind, trace::kModuleIdPeTimestampSize);
   EXPECT_EQ(r.id_len, 8);
   uint32_t stamp = 0;
   uint32_t size = 0;
-  std::memcpy(&stamp, r.id, 4);
-  std::memcpy(&size, r.id + 4, 4);
+  std::memcpy(&stamp, r.id.data(), 4);
+  std::memcpy(&size, r.id.data() + 4, 4);
   EXPECT_EQ(stamp, 0xAABBCCDDu);
   EXPECT_EQ(size, 0x20000u);
   EXPECT_EQ(t.counters().fallback, 1u);

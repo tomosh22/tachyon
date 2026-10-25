@@ -30,8 +30,8 @@ struct ModuleIdCounters {
 };
 
 struct LoadedModule {
-  trace::ModuleRec rec{};  // path is filled in when written
-  std::string path;        // DOS path when conversion succeeded, else as logged
+  trace::ModuleInfo rec;  // naturally aligned copy of ModuleRec; path (StringIdx) is filled in when written
+  std::string path;       // DOS path when conversion succeeded, else as logged
 };
 
 // One interval of the address space of a process: [base, base + size) valid during [loadTs, unloadTs).
