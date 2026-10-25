@@ -1,5 +1,7 @@
 #include "capture/mock/mock_backend.h"
 
+#include "core/platform.h"
+
 #include <cstdlib>
 #include <system_error>
 #include <thread>
@@ -17,8 +19,17 @@ Result<void> MockBackend::checkPrivileges() {
 Result<fs::path> MockBackend::resolveFixture() const {
   fs::path fixture = m_config.fixture;
   if (fixture.empty()) {
+#if TACHYON_PLATFORM_WINDOWS
+    char* env = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&env, &len, "TACHYON_MOCK_FIXTURE") == 0 && env != nullptr) {
+      fixture = env;
+      free(env);
+    }
+#else
     const char* env = std::getenv("TACHYON_MOCK_FIXTURE");
     if (env != nullptr) fixture = env;
+#endif
   }
   if (fixture.empty())
     return makeError(ErrorCode::InvalidArgument, "mock backend has no fixture (set TACHYON_MOCK_FIXTURE)");
