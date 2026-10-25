@@ -8,6 +8,7 @@
 #include "analysis/fibers.h"
 #include "analysis/query.h"
 #include "analysis/scope_blend.h"
+#include "analysis/thread_states.h"
 #include "scope_test_util.h"
 
 #include <gtest/gtest.h>
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <thread>
 
@@ -156,7 +158,10 @@ TEST(ScopeBlendPerf, BlendedBottomUpWithinThreeTimesTheUnblendedOne) {
       static_cast<unsigned long long>((*idx)->nodes.size()),
       static_cast<unsigned long long>((*idx)->segmentCount), std::thread::hardware_concurrency(), unblended,
       cold, warm, warm / unblended);
-  EXPECT_LT(warm, 3.0 * unblended * 2) << "blended bottomUp over 2x its 3x budget";
+  // The unblended query is a dense array update per sample (about 2 ns); below kFloor, timer and scheduler
+  // noise of the shared CI machines dominates the ratio, so the budget is 3x max(unblended, kFloor).
+  constexpr double kFloor = 0.015;
+  EXPECT_LT(warm, 3.0 * std::max(unblended, kFloor) * 2) << "blended bottomUp over 2x its 3x budget";
   EXPECT_LT(cold, 3.0 * 2) << "cold blended query over 2x its 3 s budget";
 
   // topDownTree and butterfly through the same flattener: informational, with a loose bound.
@@ -173,6 +178,41 @@ TEST(ScopeBlendPerf, BlendedBottomUpWithinThreeTimesTheUnblendedOne) {
       "ticks\n",
       treeS, treeP, static_cast<unsigned long long>(tree->inclusiveTicks));
   EXPECT_EQ(tree->inclusiveTicks, tree0->inclusiveTicks);
+}
+
+TEST(ScopeBlendPerf, ScopesFixtureBlendedVersusUnblended) {
+  const std::filesystem::path dir(TACHYON_GENERATED_FIXTURE_DIR);
+  if (!std::filesystem::exists(dir / "scopes.tachyon")) GTEST_SKIP() << "scopes fixture not generated";
+  auto r = model::TraceModel::load(dir / "scopes.tachyon");
+  ASSERT_TRUE(r.ok());
+  model::TraceModel m = std::move(*r);
+  ASSERT_TRUE(buildThreadStates(m).ok());
+  symbols::SymbolService svc{std::vector<std::string>{}, std::filesystem::path{}};
+  ASSERT_TRUE(svc.addSymbolFileOverride(dir / "scopes.symbols.json").ok());
+  svc.resolveAllAsync(m);
+  svc.waitAll();
+  AggregationOptions on;
+  on.blendScopes = true;
+  QueryContext blended(m, svc, on);
+  QueryContext plain(m, svc);
+  auto t0 = Clock::now();
+  ASSERT_TRUE(bottomUpFunctions(blended, {}).ok());
+  const double cold = seconds(t0);
+  auto filterFor = [&](int i) {
+    Filter f;
+    f.t1 = m.header.end_ts + 1 + static_cast<uint64_t>(i);
+    return f;
+  };
+  const double warm = bestOf(9, [&](int i) { ASSERT_TRUE(bottomUpFunctions(blended, filterFor(i)).ok()); });
+  const double base = bestOf(9, [&](int i) { ASSERT_TRUE(bottomUpFunctions(plain, filterFor(i)).ok()); });
+  size_t samples = 0;
+  for (const auto& c : m.samplesByThread) samples += c.ts.size();
+  std::printf(
+      "[scope blend perf] scopes fixture (%zu samples, %zu scope events): unblended %.5f s, blended cold "
+      "%.5f "
+      "s, blended warm %.5f s (ratio %.2f)\n",
+      samples, m.scopeEvents.size(), base, cold, warm, warm / std::max(base, 1e-9));
+  EXPECT_LT(warm, 0.05);
 }
 
 TEST(ScopeBlendPerf, PairingAndIndexBuildOfOneMillionScopes) {

@@ -446,6 +446,25 @@ TEST(ScopeBlend, FunctionStatsAndFramesSeeTheBlendedStacks) {
   EXPECT_EQ(functionKeyName(on2, (*f2)[0].topFunctions[0].key), "scope:Leafy");
 }
 
+TEST(ScopeBlend, ScopeOpeningInsideAFunctionDoesNotSplitItsInstance) {
+  Probe p;
+  // B runs for 10 samples; a scope that matches nothing (so it sits above the root frame and shifts B's depth
+  // in the blended stack) is open for the middle ones only. Still a single instance of B.
+  p.sc.begin(1000, "Mid", 0x9000);
+  p.sc.end(1600);
+  p.samples(p.h.stack({0x1010, 0x1110, 0x1210}), 10);  // ts 0..1800 step 200
+  p.finish();
+  AggregationOptions on = blendOn();
+  QueryContext ctx(p.h.m, *p.h.svc, on);
+  QueryContext off(p.h.m, *p.h.svc);
+  auto a = functionStats(ctx, {}, FunctionKey{ModuleIdx(0), kB});
+  auto b = functionStats(off, {}, FunctionKey{ModuleIdx(0), kB});
+  ASSERT_TRUE(a.ok() && b.ok());
+  EXPECT_EQ(b->count, 1u);
+  EXPECT_EQ(a->count, 1u);
+  EXPECT_EQ(a->totalTicks, b->totalTicks);
+}
+
 TEST(ScopeBlend, InlineFramesOfTheMatchedFrameSitBelowTheScope) {
   // With inline expansion the scope goes between the function key and its inline keys. The TableProvider has
   // no inlines, so only check that expansion on/off keeps the placement.

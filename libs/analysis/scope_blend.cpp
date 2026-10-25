@@ -27,16 +27,37 @@ std::vector<ScopeStackNode> BlendIndex::stackOf(uint32_t stack) const {
   return out;
 }
 
-uint32_t ScopeCursor::search(uint64_t ts) {
+uint32_t ScopeCursor::locate(uint64_t ts) {
   const std::vector<ScopeSegment>& s = *m_seg;
-  const auto it =
-      std::partition_point(s.begin(), s.end(), [&](const ScopeSegment& g) { return g.end <= ts; });
-  if (it == s.end()) {
-    m_pos = s.size() - 1;
-    return 0;
+  const size_t n = s.size();
+  // Invariant after this block: s[m_pos - 1].end <= ts < s[m_pos].end (m_pos == n: ts is past every segment).
+  if (m_pos > n || (m_pos > 0 && ts < s[m_pos - 1].end)) {
+    m_pos = static_cast<size_t>(
+        std::partition_point(s.begin(), s.end(), [&](const ScopeSegment& g) { return g.end <= ts; }) -
+        s.begin());
+  } else {
+    int steps = 0;
+    while (m_pos < n && s[m_pos].end <= ts) {
+      if (++steps > 8) {  // a long jump: search the rest
+        m_pos =
+            static_cast<size_t>(std::partition_point(s.begin() + static_cast<std::ptrdiff_t>(m_pos), s.end(),
+                                                     [&](const ScopeSegment& g) { return g.end <= ts; }) -
+                                s.begin());
+        break;
+      }
+      ++m_pos;
+    }
   }
-  m_pos = static_cast<size_t>(it - s.begin());
-  return it->begin <= ts ? it->stack : 0u;
+  if (m_pos < n && s[m_pos].begin <= ts) {  // inside a segment
+    m_lo = s[m_pos].begin;
+    m_hi = s[m_pos].end;
+    m_stack = s[m_pos].stack;
+  } else {  // in the gap before segment m_pos (or after the last one)
+    m_lo = m_pos > 0 ? s[m_pos - 1].end : 0;
+    m_hi = m_pos < n ? s[m_pos].begin : UINT64_MAX;
+    m_stack = 0;
+  }
+  return m_stack;
 }
 
 namespace {

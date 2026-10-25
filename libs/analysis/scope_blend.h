@@ -77,34 +77,24 @@ Result<BlendIndex> buildBlendIndex(const model::TraceModel& model, const PairedS
 Result<std::shared_ptr<const BlendIndex>> blendIndexFor(const QueryContext& ctx, Cancel cancel = {});
 
 // Not thread-safe (one cursor per thread of control). Finds the scope stack open at a timestamp along one
-// thread's segment list; cheap when timestamps advance, correct for any order.
+// thread's segment list; one comparison pair per lookup while timestamps stay in the same stretch (a segment
+// or the gap between two), a short walk when they advance, a binary search for any other jump.
 class ScopeCursor {
  public:
   ScopeCursor() = default;
   explicit ScopeCursor(const std::vector<ScopeSegment>& segments) : m_seg(&segments) {}
   // The ScopeStackNode index open at `ts` (0 = none).
   uint32_t stackAt(uint64_t ts) {
-    const std::vector<ScopeSegment>& s = *m_seg;
-    const size_t n = s.size();
-    if (n == 0) return 0;
-    if (m_pos < n) {
-      const ScopeSegment& c = s[m_pos];
-      if (ts >= c.begin && ts < c.end) return c.stack;
-      if (ts < c.begin && (m_pos == 0 || s[m_pos - 1].end <= ts)) return 0;  // in the gap before the segment
-      if (ts >= c.end) {  // advance a few segments before searching
-        for (int step = 0; step < 4 && m_pos + 1 < n; ++step) {
-          ++m_pos;
-          if (s[m_pos].end > ts) return s[m_pos].begin <= ts ? s[m_pos].stack : 0u;
-        }
-      }
-    }
-    return search(ts);
+    if (ts >= m_lo && ts < m_hi) return m_stack;
+    return locate(ts);
   }
 
  private:
-  uint32_t search(uint64_t ts);
+  uint32_t locate(uint64_t ts);
   const std::vector<ScopeSegment>* m_seg = nullptr;
-  size_t m_pos = 0;
+  size_t m_pos = 0;             // first segment that ends after the cached stretch's start
+  uint64_t m_lo = 1, m_hi = 0;  // the cached stretch [m_lo, m_hi) (initially empty)
+  uint32_t m_stack = 0;
 };
 
 // Thread-safe for concurrent const access. As accumulateNodeWeights, but keyed by (leaf node, kernel-leaf

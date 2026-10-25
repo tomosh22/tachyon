@@ -183,7 +183,15 @@ Result<std::shared_ptr<const Stats>> functionStatsShared(const QueryContext& ctx
                     meter.add(flat.lastCost() + ids.size());
                     if (kept) {
                       const auto f = std::find(ids.begin(), ids.end(), target);
-                      if (f != ids.end()) it->second = static_cast<int32_t>(f - ids.begin());
+                      if (f != ids.end()) {
+                        // Depth counts the sampled frames only: a scope that opens or closes inside the
+                        // function (blendScopes) must not split an instance.
+                        int32_t depth = static_cast<int32_t>(f - ids.begin());
+                        if (flat.blending())
+                          for (auto p = ids.begin(); p != f; ++p)
+                            if (table.key(*p).isScope()) --depth;
+                        it->second = depth;
+                      }
                     }
                     if (meter.due()) {
                       aborted = true;
