@@ -31,7 +31,7 @@ add_library(tachyon::viewer_core ALIAS tachyon_viewer_core)
 # Include root is apps/ so headers are included as "viewer/<header>.h".
 target_include_directories(tachyon_viewer_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(tachyon_viewer_core
-  PUBLIC tachyon::model tachyon::analysis tachyon::core tachyon::imgui
+  PUBLIC tachyon::model tachyon::analysis tachyon::symbols tachyon::core tachyon::imgui
   PRIVATE nlohmann_json::nlohmann_json)
 target_compile_features(tachyon_viewer_core PUBLIC cxx_std_20)
 tachyon_set_warnings(tachyon_viewer_core)

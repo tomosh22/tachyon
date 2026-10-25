@@ -20,8 +20,9 @@ struct Settings {
   static constexpr size_t kMaxRecentFiles = 12;
   static constexpr float kMinUiScale = 0.5f, kMaxUiScale = 4.0f;
 
-  std::vector<std::string> symbolServers = {"https://msdl.microsoft.com/download/symbols"};
-  std::string cacheDir;  // empty = symbol cache lives under the config dir (WP-20 decides the exact layout)
+  // Symbol servers (WP-21 locator); none unless configured, so a default install never touches the network.
+  std::vector<std::string> symbolServers;
+  std::string cacheDir;  // empty = <user cache dir>/tachyon/symbols (paths.h: defaultSymbolCacheDir)
   std::vector<SourcePathMapping> sourcePathMappings;
   ThemeKind theme = ThemeKind::Dark;
   float uiScale = 1.0f;                  // multiplied with the display DPI scale

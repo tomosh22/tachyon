@@ -2,6 +2,7 @@
 #pragma once
 
 #include "core/strong_id.h"
+#include "symbols/function_key.h"
 
 #include <cstdint>
 #include <functional>
@@ -21,17 +22,9 @@ struct ViewFilter {
   bool operator==(const ViewFilter&) const = default;
 };
 
-// Placeholder for the canonical FunctionKey (3.7). WP-32 provides the real type. A scope uses
-// (kScopeModule, StringIdx value) instead of (ModuleIdx, function start RVA).
-struct FunctionKey {
-  static constexpr uint32_t kScopeModule = 0xFFFFFFFEu;
-
-  ModuleIdx module;
-  uint64_t functionStartRvaOrString = 0;
-
-  bool isScope() const { return module.get() == kScopeModule; }
-  bool operator==(const FunctionKey&) const = default;
-};
+// The canonical FunctionKey of spec 3.7 (WP-20): {module, functionStartRva} for resolved sampled functions,
+// {module, rva} for unresolved frames, {kScopeModule, StringIdx} for instrumentation scopes.
+using FunctionKey = symbols::FunctionKey;
 
 // What a hovered item refers to; panels fill it in, others show a cross-highlight.
 struct HoveredItem {

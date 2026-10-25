@@ -89,7 +89,9 @@ class TimelineWidget {
   void setSelectionRange(std::optional<TickRange> range) { m_selection = range; }
   // Applies the selection as the SelectionBus time filter (the F key). Returns false without a selection.
   bool applySelectionAsFilter(SelectionBus& bus);
-  // Clears the selection and the bus time filter (the Esc key).
+  // Clears the selection and, if it is still the one applySelectionAsFilter() set, the time range of the bus
+  // filter (the Esc key). Thread / function / subtree restrictions in the filter are kept (the range goes
+  // back to the whole trace); a filter that another panel set is left alone.
   void clearSelection(SelectionBus* bus);
   // Rows in display order (empty before the document is known).
   const std::vector<ThreadIdx>& rowOrder() const;
@@ -101,6 +103,10 @@ class TimelineWidget {
   bool lodFinished() const;
   size_t lodReadyThreads() const;
   const TimelineFrameStats& frameStats() const { return m_stats; }
+  // Text lines of the tooltip drawn in the last frame (empty if none).
+  const std::vector<std::string>& lastTooltip() const { return m_tooltip; }
+  // Frame numbers whose label was drawn in the last frame.
+  const std::vector<uint64_t>& lastFrameLabels() const { return m_frameLabels; }
   const TimelineScreenGeometry& screenGeometry() const { return m_geometry; }
   // Block until the background build is done, pumping nothing (only valid with buildInline or after the job
   // completed); test helper.
@@ -147,6 +153,12 @@ class TimelineWidget {
 
   // Interaction state (not derived from the document).
   std::optional<TickRange> m_selection;
+  std::optional<TickRange> m_appliedRange;         // the range applySelectionAsFilter() put on the bus
+  std::optional<FunctionKey> m_publishedFunction;  // the key this widget last put on the bus for a click
+  FramePosition m_selectedPosition = FramePosition::Leaf;
+  CallstackIdx m_selectedNode;  // frame behind the last click (re-keyed when symbols resolve)
+  std::vector<std::string> m_tooltip;
+  std::vector<uint64_t> m_frameLabels;
   struct Drag {
     enum class Mode : uint8_t { None, Pan, Select, Overview } mode = Mode::None;
     float startX = 0;

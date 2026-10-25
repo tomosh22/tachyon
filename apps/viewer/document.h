@@ -2,6 +2,7 @@
 #pragma once
 
 #include "model/model.h"
+#include "symbols/symbol_service.h"
 
 #include <filesystem>
 #include <memory>
@@ -12,12 +13,6 @@ namespace tachyon::viewer {
 // Extension slots. Each is an empty interface for now; the owning work package replaces the body (adds
 // methods) and installs an implementation with Document::setSymbols() etc. App and existing panels need no
 // restructuring because they only ever reach a service through the Document.
-
-// WP-20 (symbols): symbolication, module symbol state, source lookups.
-class ISymbolService {
- public:
-  virtual ~ISymbolService() = default;
-};
 
 // WP-33 (analysis query executor): runs Filter-based queries against the model.
 class IQueryExecutor {
@@ -42,10 +37,10 @@ class Document {
   std::shared_ptr<const model::TraceModel> sharedModel() const { return m_model; }
 
   // Service slots. Getters: thread-safe for const access; setters: main-thread only. Null until installed.
-  const std::shared_ptr<ISymbolService>& symbols() const { return m_symbols; }
+  const std::shared_ptr<symbols::SymbolService>& symbols() const { return m_symbols; }
   const std::shared_ptr<IQueryExecutor>& queries() const { return m_queries; }
   const std::shared_ptr<ILodProvider>& lod() const { return m_lod; }
-  void setSymbols(std::shared_ptr<ISymbolService> s) { m_symbols = std::move(s); }
+  void setSymbols(std::shared_ptr<symbols::SymbolService> s) { m_symbols = std::move(s); }
   void setQueries(std::shared_ptr<IQueryExecutor> q) { m_queries = std::move(q); }
   void setLod(std::shared_ptr<ILodProvider> l) { m_lod = std::move(l); }
 
@@ -55,7 +50,7 @@ class Document {
  private:
   std::filesystem::path m_path;
   std::shared_ptr<const model::TraceModel> m_model;
-  std::shared_ptr<ISymbolService> m_symbols;
+  std::shared_ptr<symbols::SymbolService> m_symbols;  // declared after m_model: destroyed first
   std::shared_ptr<IQueryExecutor> m_queries;
   std::shared_ptr<ILodProvider> m_lod;
 };

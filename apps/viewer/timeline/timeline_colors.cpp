@@ -1,5 +1,7 @@
 #include "viewer/timeline/timeline_colors.h"
 
+#include "symbols/function_key.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -104,20 +106,27 @@ Color32 hashColor(uint64_t key) {
   return kPalette[mix64(key + 0x9E3779B97F4A7C15ULL) & (kPaletteSize - 1)];
 }
 
-Color32 callstackColor(const model::TraceModel& model, CallstackIdx node, FrameColorMode mode) {
+Color32 callstackColor(const model::TraceModel& model, CallstackIdx node, FrameColorMode mode,
+                       const symbols::SymbolService* symbols, FramePosition position) {
   if (!node.valid() || node.get() >= model.nodes.size()) return kUnknownColor;
   const FrameIdx frameIdx = model.nodes[node.get()].frame;
   if (!frameIdx.valid() || frameIdx.get() >= model.frames.size()) return kUnknownColor;
   const model::Frame& f = model.frames[frameIdx.get()];
   uint64_t key = f.module.get();
-  if (mode == FrameColorMode::ByFunction) key = (key << 40) ^ f.addr_or_rva;
+  if (mode == FrameColorMode::ByFunction) {
+    uint64_t value = f.addr_or_rva;
+    if (symbols) {
+      if (const auto fk = functionKeyForNode(model, symbols, node, position)) value = fk->value;
+    }
+    key = (key << 40) ^ value;
+  }
   return hashColor(key);
 }
 
 Color32 stripColumnColor(const model::TraceModel& model, const analysis::StripColumn& column,
-                         FrameColorMode mode) {
+                         FrameColorMode mode, const symbols::SymbolService* symbols) {
   if (!column.stack.valid() || !(column.coverage > 0.0f)) return 0;
-  const Color32 base = callstackColor(model, column.stack, mode);
+  const Color32 base = callstackColor(model, column.stack, mode, symbols);
   // Mixed columns (low share of the dominant stack) fade towards grey so they read as "many stacks".
   const int shareQ = static_cast<int>(std::clamp(column.share, 0.0f, 1.0f) * 255.0f);
   const int coverageQ = static_cast<int>(std::clamp(column.coverage, 0.0f, 1.0f) * 255.0f);

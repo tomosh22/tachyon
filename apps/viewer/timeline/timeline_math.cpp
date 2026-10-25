@@ -163,8 +163,14 @@ std::vector<RulerTick> buildRuler(const TimeView& view, double clockHz, double w
   const bool drawMinor = pixelsPerMinor >= 6.0;
   const double stepNs = drawMinor ? minorNs : spec.majorStepNs;
   const int perMajor = drawMinor ? spec.minorDivisions : 1;
-  int64_t first = static_cast<int64_t>(std::ceil(startNs / stepNs - 1e-9));
-  const int64_t last = static_cast<int64_t>(std::floor(endNs / stepNs + 1e-9));
+  const double firstD = std::ceil(startNs / stepNs - 1e-9);
+  const double lastD = std::floor(endNs / stepNs + 1e-9);
+  // Converting an out-of-range or non-finite double to int64 is undefined: a view that far out (or NaN) has
+  // no sensible ticks.
+  constexpr double kMaxIndex = 1e15;
+  if (!(std::fabs(firstD) < kMaxIndex) || !(std::fabs(lastD) < kMaxIndex)) return out;
+  int64_t first = static_cast<int64_t>(firstD);
+  const int64_t last = static_cast<int64_t>(lastD);
   constexpr int64_t kMaxTicks = 4096;
   if (last - first > kMaxTicks) first = last - kMaxTicks;
   for (int64_t i = first; i <= last; ++i) {

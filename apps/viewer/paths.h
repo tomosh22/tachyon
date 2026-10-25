@@ -22,6 +22,14 @@ std::string getEnvironmentVariable(const char* name);
 // $XDG_CONFIG_HOME/tachyon falling back to ~/.config/tachyon. Empty path if no base directory is known.
 std::filesystem::path configDirFromEnv(const EnvLookup& env, bool windowsStyle);
 
+// Thread-safe: pure function. User cache directory for downloaded symbols: %LOCALAPPDATA%/Tachyon/symbols
+// when `windowsStyle`, otherwise $XDG_CACHE_HOME/tachyon/symbols falling back to ~/.cache/tachyon/symbols.
+// Empty path if no base directory is known.
+std::filesystem::path symbolCacheDirFromEnv(const EnvLookup& env, bool windowsStyle);
+
+// Thread-safe: reads the process environment. symbolCacheDirFromEnv for the real environment and platform.
+std::filesystem::path defaultSymbolCacheDir();
+
 // Thread-safe: reads the process environment. configDirFromEnv for the real environment and platform.
 std::filesystem::path defaultConfigDir();
 

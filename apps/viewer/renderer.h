@@ -36,6 +36,10 @@ class IRenderer {
   virtual float dpiScale() const = 0;
   // Main-thread only.
   virtual void setWindowTitle(const std::string& title) = 0;
+  // Thread-safe (callable from any thread). Wakes a pollEvents(timeoutMs > 0) that is blocked waiting, so
+  // work finished on a worker (symbol resolution) shows up without waiting for the idle timeout. The wake
+  // carries no input: pollEvents returns with hadInput == false. No-op for backends that never block (Null).
+  virtual void wake() {}
   // Main-thread only. True when frame pacing is done by the backend (vsync); App still caps at 60 fps.
   virtual bool isHeadless() const = 0;
 };
