@@ -55,6 +55,15 @@ struct NodeAgg {
   uint64_t inclusiveTicks = 0, exclusiveTicks = 0;
   uint32_t sampleCount = 0;  // samples passing through this node (inclusive), zero-weight samples included
   std::vector<NodeAgg> children;  // sorted by inclusiveTicks descending, then key
+
+  // Destruction is iterative (a 300 000-deep tree is safe to destroy and to move). Copying a NodeAgg is still
+  // recursive and must not be used on deep trees; consumers (WP-43/44) traverse iteratively as well.
+  NodeAgg() = default;
+  ~NodeAgg();
+  NodeAgg(const NodeAgg&) = default;
+  NodeAgg& operator=(const NodeAgg&) = default;
+  NodeAgg(NodeAgg&&) noexcept = default;
+  NodeAgg& operator=(NodeAgg&&) noexcept = default;
 };
 
 struct FunctionRow {
@@ -78,7 +87,10 @@ inline constexpr FunctionKey kKernelKey{ModuleIdx::invalid(), ~uint64_t{0}};
 enum class KernelFrames : uint8_t {
   Show,   // every kernel frame is its own function (default)
   Group,  // each run of consecutive kernel frames becomes one frame with kKernelKey ("<kernel>")
-  Hide,   // kernel frames are dropped; their time is attributed to the nearest user-mode frame
+  Hide,   // kernel frames are dropped; their time is attributed to the nearest user-mode frame. A stack that
+          // is left with no frame at all (empty, or made only of kernel frames) is attributed to the single
+          // frame kKernelKey ("<kernel>") in every view: bottomUpFunctions gets a <kernel> row (inclusive =
+          // exclusive) and topDownTree a <kernel> child of the root, so both views count the same samples.
 };
 
 struct AggregationOptions {

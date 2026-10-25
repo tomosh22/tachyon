@@ -9,23 +9,48 @@
 #include <algorithm>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 namespace tachyon::analysis {
 
-// Total weight and sample count of one callstack node (the leaf of the samples' stacks).
+// Total weight and sample count of one callstack node (the leaf of the samples' stacks). Samples flagged
+// kSampleFlagKernelLeaf are accumulated separately (kernelLeaf = true): their stacks are attributed
+// differently by the return-address rule (see frameKeyAt).
 struct NodeWeight {
   CallstackIdx node;
   uint64_t ticks = 0;
   uint32_t samples = 0;
+  bool kernelLeaf = false;
 };
+
+// Thread-safe (const access). True for a kernel frame: an unmapped frame in the upper half of the address
+// space (>= 0xFFFF800000000000) or a frame of a kernel module (ntoskrnl.exe, vmlinux, "[kernel...").
+bool isKernelFrame(const model::TraceModel& model, const model::Frame& frame);
+
+// Thread-safe (const access). Return-address rule: whether the frame at `position` of the stack whose leaf is
+// `leafNode` (position 0 = the leaf, 1 = its caller, ...) is looked up at its exact address (SymbolService::
+// lookup) rather than as a return address (lookupCaller). True for the leaf and, when `kernelLeafSample`
+// (the sample carries kSampleFlagKernelLeaf), for the first non-kernel frame below the kernel frames (the
+// interrupted instruction pointer). Reusable by blocking/unblocking stacks of context switches (pass
+// kernelLeafSample = false unless the stack's leaf is in kernel mode and was captured at an interrupt).
+bool usesExactAddress(const model::TraceModel& model, CallstackIdx leafNode, size_t position,
+                      bool kernelLeafSample);
+
+// Thread-safe (const access, plus the SymbolService const queries). FunctionKey of the physical function of
+// the frame at `position` (leaf = 0) of the stack ending in `leafNode`, chosen by usesExactAddress:
+// functionKeyFor for exact positions, functionKeyForCaller otherwise. Returns FunctionKey{kInvalidIdx, 0}
+// (kRootKey) when the position is beyond the stack. For WP-34/35/46 to share the rule with the aggregation.
+FunctionKey frameKeyAt(const QueryContext& ctx, CallstackIdx leafNode, size_t position, bool kernelLeafSample,
+                       bool expandInline = false);
 
 // Thread-safe (const access). Checks that the model can be attributed: states built for every thread and
 // sampleIntervalTicks set when there are samples.
 Result<void> checkAttributable(const model::TraceModel& model);
 
-// Thread-safe for concurrent const access. Calls fn(ts, callstack, weight) for the samples of `thread` with
-// t0 <= ts < t1, in time order. weight (rule 1) = min(sampleIntervalTicks, end of the enclosing Running
+// Thread-safe for concurrent const access. Calls fn(ts, callstack, weight[, flags]) (flags = the sample's
+// trace::kSampleFlag* bits, passed when fn accepts a fourth uint16_t parameter) for the samples of `thread`
+// with t0 <= ts < t1, in time order. weight (rule 1) = min(sampleIntervalTicks, end of the enclosing Running
 // interval - ts), or 0 when no Running interval encloses the sample. Requires checkAttributable. Returns
 // false if cancelled (checked every 65536 samples).
 template <typename Fn>
@@ -51,7 +76,10 @@ bool forEachWeightedSample(const model::TraceModel& m, ThreadIdx thread, uint64_
     uint64_t w = 0;
     if (si < ivs.size() && ivs[si].state == model::ThreadState::Running && ivs[si].start <= t)
       w = std::min(interval, ivs[si].end - t);
-    fn(t, cols.callstack[i], w);
+    if constexpr (std::is_invocable_v<Fn&, uint64_t, CallstackIdx, uint64_t, uint16_t>)
+      fn(t, cols.callstack[i], w, i < cols.flags.size() ? cols.flags[i] : uint16_t{0});
+    else
+      fn(t, cols.callstack[i], w);
   }
   return true;
 }
