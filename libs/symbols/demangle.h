@@ -1,5 +1,6 @@
 // Demangler interface (WP-20). The defaults are pass-through, except that Itanium names are demangled with
-// abi::__cxa_demangle when <cxxabi.h> is available. The MSVC demangler (UnDecorateSymbolName) is Windows-only.
+// abi::__cxa_demangle when <cxxabi.h> is available. The MSVC demangler (UnDecorateSymbolName) is
+// Windows-only.
 #pragma once
 
 #include <string>
