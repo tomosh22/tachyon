@@ -323,15 +323,16 @@ TEST_F(EtwCaptureTest, SecondStartWhileCapturingIsBusyAndStopWithoutStartIsNotFo
   EXPECT_TRUE(backend.stop().ok());
 }
 
-TEST_F(EtwCaptureTest, LaunchModeIsUnsupported) {
+TEST_F(EtwCaptureTest, LaunchOfAMissingExecutableIsNotFoundAndLeavesTheBackendIdle) {
+  // Launch itself is covered by tests/windows/cli (WP-13).
   WindowsEtwBackend backend;
   CaptureOptions o = systemOptions(dir() / "launch.tachyon");
   o.mode = CaptureMode::Launch;
-  o.exe = "x.exe";
+  o.exe = (dir() / "no-such-program.exe").string();
   auto r = backend.start(o);
   ASSERT_FALSE(r.ok());
-  EXPECT_EQ(r.error().code, ErrorCode::Unsupported);
-  EXPECT_NE(r.error().message.find("WP-13"), std::string::npos);
+  EXPECT_EQ(r.error().code, ErrorCode::NotFound) << r.error().toString();
+  EXPECT_EQ(backend.state(), CaptureState::Idle);
 }
 
 // ---- no events lost ---------------------------------------------------------------------------------------

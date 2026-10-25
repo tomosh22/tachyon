@@ -22,16 +22,24 @@ TEST(WindowsEtwBackendUnit, StartsIdle) {
   EXPECT_LT(b.diagnostics().lastFlushGapSeconds, 0.0);
 }
 
-TEST(WindowsEtwBackendUnit, LaunchModeIsUnsupportedUntilWp13) {
+TEST(WindowsEtwBackendUnit, LaunchNeedsAnExeAndWindows) {
   WindowsEtwBackend b;
   CaptureOptions o = systemOptions();
   o.mode = CaptureMode::Launch;
-  o.exe = "game.exe";
   auto r = b.start(o);
   ASSERT_FALSE(r.ok());
+  EXPECT_EQ(r.error().code, ErrorCode::InvalidArgument);  // no exe
+  o.exe = "game.exe";
+  r = b.start(o);
+#if !TACHYON_PLATFORM_WINDOWS
+  ASSERT_FALSE(r.ok());
   EXPECT_EQ(r.error().code, ErrorCode::Unsupported);
-  EXPECT_NE(r.error().message.find("WP-13"), std::string::npos);
-  EXPECT_EQ(b.state(), CaptureState::Idle);
+#else
+  (void)r;  // would really launch game.exe; the live behaviour is covered by tests/windows
+#endif
+  EXPECT_FALSE(b.launchPending());
+  EXPECT_FALSE(b.targetExited());
+  EXPECT_EQ(b.rootPid(), 0u);
 }
 
 TEST(WindowsEtwBackendUnit, AttachNeedsAPid) {
