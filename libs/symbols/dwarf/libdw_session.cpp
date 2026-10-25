@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <list>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -61,7 +62,10 @@ struct LineRow {
 struct CuData {
   Dwarf_Die die{};
   bool indexed = false;
-  bool linesLoaded = false;
+  bool filesLoaded = false;   // file table + comp dir (small, kept)
+  bool linesFailed = false;   // the line program could not be decoded: do not retry
+  bool rowsResident = false;  // `rows` is populated (and listed in the LRU)
+  std::list<uint32_t>::iterator lruPos;
   std::vector<DwarfAddrRange> pool;  // ranges of functions and inlines (sorted by lo within one record)
   std::vector<FuncRec> funcs;
   std::vector<InlRec> inls;
@@ -117,7 +121,11 @@ std::vector<DwarfAddrRange> dieRanges(Dwarf_Die* die) {
 
 class LibdwSession final : public IDwarfSession {
  public:
-  LibdwSession(int fd, Dwarf* dw) : m_fd(fd), m_dw(dw) {}
+  LibdwSession(int fd, Dwarf* dw, uint64_t lineCacheBytes)
+      : m_fd(fd), m_dw(dw), m_lineBudget(lineCacheBytes) {}
+
+  DwarfSessionStats stats() const override { return m_stats; }
+
   ~LibdwSession() override {
     if (m_dw != nullptr) dwarf_end(m_dw);
     if (m_fd >= 0) ::close(m_fd);
@@ -440,40 +448,111 @@ class LibdwSession final : public IDwarfSession {
     std::string out = base;
     if (named == 0 && plain) return out;
 
-    Dwarf_Die* scopes = nullptr;
-    const int count = dwarf_getscopes_die(&chain[named], &scopes);
-    if (count > 1 && scopes != nullptr) {
-      std::vector<std::string> parts;
-      for (int i = 1; i < count; ++i) {
-        const int tag = dwarf_tag(&scopes[i]);
-        if (tag == DW_TAG_compile_unit || tag == DW_TAG_partial_unit) break;
-        std::string c = scopeComponent(&scopes[i]);
-        if (!c.empty()) parts.push_back(std::move(c));
+    return qualifiedPrefix(&chain[named]) + out;
+  }
+
+  // Records, for every scope-like DIE below `parent` (namespaces, classes, unions, functions), its enclosing
+  // scope: one walk per CU instead of one dwarf_getscopes_die() (a walk each) per name.
+  void indexScopes(Dwarf_Die* parent, uint64_t parentOff, int level) {
+    if (level > kMaxDieDepth) return;
+    Dwarf_Die child;
+    if (dwarf_child(parent, &child) != 0) return;
+    do {
+      const int tag = dwarf_tag(&child);
+      switch (tag) {
+        case DW_TAG_namespace:
+        case DW_TAG_structure_type:
+        case DW_TAG_class_type:
+        case DW_TAG_union_type:
+        case DW_TAG_subprogram: {
+          const uint64_t off = dwarf_dieoffset(&child);
+          m_scopeParent.emplace(off, parentOff);
+          indexScopes(&child, off, level + 1);
+          break;
+        }
+        case DW_TAG_lexical_block: indexScopes(&child, parentOff, level + 1); break;
+        default: break;
       }
-      std::string prefix;
-      for (size_t i = parts.size(); i > 0; --i) prefix += parts[i - 1] + "::";
-      out = prefix + out;
+    } while (dwarf_siblingof(&child, &child) == 0);
+  }
+
+  // "ns::Cls::" for the DIE `die` (empty at namespace scope of the CU).
+  std::string qualifiedPrefix(Dwarf_Die* die) {
+    Dwarf_Die cuDie;
+    if (dwarf_diecu(die, &cuDie, nullptr, nullptr) == nullptr) return {};
+    const uint64_t cuOff = dwarf_dieoffset(&cuDie);
+    if (m_scopedCus.insert(cuOff).second) indexScopes(&cuDie, 0, 0);
+    std::vector<std::string> parts;
+    uint64_t off = dwarf_dieoffset(die);
+    for (int guard = 0; guard < 256; ++guard) {
+      auto it = m_scopeParent.find(off);
+      if (it == m_scopeParent.end() || it->second == 0) break;
+      off = it->second;
+      auto cached = m_scopeNames.find(off);
+      if (cached == m_scopeNames.end()) {
+        Dwarf_Die scope;
+        std::string c;
+        if (dwarf_offdie(m_dw, off, &scope) != nullptr) c = scopeComponent(&scope);
+        cached = m_scopeNames.emplace(off, std::move(c)).first;
+      }
+      if (!cached->second.empty()) parts.push_back(cached->second);
     }
-    std::free(scopes);
-    return out;
+    std::string prefix;
+    for (size_t i = parts.size(); i > 0; --i) prefix += parts[i - 1] + "::";
+    return prefix;
   }
 
   // --- lines
   // ---------------------------------------------------------------------------------------------------
 
-  void ensureLines(CuData& cu) {
-    if (cu.linesLoaded) return;
-    cu.linesLoaded = true;
+  // File table and compilation directory of a CU (small; never evicted).
+  void ensureFiles(CuData& cu) {
+    if (cu.filesLoaded) return;
+    cu.filesLoaded = true;
     const char* dir = nullptr;
     if (attrString(&cu.die, DW_AT_comp_dir, dir)) cu.compDir = dir;
-    Dwarf_Lines* lines = nullptr;
-    size_t n = 0;
-    if (dwarf_getsrclines(&cu.die, &lines, &n) != 0 || lines == nullptr) return;
     if (dwarf_getsrcfiles(&cu.die, &cu.files, &cu.fileCount) != 0) {
       cu.files = nullptr;
       cu.fileCount = 0;
     }
     cu.fileNames.assign(cu.fileCount, std::string_view());
+  }
+
+  void dropRows(CuData& cu) {
+    m_stats.lineBytes -= cu.rows.capacity() * sizeof(LineRow);
+    std::vector<LineRow>().swap(cu.rows);
+    m_lru.erase(cu.lruPos);
+    cu.rowsResident = false;
+    ++m_stats.lineEvictions;
+  }
+
+  // Makes the flattened line rows of `cu` resident, most recently used first in the LRU, and evicts older CUs
+  // while the byte budget is exceeded (never `cu` itself).
+  void ensureLines(CuData& cu) {
+    ensureFiles(cu);
+    const uint32_t self = static_cast<uint32_t>(&cu - m_cus.data());
+    if (cu.rowsResident) {
+      m_lru.splice(m_lru.begin(), m_lru, cu.lruPos);
+      return;
+    }
+    if (cu.linesFailed) return;
+    decodeRows(cu);
+    if (cu.rows.empty()) {
+      cu.linesFailed = true;
+      return;
+    }
+    cu.rowsResident = true;
+    m_lru.push_front(self);
+    cu.lruPos = m_lru.begin();
+    m_stats.lineBytes += cu.rows.capacity() * sizeof(LineRow);
+    ++m_stats.lineLoads;
+    while (m_stats.lineBytes > m_lineBudget && m_lru.size() > 1) dropRows(m_cus[m_lru.back()]);
+  }
+
+  void decodeRows(CuData& cu) {
+    Dwarf_Lines* lines = nullptr;
+    size_t n = 0;
+    if (dwarf_getsrclines(&cu.die, &lines, &n) != 0 || lines == nullptr) return;
     n = std::min(n, kMaxLineRows);
     cu.rows.reserve(n);
     for (size_t i = 0; i < n; ++i) {
@@ -501,6 +580,7 @@ class LibdwSession final : public IDwarfSession {
       if (a.addr != b.addr) return a.addr < b.addr;
       return a.end && !b.end;
     });
+    cu.rows.shrink_to_fit();
   }
 
   static size_t rowAtOrBefore(const CuData& cu, uint64_t addr) {
@@ -513,10 +593,7 @@ class LibdwSession final : public IDwarfSession {
   // File path of a line-table / call-site file index: absolute, joined with the CU's DW_AT_comp_dir when
   // libdw returns a relative one.
   std::string_view fileName(CuData& cu, uint32_t idx) {
-    if (cu.files == nullptr) {
-      // The file table is loaded together with the lines; call-site files may be asked first.
-      ensureLines(cu);
-    }
+    ensureFiles(cu);
     if (cu.files == nullptr || idx >= cu.fileCount) return {};
     std::string_view& slot = cu.fileNames[idx];
     if (!slot.empty()) return slot;
@@ -538,10 +615,17 @@ class LibdwSession final : public IDwarfSession {
   std::unordered_set<std::string> m_pool;  // node-based: string_views into it stay valid
   std::unordered_map<uint64_t, std::string_view> m_names;
   std::unordered_map<uint64_t, std::string_view> m_sourceNames;
+  std::unordered_map<uint64_t, uint64_t> m_scopeParent;  // scope-like DIE offset -> enclosing scope (0 = CU)
+  std::unordered_set<uint64_t> m_scopedCus;              // CU DIE offsets whose scopes are indexed
+  std::unordered_map<uint64_t, std::string> m_scopeNames;
+  uint64_t m_lineBudget;
+  std::list<uint32_t> m_lru;  // CU indices with resident rows, most recently used first
+  DwarfSessionStats m_stats;
 };
 
 class LibdwOpener final : public IDwarfOpener {
  public:
+  explicit LibdwOpener(uint64_t lineCacheBytes) : m_lineCacheBytes(lineCacheBytes) {}
   Result<std::unique_ptr<IDwarfSession>> open(const ElfFile& elf) override {
     const int fd = ::open(elf.path().c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) return makeError(ErrorCode::IoError, elf.path().string() + ": cannot open");
@@ -552,14 +636,17 @@ class LibdwOpener final : public IDwarfOpener {
       return makeError(ErrorCode::CorruptData, elf.path().string() + ": libdw cannot read the debug info" +
                                                    (msg != nullptr ? std::string(": ") + msg : ""));
     }
-    return std::unique_ptr<IDwarfSession>(new LibdwSession(fd, dw));
+    return std::unique_ptr<IDwarfSession>(new LibdwSession(fd, dw, m_lineCacheBytes));
   }
+
+ private:
+  uint64_t m_lineCacheBytes;
 };
 
 }  // namespace
 
-std::shared_ptr<IDwarfOpener> makeLibdwOpener() {
-  return std::make_shared<LibdwOpener>();
+std::shared_ptr<IDwarfOpener> makeLibdwOpener(uint64_t lineCacheBytes) {
+  return std::make_shared<LibdwOpener>(lineCacheBytes);
 }
 
 }  // namespace tachyon::symbols

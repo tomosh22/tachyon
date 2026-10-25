@@ -91,10 +91,13 @@ Result<void> DwarfSymbolProvider::load(const Module& module, const std::filesyst
 StringIdx DwarfSymbolProvider::internRaw(std::string_view raw, uint64_t nameKey) {
   auto it = m_rawNames.find(raw);
   if (it != m_rawNames.end()) return it->second;
-  std::string display = m_nameFn(raw);
-  if (m_session && nameKey != 0 && display == raw && raw.size() > 2 && raw[0] == '_' && raw[1] == 'Z') {
-    const std::string_view source = m_session->sourceName(nameKey);  // demangling failed: use the DIE's name
-    if (!source.empty()) display.assign(source);
+  // Preferred: the DIE's qualified source name (no parameter list, like DIA). Otherwise the demangled raw
+  // name with its parameter list stripped (symbol-table names, or DIEs without a usable name).
+  std::string display;
+  if (m_session && nameKey != 0) display.assign(m_session->sourceName(nameKey));
+  if (display.empty()) {
+    display = m_nameFn(raw);
+    if (display != raw) display = stripParameterList(display);  // only names that were mangled
   }
   const StringIdx idx = m_strings.intern(display);
   m_rawNames.emplace(raw, idx);
@@ -123,14 +126,8 @@ std::optional<DwarfSymbolProvider::FunctionView> DwarfSymbolProvider::functionFo
       v.id = hit->id;
       v.hit = *hit;
       v.startRva = hit->entry - m_bias;
-      // Size of the piece holding the entry.
-      if (hit->entry >= hit->piece.lo && hit->entry < hit->piece.hi) {
-        v.size = hit->piece.hi - hit->entry;
-      } else {
-        for (const DwarfAddrRange& r : m_session->functionRanges(hit->id)) {
-          if (hit->entry >= r.lo && hit->entry < r.hi) v.size = r.hi - hit->entry;
-        }
-      }
+      v.pieceLo = hit->piece.lo - m_bias;
+      v.pieceSize = hit->piece.hi - hit->piece.lo;
       auto cached = m_functionNames.find(hit->id);
       if (cached == m_functionNames.end()) {
         const std::string_view raw = m_session->functionName(hit->id);
@@ -152,6 +149,8 @@ std::optional<DwarfSymbolProvider::FunctionView> DwarfSymbolProvider::functionFo
     FunctionView v;
     v.startRva = sym->rva;
     v.size = sym->size;
+    v.pieceLo = sym->rva;
+    v.pieceSize = sym->size;
     v.name = internRaw(sym->name);
     return v;
   }
@@ -262,10 +261,15 @@ Result<FunctionBounds> DwarfSymbolProvider::functionBounds(uint64_t rva) {
   const std::optional<FunctionView> fn = functionFor(rva);
   if (!fn) return makeError(ErrorCode::NotFound, "no function covers the given rva");
   FunctionBounds b;
-  b.startRva = fn->startRva;
-  b.size = fn->size;
+  b.startRva = fn->pieceLo;  // the contiguous piece that contains rva (see the header)
+  b.size = fn->pieceSize;
   b.name = fn->name;
   return b;
+}
+
+DwarfSessionStats DwarfSymbolProvider::sessionStats() const {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  return m_session ? m_session->stats() : DwarfSessionStats{};
 }
 
 void registerDwarfProvider(SymbolService& service, std::shared_ptr<IDwarfOpener> opener) {

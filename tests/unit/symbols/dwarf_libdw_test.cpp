@@ -1,6 +1,7 @@
 // Real libdw session over the fixture binaries (WP-72): functions, inline chains, lines, RVA mapping for PIE
 // and non-PIE executables, hot/cold splits and the symbol-table fallback.
 #include "dwarf_test_util.h"
+#include "symbols/demangle.h"
 
 #include <algorithm>
 #include <set>
@@ -68,7 +69,7 @@ TEST_P(DwarfLibdw, DemangledQualifiedNames) {
   ASSERT_TRUE(rva.has_value());
   const ResolvedAddress r = l.provider->resolve(*rva);
   ASSERT_TRUE(r.resolved);
-  EXPECT_EQ(l.name(r.function), "fx::Widget::work(int)");
+  EXPECT_EQ(l.name(r.function), "fx::Widget::work");
   EXPECT_EQ(r.line, markerLine("fixture_main.cpp", "widget_work"));
 }
 
@@ -95,8 +96,8 @@ TEST_P(DwarfLibdw, InlineChainInnermostFirst) {
     EXPECT_EQ(r.line, innerBody);
     if (r.inlines.size() == 2) {
       sawChain = true;
-      EXPECT_EQ(l.name(r.inlines[0].function), "innerHelper(int)");
-      EXPECT_EQ(l.name(r.inlines[1].function), "outerHelper(int)");
+      EXPECT_EQ(l.name(r.inlines[0].function), "innerHelper");
+      EXPECT_EQ(l.name(r.inlines[1].function), "outerHelper");
       EXPECT_EQ(r.inlines[0].line, innerBody);
       EXPECT_EQ(baseName(l.name(r.inlines[0].file)), "fixture_inl.h");
       // Outer frame: the call site of innerHelper inside outerHelper.
@@ -134,6 +135,7 @@ void expectAgreesWithSymbolizer(const std::filesystem::path& file, bool gnu) {
       // The references name the cold part of a split function by its symbol ("split_fn.cold"); we report the
       // function (documented behaviour: all pieces share one identity).
       for (A2lFrame& f : ref) {
+        f.function = stripParameterList(f.function);  // our names carry no parameter list (like DIA)
         if (f.function.size() > 5 && f.function.compare(f.function.size() - 5, 5, ".cold") == 0)
           f.function.resize(f.function.size() - 5);
       }
@@ -258,13 +260,17 @@ TEST(DwarfLibdwSplit, HotColdPiecesMapToOneFunction) {
   EXPECT_EQ(h.function, c.function);
   EXPECT_NE(c.line, 0u);
 
-  // Bounds: start = entry in both cases; size = the hot piece.
+  // Bounds are the piece containing the address: the cold piece starts at its own address, which differs from
+  // functionStartRva (the entry).
   auto bh = l.provider->functionBounds(*hot);
   auto bc = l.provider->functionBounds(*cold);
   ASSERT_TRUE(bh.ok() && bc.ok());
   EXPECT_EQ(bh.value().startRva, *hot);
-  EXPECT_EQ(bc.value().startRva, *hot);
   EXPECT_EQ(bh.value().size, symbolSize(file, "split_fn"));
+  EXPECT_EQ(bc.value().startRva, *cold);
+  EXPECT_NE(bc.value().startRva, c.functionStartRva);
+  EXPECT_EQ(bc.value().size, symbolSize(file, "split_fn.cold"));
+  EXPECT_EQ(bc.value().name, bh.value().name);
 
   // Lines cover both pieces.
   auto lines = l.provider->linesForFunction(*hot);
@@ -282,6 +288,39 @@ TEST(DwarfLibdwSplit, HotColdPiecesMapToOneFunction) {
   }));
   // The cold start itself is not a function start.
   EXPECT_EQ(l.provider->linesForFunction(*cold).error().code, ErrorCode::NotFound);
+}
+
+// For every byte of .text that resolves, functionBounds(b) exists, contains b and names the same function.
+void expectBoundsContainEveryByte(const std::filesystem::path& file) {
+  Loaded l(file);
+  ASSERT_TRUE(l.status.ok());
+  auto elf = ElfFile::open(file);
+  const ElfSection* text = elf.value().findSection(".text");
+  ASSERT_NE(text, nullptr);
+  size_t resolved = 0;
+  for (uint64_t a = text->addr; a < text->addr + text->size; ++a) {
+    const uint64_t rva = a - l.provider->loadBias();
+    const ResolvedAddress r = l.provider->resolve(rva);
+    if (!r.resolved) continue;
+    ++resolved;
+    auto b = l.provider->functionBounds(rva);
+    ASSERT_TRUE(b.ok()) << std::hex << rva;
+    ASSERT_LE(b.value().startRva, rva) << std::hex << rva;
+    ASSERT_LT(rva, b.value().startRva + b.value().size) << std::hex << rva;
+    ASSERT_EQ(b.value().name, r.function) << std::hex << rva;
+  }
+  EXPECT_GT(resolved, 100u);
+}
+
+TEST(DwarfLibdwSplit, FunctionBoundsContainEveryTextByte) {
+  const auto file = fixture("dwarf_fixture_split");
+  if (!std::filesystem::exists(file)) GTEST_SKIP() << "g++ not available: no split fixture";
+  expectBoundsContainEveryByte(file);
+}
+
+TEST(DwarfLibdwSplit, FunctionBoundsContainEveryTextByteClang) {
+  expectBoundsContainEveryByte(fixture("dwarf_fixture_pie"));
+  expectBoundsContainEveryByte(fixture("dwarf_fixture_nodebug"));
 }
 
 TEST(DwarfLibdwSymtab, BinaryWithoutDebugInfoFallsBackToTheSymbolTable) {
@@ -303,7 +342,7 @@ TEST(DwarfLibdwSymtab, BinaryWithoutDebugInfoFallsBackToTheSymbolTable) {
 
   const ResolvedAddress mangled = l.provider->resolve(*symbolRva(file, kWidgetWork));
   ASSERT_TRUE(mangled.resolved);
-  EXPECT_EQ(l.name(mangled.function), "fx::Widget::work(int)");
+  EXPECT_EQ(l.name(mangled.function), "fx::Widget::work");
 
   auto b = l.provider->functionBounds(*rva);
   ASSERT_TRUE(b.ok());
@@ -315,6 +354,58 @@ TEST(DwarfLibdwSymtab, BinaryWithoutDebugInfoFallsBackToTheSymbolTable) {
 }
 
 #ifdef TACHYON_TESTBED_EXE
+// The line-table cache is an LRU with a byte budget: a tiny budget evicts constantly but answers identically.
+TEST(DwarfLineCache, SmallBudgetStillGivesIdenticalResults) {
+  const std::filesystem::path exe(TACHYON_TESTBED_EXE);
+  Loaded reference(exe);  // default budget: nothing is evicted for a program this small
+  ASSERT_TRUE(reference.status.ok());
+  Loaded tiny(exe, makeLibdwOpener(1));  // one byte: only the CU being queried stays resident
+  ASSERT_TRUE(tiny.status.ok());
+  Loaded mid(exe, makeLibdwOpener(256 * 1024));
+  ASSERT_TRUE(mid.status.ok());
+
+  auto elf = ElfFile::open(exe);
+  std::vector<uint64_t> rvas;
+  for (const ElfSection& s : elf.value().sections()) {
+    if ((s.flags & kElfShfExecinstr) == 0 || s.name != ".text") continue;
+    for (uint64_t a = s.addr; a < s.addr + s.size; a += 7) rvas.push_back(a - elf.value().loadBias());
+  }
+  // Two passes in different orders so that CUs are evicted and reloaded.
+  for (int pass = 0; pass < 2; ++pass) {
+    if (pass == 1) std::reverse(rvas.begin(), rvas.end());
+    for (const uint64_t rva : rvas) {
+      const ResolvedAddress a = reference.provider->resolve(rva);
+      for (Loaded* other : {&tiny, &mid}) {
+        const ResolvedAddress b = other->provider->resolve(rva);
+        ASSERT_EQ(a.resolved, b.resolved) << std::hex << rva;
+        if (!a.resolved) continue;
+        ASSERT_EQ(reference.name(a.function), other->name(b.function)) << std::hex << rva;
+        ASSERT_EQ(a.line, b.line) << std::hex << rva;
+        ASSERT_EQ(reference.name(a.file), other->name(b.file)) << std::hex << rva;
+        ASSERT_EQ(a.inlines.size(), b.inlines.size()) << std::hex << rva;
+        for (size_t k = 0; k < a.inlines.size(); ++k) {
+          ASSERT_EQ(a.inlines[k].line, b.inlines[k].line);
+          ASSERT_EQ(reference.name(a.inlines[k].file), other->name(b.inlines[k].file));
+        }
+      }
+    }
+  }
+  const DwarfSessionStats r = reference.provider->sessionStats();
+  const DwarfSessionStats t = tiny.provider->sessionStats();
+  const DwarfSessionStats m = mid.provider->sessionStats();
+  std::printf(
+      "[dwarf line cache] default: %llu bytes, %llu loads, %llu evictions; 256K: %llu bytes, %llu loads, "
+      "%llu evictions; 1 byte: %llu bytes, %llu loads, %llu evictions\n",
+      (unsigned long long)r.lineBytes, (unsigned long long)r.lineLoads, (unsigned long long)r.lineEvictions,
+      (unsigned long long)m.lineBytes, (unsigned long long)m.lineLoads, (unsigned long long)m.lineEvictions,
+      (unsigned long long)t.lineBytes, (unsigned long long)t.lineLoads, (unsigned long long)t.lineEvictions);
+  EXPECT_EQ(r.lineEvictions, 0u);
+  EXPECT_GT(t.lineEvictions, 0u);
+  EXPECT_GT(t.lineLoads, r.lineLoads);  // evicted tables had to be decoded again
+  EXPECT_LE(t.lineBytes, r.lineBytes);
+  EXPECT_LE(m.lineBytes, r.lineBytes);
+}
+
 // The profiler testbed (built with -g): its known-answer functions and a large sample of its code against
 // llvm-symbolizer.
 TEST(DwarfTestbed, HotFunctionsResolveToTheirSourceLines) {
