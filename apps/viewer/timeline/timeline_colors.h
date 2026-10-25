@@ -6,6 +6,8 @@
 #include "analysis/lod.h"
 #include "analysis/wait_reasons.h"
 #include "model/model.h"
+#include "symbols/symbol_service.h"
+#include "viewer/timeline/timeline_data.h"
 
 #include <cstdint>
 
@@ -57,10 +59,14 @@ enum class FrameColorMode : uint8_t { ByModule, ByFunction };
 // Stable pseudo-random colour from a 64-bit key (golden-ratio hue walk, fixed saturation/value).
 Color32 hashColor(uint64_t key);
 // Colour of callstack node `node` (its leaf frame). Invalid or out-of-range nodes give kUnknownColor.
-Color32 callstackColor(const model::TraceModel& model, CallstackIdx node, FrameColorMode mode);
+// With `symbols`, ByFunction groups frames by their function key (resolved frames of one function share a
+// colour); without, by frame address.
+Color32 callstackColor(const model::TraceModel& model, CallstackIdx node, FrameColorMode mode,
+                       const symbols::SymbolService* symbols = nullptr,
+                       FramePosition position = FramePosition::Leaf);
 // Strip column colour: callstackColor faded towards the background by (1 - share) and by coverage (alpha).
 Color32 stripColumnColor(const model::TraceModel& model, const analysis::StripColumn& column,
-                         FrameColorMode mode);
+                         FrameColorMode mode, const symbols::SymbolService* symbols = nullptr);
 // Multiplies RGB by `factor` (clamped to 0..2), keeps alpha.
 Color32 scaleBrightness(Color32 color, float factor);
 Color32 withAlpha(Color32 color, uint8_t alpha);

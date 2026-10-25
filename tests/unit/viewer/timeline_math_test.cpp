@@ -325,3 +325,16 @@ TEST(TimelineOverview, ColumnRangesTileTheTrace) {
   }
   EXPECT_EQ(expected, l.traceEnd);
 }
+
+TEST(TimelineRuler, ExtremeAndNonFiniteViewsDoNotOverflowTheTickIndex) {
+  // start / step beyond int64: previously an undefined double -> int64 conversion.
+  for (const double start : {1e300, 1e30, 9.3e18, -1e30, std::nan(""), HUGE_VAL}) {
+    for (const double span : {1.0, 1e9, 1e300, std::nan("")}) {
+      const auto ticks = buildRuler({start, span}, 1e7, 1000, 90);
+      EXPECT_LE(ticks.size(), 4097u);
+    }
+  }
+  // Ordinary views are unaffected by the guard.
+  EXPECT_FALSE(buildRuler({1e9, 1e6}, 1e7, 1000, 90).empty());
+  EXPECT_TRUE(buildRuler({1e300, 1.0}, 1e7, 1000, 90).empty());
+}

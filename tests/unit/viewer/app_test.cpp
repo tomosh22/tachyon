@@ -109,8 +109,8 @@ TEST(ViewerApp, OpensTraceAsynchronouslyAndNotifiesPanels) {
   EXPECT_GT(panel->draws, 0);
   ASSERT_FALSE(app.settings().recentFiles.empty());
 
-  // Service slots exist but are empty until WP-20/33/36 install implementations.
-  EXPECT_EQ(app.document()->symbols(), nullptr);
+  // Query / LOD slots stay empty until WP-33/36 install implementations; symbols are installed on open.
+  EXPECT_NE(app.document()->symbols(), nullptr);  // WP-42b: one SymbolService per document
   EXPECT_EQ(app.document()->queries(), nullptr);
   EXPECT_EQ(app.document()->lod(), nullptr);
 

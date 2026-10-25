@@ -6,6 +6,11 @@
 //   medium (CI): the 16 threads of `medium` replicated to 64 rows (same samples per row).
 //   large (local, skipped when tachyon_fixtures_large was not built): the real 64-thread, 10 minute capture.
 //
+// The asserted metric is the slowest single frame: per zoom the WORST of the 7 counted reps, then the worst
+// zoom. (The best-of-N numbers are printed too, but a best-of metric hides a 2x regression of everything but
+// the minimum.) The 8 ms budget is what the slowest frames reach on a typical run; the assert at 2x of it
+// catches a real regression without tripping on CI noise.
+//
 // Every measured frame changes the view by a tick so the row caches miss and all rows are re-queried (the
 // worst case: continuous panning or zooming); a steady frame is separately measured and is far cheaper.
 #include "analysis/lod.h"
@@ -116,7 +121,9 @@ std::vector<Zoom> makeZooms(const model::TraceModel& m) {
 }
 
 struct Sweep {
-  double worstMs = 0;
+  double worstMs = 0;      // slowest single frame (worst rep of the worst zoom): the asserted metric
+  double bestWorstMs = 0;  // worst zoom of the best-of-reps (the noise-free cost, for information)
+  std::string worstFrameLabel;
   double medianMs = 0;
   std::string worstLabel;
   size_t maxVertices = 0;
@@ -129,22 +136,29 @@ Sweep sweep(TimelineWidget& widget, const PanelContext& context, const std::vect
   Sweep s;
   std::vector<double> perZoom;
   for (const Zoom& z : zooms) {
-    double best = 1e30;
+    double best = 1e30, worst = 0;
     for (int i = 0; i < reps; ++i) {
       TimeView v;
       v.span = z.span;
       v.start = (limits.total() - z.span) * z.pos + i;  // a tick of pan per rep: every row re-queries
       widget.setView(v);
       const FrameResult r = runFrame(widget, context);
+      if (i == 0)
+        continue;  // the first frame at a new zoom warms the caches (a one-frame jump, not steady cost)
       best = std::min(best, r.cpuMs);
+      worst = std::max(worst, r.cpuMs);
       s.maxVertices = std::max(s.maxVertices, r.vertices);
       s.minRowsDrawn = std::min(s.minRowsDrawn, r.stats.rowsDrawn);
       s.maxRects = std::max(s.maxRects, r.stats.rects);
     }
     perZoom.push_back(best);
-    if (best > s.worstMs) {
-      s.worstMs = best;
+    if (best > s.bestWorstMs) {
+      s.bestWorstMs = best;
       s.worstLabel = z.label;
+    }
+    if (worst > s.worstMs) {
+      s.worstMs = worst;
+      s.worstFrameLabel = z.label;
     }
   }
   std::sort(perZoom.begin(), perZoom.end());
@@ -186,7 +200,7 @@ void runScenario(const char* name, std::shared_ptr<const model::TraceModel> mode
   runFrame(widget, context);  // warm up fonts / glyph cache
 
   const std::vector<Zoom> zooms = makeZooms(*model);
-  const int reps = 5;
+  const int reps = 8;  // the first rep of each zoom is a warm-up
 
   // 1. all rows collapsed.
   const Sweep collapsed = sweep(widget, context, zooms, reps);
@@ -206,16 +220,25 @@ void runScenario(const char* name, std::shared_ptr<const model::TraceModel> mode
   }
 
   std::printf(
-      "[timeline perf] %s: %zu rows, %zu zooms x %d reps at %.0f px (first frame incl. LOD build %.0f ms)\n"
-      "[timeline perf] %s: collapsed 64 rows: worst %.3f ms (%s), median %.3f ms, max %zu vertices, max %u "
-      "rects, "
-      "min rows drawn %u\n"
-      "[timeline perf] %s: 4 rows expanded:  worst %.3f ms (%s), median %.3f ms, max %zu vertices\n"
-      "[timeline perf] %s: steady frame (no input): %.3f ms; budget %.1f ms, assert %.1f ms\n",
-      name, model->threads.size(), zooms.size(), reps, static_cast<double>(kDisplayW), buildMs, name,
-      collapsed.worstMs, collapsed.worstLabel.c_str(), collapsed.medianMs, collapsed.maxVertices,
-      collapsed.maxRects, collapsed.minRowsDrawn, name, expanded.worstMs, expanded.worstLabel.c_str(),
-      expanded.medianMs, expanded.maxVertices, name, steady, kFrameBudgetMs, kFrameBudgetMs * 2);
+      "[timeline perf] %s: %zu rows, %zu zooms x %d reps at %.0f px (first frame incl. LOD build %.0f ms)\n",
+      name, model->threads.size(), zooms.size(), reps, static_cast<double>(kDisplayW), buildMs);
+  std::printf(
+      "[timeline perf] %s: collapsed 64 rows: SLOWEST FRAME %.3f ms (%s); best-of-reps worst zoom %.3f ms "
+      "(%s), "
+      "median %.3f ms, max %zu vertices, max %u rects, min rows drawn %u\n",
+      name, collapsed.worstMs, collapsed.worstFrameLabel.c_str(), collapsed.bestWorstMs,
+      collapsed.worstLabel.c_str(), collapsed.medianMs, collapsed.maxVertices, collapsed.maxRects,
+      collapsed.minRowsDrawn);
+  std::printf(
+      "[timeline perf] %s: 4 rows expanded: SLOWEST FRAME %.3f ms (%s); best-of-reps worst zoom %.3f ms, "
+      "median "
+      "%.3f ms, max %zu vertices\n",
+      name, expanded.worstMs, expanded.worstFrameLabel.c_str(), expanded.bestWorstMs, expanded.medianMs,
+      expanded.maxVertices);
+  std::printf(
+      "[timeline perf] %s: steady frame (no input): %.3f ms; budget %.1f ms, assert (slowest frame) %.1f "
+      "ms\n",
+      name, steady, kFrameBudgetMs, kFrameBudgetMs * 2);
 
   EXPECT_EQ(collapsed.minRowsDrawn, 64u) << "all 64 rows must be on screen for the budget to mean anything";
   EXPECT_LT(collapsed.worstMs, kFrameBudgetMs * 2);

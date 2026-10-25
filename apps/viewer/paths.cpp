@@ -40,6 +40,28 @@ std::filesystem::path configDirFromEnv(const EnvLookup& env, bool windowsStyle) 
   return {};
 }
 
+std::filesystem::path symbolCacheDirFromEnv(const EnvLookup& env, bool windowsStyle) {
+  if (windowsStyle) {
+    const std::string local = env("LOCALAPPDATA");
+    if (!local.empty()) return pathFromUtf8(local) / "Tachyon" / "symbols";
+    return {};
+  }
+  const std::string xdg = env("XDG_CACHE_HOME");
+  if (!xdg.empty()) return pathFromUtf8(xdg) / "tachyon" / "symbols";
+  const std::string home = env("HOME");
+  if (!home.empty()) return pathFromUtf8(home) / ".cache" / "tachyon" / "symbols";
+  return {};
+}
+
+std::filesystem::path defaultSymbolCacheDir() {
+#ifdef _WIN32
+  constexpr bool kWindows = true;
+#else
+  constexpr bool kWindows = false;
+#endif
+  return symbolCacheDirFromEnv(getEnvironmentVariable, kWindows);
+}
+
 std::filesystem::path defaultConfigDir() {
 #ifdef _WIN32
   constexpr bool kWindows = true;

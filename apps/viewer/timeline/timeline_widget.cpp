@@ -86,6 +86,7 @@ struct TimelineWidget::DocState {
   JobQueue* jobs = nullptr;
   JobQueue::JobId job = 0;
   bool buildStarted = false;
+  uint64_t symbolGeneration = 0;  // PanelContext::symbolGeneration the caches were built for
 
   TimeLimits limits;
   TimeView view;
@@ -119,7 +120,8 @@ struct TimelineWidget::Hit {
   RowSection section = RowSection::None;
   uint32_t depth = 0;
   uint64_t ts = 0;
-  CallstackIdx stack;  // representative callstack node under the cursor
+  CallstackIdx stack;                                 // representative callstack node under the cursor
+  FramePosition stackPosition = FramePosition::Leaf;  // strip stacks are leaves, flame spans are prefixes
   const analysis::TimelineSpan* span = nullptr;
   bool pending = false;
   float share = 0;
@@ -200,20 +202,36 @@ bool TimelineWidget::applySelectionAsFilter(SelectionBus& bus) {
   filter.t0 = m_selection->t0;
   filter.t1 = m_selection->t1;
   bus.setTimeFilter(filter);
+  m_appliedRange = *m_selection;
   return true;
 }
 
 void TimelineWidget::clearSelection(SelectionBus* bus) {
   m_selection.reset();
-  if (bus && bus->state().timeFilter) bus->setTimeFilter(std::nullopt);
+  const std::optional<TickRange> applied = m_appliedRange;
+  m_appliedRange.reset();
+  if (!bus || !bus->state().timeFilter) return;
+  const ViewFilter& current = *bus->state().timeFilter;
+  // Only the time range this widget applied is ours to remove; a filter another panel set (or changed since)
+  // stays as it is.
+  if (!applied || current.t0 != applied->t0 || current.t1 != applied->t1) return;
+  if (!current.threads && !current.subtreeRoot && !current.function) {
+    bus->setTimeFilter(std::nullopt);
+    return;
+  }
+  // Restrictions from other panels survive: only the time range goes back to the whole trace.
+  ViewFilter whole = current;
+  whole.t0 = m_doc ? m_doc->limits.traceStart : 0;
+  whole.t1 = m_doc ? m_doc->limits.traceEnd : 0;
+  bus->setTimeFilter(whole);
 }
 
 // ---------------------------------------------------------------------------------------------------------
 // Document lifecycle
 
 void TimelineWidget::onDocumentChanged(const Document* document) {
-  if (!document) resetDocument();
-  // A non-null document is picked up by the generation check in draw().
+  // Also when the panel is hidden and never drawn again: drop the old model, LOD and build job right away.
+  if (!document || document != m_documentPtr) resetDocument();
 }
 
 void TimelineWidget::resetDocument() {
@@ -276,10 +294,12 @@ void TimelineWidget::onSelectionChanged(const PanelContext& context, const Selec
 void TimelineWidget::updateOrder() {
   DocState& d = *m_doc;
   const auto* summaries = d.shared->summariesIfReady();
-  if (summaries && !d.orderUsedSummaries) d.orderDirty = true;
+  // Only the Running-time order depends on the summaries. Until they are ready it is the trace order (all
+  // keys tie), so the rows do not jump around while other sort keys are unaffected by the build finishing.
+  if (summaries && !d.orderUsedSummaries && m_options.sortKey == SortKey::RunningTime) d.orderDirty = true;
   if (!d.orderDirty) return;
   d.orderDirty = false;
-  d.orderUsedSummaries = summaries != nullptr;
+  d.orderUsedSummaries = summaries != nullptr || m_options.sortKey != SortKey::RunningTime;
 
   const model::TraceModel& model = *d.model;
   std::vector<ThreadSortInfo> infos(model.threads.size());
@@ -377,6 +397,7 @@ void TimelineWidget::refreshRow(const PanelContext& context, const RowLayout& ro
 
 void TimelineWidget::draw(const PanelContext& context) {
   m_stats = {};
+  m_tooltip.clear();
   if (!context.document) {
     if (m_doc) resetDocument();
     ImGui::TextDisabled("No trace open.");
@@ -394,6 +415,16 @@ void TimelineWidget::draw(const PanelContext& context) {
   m_rowGeometry.flameGap *= ui;
   m_rowGeometry.rowSpacing *= ui;
 
+  if (m_doc->symbolGeneration != context.symbolGeneration) {
+    // Function keys (selection highlight, by-function colours, labels) change when modules resolve: drop the
+    // row caches and refresh the key of the clicked frame.
+    m_doc->symbolGeneration = context.symbolGeneration;
+    for (RowCache& r : m_doc->rows) r.valid = false;
+    if (m_selectedNode.valid() && context.selection && context.selection->state().selectedFunction) {
+      context.selection->setSelectedFunction(
+          functionKeyForNode(*m_doc->model, context.symbols, m_selectedNode, m_selectedPosition));
+    }
+  }
   if (!m_doc->buildStarted && !m_options.deferLodBuild) startBuild(context);
   updateOrder();
   updateFlameDepths();
@@ -657,34 +688,18 @@ void TimelineWidget::drawHeader(const PanelContext& context) {
   }
 
   // Frame marks: vertical ticks with frame numbers, thinned to at least 3 px apart (labels to fit the text).
+  m_frameLabels.clear();
   if (m_options.showFrameMarks && !d.frameTicks.empty()) {
-    const TickRange window = queryWindow(d.view, d.limits);
-    const double pxPerTick = w / d.view.span;
-    size_t i = firstFrameTickAtOrAfter(d.frameTicks, window.t0);
-    if (i > 0) --i;  // the tick just before the window may have its label inside it
-    float lastX = -1e9f, lastLabelEnd = -1e9f;
-    for (; i < d.frameTicks.size() && d.frameTicks[i].ts <= window.t1; ++i) {
-      const double rel = toRelative(d.limits, d.frameTicks[i].ts);
-      const float x = static_cast<float>(relTickToX(d.view, rel, x0, w));
-      if (x < lastX + 3.0f) {
-        // Skip ahead to the first tick at least 3 px later instead of visiting every tick.
-        const uint64_t nextTs = d.frameTicks[i].ts + static_cast<uint64_t>(std::ceil(3.0 / pxPerTick));
-        const size_t j = firstFrameTickAtOrAfter(d.frameTicks, nextTs);
-        if (j > i + 1) i = j - 1;
-        continue;
-      }
-      lastX = x;
+    const float charWidth = ImGui::CalcTextSize("0").x;
+    for (const FrameMarkItem& m : layoutFrameMarks(d.frameTicks, d.view, d.limits, x0, w, charWidth)) {
       ++m_stats.frameMarksDrawn;
-      dl->AddLine(ImVec2(x, p0.y + rulerH + 2.0f), ImVec2(x, p0.y + rulerH + frameH),
+      dl->AddLine(ImVec2(m.x, p0.y + rulerH + 2.0f), ImVec2(m.x, p0.y + rulerH + frameH),
                   IM_COL32(230, 190, 90, 255));
-      if (x > lastLabelEnd + 4.0f) {
+      if (m.hasLabel) {
         char text[24];
-        std::snprintf(text, sizeof text, "%llu", static_cast<unsigned long long>(d.frameTicks[i].number));
-        const float tw = ImGui::CalcTextSize(text).x;
-        if (x + 2.0f + tw < x0 + w) {
-          dl->AddText(ImVec2(x + 2.0f, p0.y + rulerH), IM_COL32(230, 190, 90, 255), text);
-          lastLabelEnd = x + 2.0f + tw;
-        }
+        std::snprintf(text, sizeof text, "%llu", static_cast<unsigned long long>(m.number));
+        dl->AddText(ImVec2(m.x + 2.0f, p0.y + rulerH), IM_COL32(230, 190, 90, 255), text);
+        m_frameLabels.push_back(m.number);
       }
     }
   }
@@ -795,18 +810,6 @@ void TimelineWidget::drawRows(const PanelContext& context) {
 }
 namespace {
 
-std::optional<FunctionKey> functionKeyOf(const model::TraceModel& m, CallstackIdx node) {
-  if (!node.valid() || node.get() >= m.nodes.size()) return std::nullopt;
-  const FrameIdx fi = m.nodes[node.get()].frame;
-  if (!fi.valid() || fi.get() >= m.frames.size()) return std::nullopt;
-  // Without symbols (WP-20) the function start is unknown; the frame address stands in for it.
-  const model::Frame& f = m.frames[fi.get()];
-  FunctionKey key;
-  key.module = f.module;
-  key.functionStartRvaOrString = f.addr_or_rva;
-  return key;
-}
-
 void drawPendingLook(ImDrawList* dl, float x0, float y0, float x1, float y1) {
   dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(44, 44, 52, 255));
   dl->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y1), true);
@@ -872,10 +875,11 @@ void TimelineWidget::drawRowContents(ImDrawList* dl, const PanelContext& context
       const float sw = w / static_cast<float>(scols);
       RectBatch batch(dl, scols);
       uint32_t start = 0;
-      Color32 cur = stripColumnColor(model, cache.strip.columns[0], m_options.colorMode);
+      Color32 cur = stripColumnColor(model, cache.strip.columns[0], m_options.colorMode, context.symbols);
       for (uint32_t c = 1; c <= scols; ++c) {
         const Color32 col =
-            c < scols ? stripColumnColor(model, cache.strip.columns[c], m_options.colorMode) : 0;
+            c < scols ? stripColumnColor(model, cache.strip.columns[c], m_options.colorMode, context.symbols)
+                      : 0;
         if (c == scols || col != cur) {
           if (colorA(cur) != 0) {
             batch.add(x0 + static_cast<float>(start) * sw, stripY0, x0 + static_cast<float>(c) * sw, stripY1,
@@ -926,11 +930,15 @@ void TimelineWidget::drawFlame(ImDrawList* dl, const PanelContext& context, cons
       const float ya = rowTop + flameDepthTop(geom, s.depth);
       const float yb = ya + geom.flameDepthHeight - 1.0f;
       const bool merged = !s.node.valid();
-      const Color32 color = merged ? kOtherWaitColor : callstackColor(model, s.node, m_options.colorMode);
+      const Color32 color = merged ? kOtherWaitColor
+                                   : callstackColor(model, s.node, m_options.colorMode, context.symbols,
+                                                    FramePosition::NonLeaf);
       batch.add(xa, ya, xb, yb, toIm(merged ? scaleBrightness(color, 0.6f) : color));
       ++m_stats.rects;
       ++m_stats.flameSpans;
-      const bool outline = selected && !merged && functionKeyOf(model, s.node) == selected;
+      const bool outline =
+          selected && !merged &&
+          functionKeyForNode(model, context.symbols, s.node, FramePosition::NonLeaf) == selected;
       const bool label = !merged && xb - xa > fontSize * 4.0f;
       if (outline || label) decor.push_back({xa, ya, xb, yb, s.node, color, outline, label});
     }
@@ -940,7 +948,7 @@ void TimelineWidget::drawFlame(ImDrawList* dl, const PanelContext& context, cons
   for (const Decor& dc : decor) {
     if (dc.outline) dl->AddRect(ImVec2(dc.xa, dc.ya), ImVec2(dc.xb, dc.yb), IM_COL32(255, 255, 255, 255));
     if (dc.label && labels < 48) {
-      const std::string text = describeCallstackLeaf(model, dc.node);
+      const std::string text = describeCallstackLeaf(model, dc.node, context.symbols);
       const ImVec4 clip(dc.xa, dc.ya, dc.xb, dc.yb);
       dl->AddText(font, fontSize, ImVec2(dc.xa + 2.0f, dc.ya), toIm(textColorFor(dc.color)), text.c_str(),
                   nullptr, 0.0f, &clip);
@@ -981,13 +989,15 @@ TimelineWidget::Hit TimelineWidget::hitTest(const PanelContext& context, float m
   }
   if (h.section == RowSection::Flame) {
     h.span = findSpanAt(cache.flame.spans, h.depth, h.ts);
-    if (h.span && h.span->node.valid()) h.stack = h.span->node;
+    if (h.span && h.span->node.valid()) {
+      h.stack = h.span->node;
+      h.stackPosition = FramePosition::NonLeaf;
+    }
   }
   return h;
 }
 
 void TimelineWidget::drawTooltip(const PanelContext& context, const Hit& hit) {
-  (void)context;
   if (!m_doc || hit.layoutIndex == kNoRow || !hit.thread.valid()) return;
   const DocState& d = *m_doc;
   const model::TraceModel& model = *d.model;
@@ -1008,41 +1018,27 @@ void TimelineWidget::drawTooltip(const PanelContext& context, const Hit& hit) {
     return;
   }
   if (!hit.inPlot) return;
-  const double nsPerPixel = d.view.span / std::max(1.0f, m_geometry.plotWidth) * 1e9 / d.clockHz;
+  TooltipInput in;
+  in.model = &model;
+  in.symbols = context.symbols;
+  in.thread = hit.thread;
+  in.ts = hit.ts;
+  in.relTimeNs = toRelative(d.limits, hit.ts) * 1e9 / d.clockHz;
+  in.nsPerPixel = d.view.span / std::max(1.0f, m_geometry.plotWidth) * 1e9 / d.clockHz;
+  in.clockHz = d.clockHz;
+  in.pending = hit.pending;
+  in.stack = hit.stack;
+  in.share = hit.share;
+  if (hit.span) {
+    in.hasSpan = true;
+    in.spanDepth = hit.span->depth;
+    in.spanNode = hit.span->node;
+    in.spanTicks = hit.span->t1 - hit.span->t0;
+    in.spanMerged = hit.span->mergedCount;
+  }
+  m_tooltip = tooltipLines(in);
   ImGui::BeginTooltip();
-  ImGui::Text("%s (tid %u)", th.name.empty() ? "(unnamed)" : th.name.c_str(), th.tid);
-  ImGui::Text(
-      "Time: %s",
-      formatTimeNs(toRelative(d.limits, hit.ts) * 1e9 / d.clockHz, std::max(nsPerPixel, 1.0)).c_str());
-  if (const model::ThreadStateInterval* s = analysis::stateAt(model, hit.thread, hit.ts)) {
-    switch (s->state) {
-      case model::ThreadState::Running: ImGui::Text("State: Running (cpu %u)", s->cpu); break;
-      case model::ThreadState::Ready: ImGui::Text("State: Ready (runnable, waiting for a cpu)"); break;
-      case model::ThreadState::Waiting: {
-        const std::string_view reason = analysis::waitReasonName(d.platform, s->wait_reason);
-        const std::string_view cat =
-            analysis::waitCategoryName(analysis::waitReasonCategory(d.platform, s->wait_reason));
-        ImGui::Text("State: Waiting - %.*s (%.*s)", static_cast<int>(reason.size()), reason.data(),
-                    static_cast<int>(cat.size()), cat.data());
-        break;
-      }
-      case model::ThreadState::Unknown: ImGui::Text("State: Unknown"); break;
-    }
-    ImGui::Text("Interval: %s", formatDurationTicks(s->end - s->start, d.clockHz).c_str());
-  }
-  if (hit.pending) {
-    ImGui::TextDisabled("Timeline index still building...");
-  } else if (hit.span) {
-    const std::string fn = hit.span->node.valid() ? describeCallstackLeaf(model, hit.span->node) : "(merged)";
-    ImGui::Text("Depth %u: %s", hit.span->depth, fn.c_str());
-    ImGui::Text("Span: %s", formatDurationTicks(hit.span->t1 - hit.span->t0, d.clockHz).c_str());
-    if (hit.span->mergedCount > 1) ImGui::Text("%u samples merged", hit.span->mergedCount);
-  } else if (hit.stack.valid()) {
-    ImGui::Text("Top function: %s (%.0f%% of samples here)", describeCallstackLeaf(model, hit.stack).c_str(),
-                static_cast<double>(hit.share) * 100.0);
-  } else {
-    ImGui::TextDisabled("No samples");
-  }
+  for (const std::string& line : m_tooltip) ImGui::TextUnformatted(line.c_str());
   ImGui::EndTooltip();
 }
 
@@ -1053,7 +1049,7 @@ void TimelineWidget::publishHover(const PanelContext& context, const Hit& hit) {
     item.kind = hit.stack.valid() ? HoveredItem::Kind::Callstack : HoveredItem::Kind::Time;
     item.thread = hit.thread;
     item.callstack = hit.stack;
-    item.function = functionKeyOf(*m_doc->model, hit.stack);
+    item.function = functionKeyForNode(*m_doc->model, context.symbols, hit.stack, hit.stackPosition);
     item.ts = hit.ts;
     context.selection->setHovered(item);
     m_hoverPublished = true;
@@ -1067,7 +1063,10 @@ void TimelineWidget::applyClick(const PanelContext& context, const Hit& hit) {
   if (!context.selection || !m_doc || !hit.thread.valid()) return;
   context.selection->setSelectedThread(hit.thread);
   if (hit.inPlot && hit.stack.valid()) {
-    context.selection->setSelectedFunction(functionKeyOf(*m_doc->model, hit.stack));
+    m_selectedNode = hit.stack;
+    m_selectedPosition = hit.stackPosition;
+    context.selection->setSelectedFunction(
+        functionKeyForNode(*m_doc->model, context.symbols, hit.stack, hit.stackPosition));
   }
 }
 
@@ -1147,6 +1146,8 @@ void TimelineWidget::handleKeys(const PanelContext& context) {
   DocState& d = *m_doc;
   const ImGuiIO& io = ImGui::GetIO();
   if (io.WantTextInput) return;
+  // Shortcuts are plain keys (Shift speeds up panning): Ctrl+P, Ctrl+F, Alt+... belong to the application.
+  if (io.KeyCtrl || io.KeyAlt || io.KeySuper) return;
   if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !m_anyHovered) return;
   if (ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return;
   const auto pressed = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };

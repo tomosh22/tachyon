@@ -98,6 +98,8 @@ PanelContext App::panelContext() const {
   c.settings = &m_settings;
   c.jobs = const_cast<JobQueue*>(&m_jobs);
   c.documentGeneration = m_documentGeneration;
+  c.symbols = m_document ? m_document->symbols().get() : nullptr;
+  c.symbolGeneration = m_symbolGeneration;
   c.redrawFn = [](void* app) { static_cast<App*>(app)->requestRedraw(); };
   c.redrawUser = const_cast<App*>(this);
   return c;
@@ -153,9 +155,52 @@ void App::notifyDocumentChanged() {
                                         : std::string("Tachyon"));
 }
 
+bool App::pumpSymbolEvents() {
+  if (!m_symbolMailbox || !m_symbolMailbox->dirty.exchange(false)) return false;
+  size_t delivered = 0;
+  {
+    const std::lock_guard<std::mutex> lock(m_symbolMailbox->mutex);
+    delivered = m_symbolMailbox->events.size();
+    m_symbolMailbox->events.clear();
+  }
+  if (delivered == 0) return false;
+  ++m_symbolGeneration;
+  requestRedraw();
+  return true;
+}
+
+void App::startSymbolResolution(Document& document) {
+  std::filesystem::path cacheDir = pathFromUtf8(m_settings.cacheDir);
+  if (cacheDir.empty()) cacheDir = defaultSymbolCacheDir();
+  auto service = std::make_shared<symbols::SymbolService>(m_settings.symbolServers, cacheDir);
+  // Developer convenience (and the test fixtures): a "<trace>.symbols.json" next to the trace is registered
+  // as the symbol file of the modules it describes, ahead of the locator.
+  std::filesystem::path sidecar = document.path();
+  sidecar.replace_extension(".symbols.json");
+  std::error_code ec;
+  if (std::filesystem::is_regular_file(sidecar, ec)) {
+    const Result<void> added = service->addSymbolFileOverride(sidecar);
+    if (!added.ok()) TACHYON_LOG_WARN("symbols: {}: {}", pathToUtf8(sidecar), added.error().toString());
+  }
+  m_symbolMailbox = std::make_shared<SymbolMailbox>();
+  document.setSymbols(service);
+  // The service reads the model's frames and modules and never writes them from a worker (Module::state is
+  // only written by waitAll(), which the viewer does not call; states are read with moduleState()).
+  auto mailbox = m_symbolMailbox;
+  service->resolveAllAsync(const_cast<model::TraceModel&>(document.model()),
+                           [mailbox](ModuleIdx module, symbols::SymbolState state) {
+                             const std::lock_guard<std::mutex> lock(mailbox->mutex);
+                             mailbox->events.emplace_back(module, state);
+                             mailbox->dirty.store(true);
+                           });
+}
+
 void App::onDocumentLoaded(std::shared_ptr<Document> document) {
+  m_symbolMailbox.reset();
   m_document = std::move(document);
   ++m_documentGeneration;
+  ++m_symbolGeneration;
+  startSymbolResolution(*m_document);
   m_lastError.clear();
   m_selection.clear();
   m_settings.addRecentFile(pathToUtf8(std::filesystem::absolute(m_document->path())));
@@ -165,8 +210,10 @@ void App::onDocumentLoaded(std::shared_ptr<Document> document) {
 
 void App::closeDocument() {
   if (!m_document) return;
-  m_document.reset();
+  m_document.reset();  // joins the symbol workers before the model can go away
+  m_symbolMailbox.reset();
   ++m_documentGeneration;
+  ++m_symbolGeneration;
   m_selection.clear();
   notifyDocumentChanged();
 }
@@ -211,6 +258,7 @@ bool App::frame(int waitMs) {
   if (events.hadInput) m_redrawFrames = std::max(m_redrawFrames, 3);
   for (const std::string& dropped : events.droppedFiles) openFile(pathFromUtf8(dropped));
   m_jobs.pump();
+  pumpSymbolEvents();
 
   applyPendingStyle();
   m_renderer->beginFrame();
@@ -236,6 +284,7 @@ int App::run() {
       // Idle: block on events instead of rendering continuously.
       const PlatformEvents events = m_renderer->pollEvents(m_options.idleTimeoutMs);
       if (events.quit) m_quit = true;
+      if (pumpSymbolEvents()) frame(0);
       if (events.hadInput || !events.droppedFiles.empty()) {
         m_redrawFrames = 3;
         for (const std::string& dropped : events.droppedFiles) openFile(pathFromUtf8(dropped));

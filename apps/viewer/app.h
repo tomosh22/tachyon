@@ -12,12 +12,23 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <iosfwd>
 #include <memory>
+#include <mutex>
 #include <string>
 
 struct ImGuiContext;
+
+namespace tachyon::viewer {
+// Module state changes reported by the symbol workers, handed to the main thread (thread-safe).
+struct SymbolMailbox {
+  std::mutex mutex;
+  std::vector<std::pair<ModuleIdx, symbols::SymbolState>> events;
+  std::atomic<bool> dirty{false};
+};
+}  // namespace tachyon::viewer
 
 namespace tachyon::viewer {
 
@@ -72,6 +83,12 @@ class App {
   // Main-thread only. Draw a few more frames even without input (PanelContext::requestRedraw).
   void requestRedraw() { m_redrawFrames = std::max(m_redrawFrames, 3); }
   uint64_t documentGeneration() const { return m_documentGeneration; }
+  // Main-thread only. Counts module-resolution events delivered so far (also bumped per document); panels see
+  // it as PanelContext::symbolGeneration.
+  uint64_t symbolGeneration() const { return m_symbolGeneration; }
+  // Main-thread only. Delivers pending symbol events from the workers: bumps the symbol generation and asks
+  // for a redraw. Called by frame() and by the idle path of run(). Returns true if anything was delivered.
+  bool pumpSymbolEvents();
   void setTheme(ThemeKind theme);
   void setUserScale(float scale);
 
@@ -80,6 +97,7 @@ class App {
   void registerCommands();
   void onDocumentLoaded(std::shared_ptr<Document> document);
   void closeDocument();
+  void startSymbolResolution(Document& document);
   void notifyDocumentChanged();
   void applyPendingStyle();
   void drawUi();
@@ -104,6 +122,8 @@ class App {
   FileBrowser m_fileBrowser;
   std::shared_ptr<Document> m_document;
   uint64_t m_documentGeneration = 0;
+  uint64_t m_symbolGeneration = 0;
+  std::shared_ptr<SymbolMailbox> m_symbolMailbox;
 
   JobQueue::JobId m_openJob = 0;
   std::string m_lastError;

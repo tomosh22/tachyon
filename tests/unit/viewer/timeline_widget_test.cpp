@@ -7,10 +7,12 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <functional>
+#include <set>
 #include <thread>
 
 using namespace tachyon;
@@ -76,6 +78,16 @@ class Harness {
       ASSERT_TRUE(until([&] { return widget().lodFinished(); }));
       frames(2);
     }
+  }
+
+  void waitSymbols() {
+    const symbols::SymbolService* svc = app.document()->symbols().get();
+    ASSERT_NE(svc, nullptr);
+    ASSERT_TRUE(until([&] {
+      const symbols::SymbolProgress p = svc->progress();
+      return p.total > 0 && p.done == p.total;
+    }));
+    frames(3);
   }
 
   float ui() const { return ImGui::GetFontSize() / 13.0f; }
@@ -308,7 +320,11 @@ TEST(TimelineWidget, ShiftDragInTheRowsSelectsToo) {
   ASSERT_TRUE(h.bus().state().timeFilter->threads.has_value());
   EXPECT_EQ(h.bus().state().timeFilter->t0, h.widget().selectionRange()->t0);
   h.widget().clearSelection(&h.bus());
-  EXPECT_FALSE(h.bus().state().timeFilter.has_value());
+  // The thread restriction from "another panel" survives; only the time range goes back to the whole trace.
+  ASSERT_TRUE(h.bus().state().timeFilter.has_value());
+  EXPECT_TRUE(h.bus().state().timeFilter->threads.has_value());
+  EXPECT_EQ(h.bus().state().timeFilter->t0, h.widget().limits().traceStart);
+  EXPECT_EQ(h.bus().state().timeFilter->t1, h.widget().limits().traceEnd);
   EXPECT_FALSE(h.widget().applySelectionAsFilter(h.bus()));
 }
 
@@ -531,4 +547,270 @@ TEST(TimelineWidget, ColorModeAndToolbarOptionsRedrawCleanly) {
   h.widget().options().showFrameMarks = false;
   h.frames(2);
   EXPECT_EQ(h.widget().frameStats().frameMarksDrawn, 0u);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// WP-42b
+
+TEST(TimelineWidget, HiddenPanelStillDropsTheOldDocument) {
+  Harness h;
+  h.open("tiny.tachyon");
+  std::weak_ptr<const model::TraceModel> oldModel = h.app.document()->sharedModel();
+  ASSERT_TRUE(h.widget().hasDocument());
+  h.app.panels().find(ThreadsTimelinePanel::kName)->open = false;  // never drawn again
+  h.frames(2);
+  h.app.openFile(fixture("medium.tachyon"));
+  ASSERT_TRUE(
+      h.until([&] { return h.app.document() && h.app.document()->path().filename() == "medium.tachyon"; }));
+  // Reset by onDocumentChanged although draw() did not run: no model, LOD or build job kept alive.
+  EXPECT_FALSE(h.widget().hasDocument());
+  ASSERT_TRUE(h.until([&] { return oldModel.expired(); })) << "the old model is still referenced";
+  ASSERT_TRUE(h.until([&] { return h.app.jobs().activeCount() == 0; }));
+}
+
+TEST(TimelineWidget, ShortcutsIgnoreCtrlAndAlt) {
+  Harness h;
+  h.open("medium.tachyon");
+  h.mouse(h.plotCenterX(), h.bandY());
+  h.key(ImGuiKey_DownArrow);  // selects the first row
+  const ThreadIdx t = h.bus().state().selectedThread;
+  ASSERT_TRUE(t.valid());
+  const TimeView before = h.widget().view();
+  const TimeLimits& l = h.widget().limits();
+  h.widget().setSelectionRange(TickRange{l.traceStart + 100, l.traceStart + 900});
+
+  ImGuiIO& io = ImGui::GetIO();
+  io.AddKeyEvent(ImGuiMod_Ctrl, true);
+  h.frames(1);
+  for (const ImGuiKey k :
+       {ImGuiKey_P, ImGuiKey_E, ImGuiKey_F, ImGuiKey_Z, ImGuiKey_S, ImGuiKey_W, ImGuiKey_A, ImGuiKey_D,
+        ImGuiKey_Home, ImGuiKey_DownArrow, ImGuiKey_UpArrow, ImGuiKey_Escape}) {
+    h.key(k);
+  }
+  io.AddKeyEvent(ImGuiMod_Ctrl, false);
+  io.AddKeyEvent(ImGuiMod_Alt, true);
+  h.frames(1);
+  for (const ImGuiKey k : {ImGuiKey_P, ImGuiKey_E, ImGuiKey_F, ImGuiKey_Z, ImGuiKey_D, ImGuiKey_LeftArrow}) {
+    h.key(k);
+  }
+  io.AddKeyEvent(ImGuiMod_Alt, false);
+  h.frames(1);
+
+  EXPECT_FALSE(h.widget().flagsOf(t).pinned);
+  EXPECT_FALSE(h.widget().flagsOf(t).expanded);
+  EXPECT_FALSE(h.bus().state().timeFilter.has_value());
+  EXPECT_TRUE(h.widget().selectionRange().has_value());  // Ctrl+Esc did not clear it
+  EXPECT_EQ(h.bus().state().selectedThread, t);
+  EXPECT_EQ(h.widget().view(), before);
+
+  // The same keys without modifiers work.
+  h.key(ImGuiKey_P);
+  EXPECT_TRUE(h.widget().flagsOf(t).pinned);
+  h.key(ImGuiKey_F);
+  EXPECT_TRUE(h.bus().state().timeFilter.has_value());
+}
+
+TEST(TimelineWidget, EscClearsOnlyTheRangeTheTimelineSet) {
+  Harness h;
+  h.open("tiny.tachyon");
+  const TimeLimits& l = h.widget().limits();
+  h.mouse(h.plotCenterX(), h.bandY());
+
+  // Another panel restricts the threads; the timeline applies its range on top and Esc removes just the
+  // range.
+  ViewFilter other;
+  other.t0 = l.traceStart;
+  other.t1 = l.traceEnd;
+  other.threads = std::vector<ThreadIdx>{ThreadIdx(0)};
+  other.function = FunctionIdx(3);
+  h.bus().setTimeFilter(other);
+  h.widget().setSelectionRange(TickRange{l.traceStart + 10, l.traceStart + 500});
+  h.key(ImGuiKey_F);
+  ASSERT_TRUE(h.bus().state().timeFilter.has_value());
+  EXPECT_EQ(h.bus().state().timeFilter->t0, l.traceStart + 10);
+  EXPECT_EQ(h.bus().state().timeFilter->function, other.function);
+  h.key(ImGuiKey_Escape);
+  ASSERT_TRUE(h.bus().state().timeFilter.has_value());
+  EXPECT_EQ(h.bus().state().timeFilter->threads, other.threads);
+  EXPECT_EQ(h.bus().state().timeFilter->function, other.function);
+  EXPECT_EQ(h.bus().state().timeFilter->t0, l.traceStart);
+  EXPECT_EQ(h.bus().state().timeFilter->t1, l.traceEnd);
+  EXPECT_FALSE(h.widget().selectionRange().has_value());
+
+  // A filter the timeline never applied is not touched by Esc.
+  ViewFilter foreign;
+  foreign.t0 = l.traceStart + 5;
+  foreign.t1 = l.traceStart + 50;
+  h.bus().setTimeFilter(foreign);
+  h.key(ImGuiKey_Escape);
+  ASSERT_TRUE(h.bus().state().timeFilter.has_value());
+  EXPECT_EQ(*h.bus().state().timeFilter, foreign);
+
+  // Without other restrictions Esc removes the filter completely, as before.
+  h.bus().setTimeFilter(std::nullopt);
+  h.widget().setSelectionRange(TickRange{l.traceStart + 10, l.traceStart + 500});
+  h.key(ImGuiKey_F);
+  EXPECT_TRUE(h.bus().state().timeFilter.has_value());
+  h.key(ImGuiKey_Escape);
+  EXPECT_FALSE(h.bus().state().timeFilter.has_value());
+}
+
+TEST(TimelineWidget, FrameNumberLabelsAreTheModelsFrameNumbers) {
+  Harness h;
+  h.open("frames.tachyon");
+  const auto& marks = h.app.document()->model().frameMarks;
+  ASSERT_GT(marks.size(), 10u);
+  std::set<uint64_t> numbers;
+  for (const auto& m : marks) numbers.insert(m.frame_number);
+
+  h.frames(1);
+  const auto fitLabels = h.widget().lastFrameLabels();
+  ASSERT_FALSE(fitLabels.empty());
+  for (size_t i = 0; i < fitLabels.size(); ++i) {
+    EXPECT_TRUE(numbers.count(fitLabels[i])) << fitLabels[i];
+  }
+
+  // A window around exactly one mark shows exactly that number.
+  std::vector<model::FrameMark> sorted(marks.begin(), marks.end());
+  std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.ts < b.ts; });
+  const model::FrameMark& mid = sorted[sorted.size() / 2];
+  const model::FrameMark& next = sorted[sorted.size() / 2 + 1];
+  const TimeLimits& l = h.widget().limits();
+  const double gap = static_cast<double>(next.ts - mid.ts);
+  ASSERT_GT(gap, 0.0);
+  h.widget().setView({toRelative(l, mid.ts) - gap * 0.25, gap * 0.5});
+  h.frames(2);
+  ASSERT_EQ(h.widget().lastFrameLabels().size(), 1u);
+  EXPECT_EQ(h.widget().lastFrameLabels()[0], mid.frame_number);
+}
+
+TEST(TimelineWidget, TooltipShowsTimeStateAndTopFunction) {
+  Harness h;
+  h.open("medium.tachyon");
+  h.waitSymbols();
+  h.mouse(h.plotCenterX(), h.stripY());
+  h.frames(2);
+  const auto& lines = h.widget().lastTooltip();
+  ASSERT_FALSE(lines.empty());
+  const auto has = [&](const char* prefix) {
+    return std::any_of(lines.begin(), lines.end(),
+                       [&](const std::string& l) { return l.rfind(prefix, 0) == 0; });
+  };
+  EXPECT_TRUE(has("Time: "));
+  EXPECT_TRUE(has("State: "));
+  EXPECT_TRUE(has("Interval: "));
+  ASSERT_TRUE(has("Top function: ")) << "no sampled column under the cursor";
+  for (const std::string& l : lines) {
+    if (l.rfind("Top function: ", 0) == 0) {
+      EXPECT_NE(l.find('!'), std::string::npos) << l;
+      EXPECT_EQ(l.find("!0x"), std::string::npos) << "resolved symbol names expected: " << l;
+    }
+  }
+  // Leaving the rows removes it.
+  h.mouse(h.plotCenterX(), h.widget().screenGeometry().headerY0 - 30.0f);
+  h.frames(1);
+  EXPECT_TRUE(h.widget().lastTooltip().empty());
+}
+
+TEST(TimelineWidget, RunningTimeOrderStaysInTraceOrderUntilTheSummariesAreReady) {
+  Harness h(/*deferBuild=*/true);
+  h.open("medium.tachyon", /*waitForLod=*/false);
+  h.frames(3);
+  const auto& m = h.app.document()->model();
+  std::vector<uint32_t> natural(m.threads.size());
+  for (uint32_t i = 0; i < natural.size(); ++i) natural[i] = i;
+  const auto idsOf = [&] {
+    std::vector<uint32_t> v;
+    for (const ThreadIdx t : h.widget().rowOrder()) v.push_back(t.get());
+    return v;
+  };
+  EXPECT_EQ(idsOf(), natural) << "no jumping while the summaries are pending";
+
+  h.widget().options().deferLodBuild = false;
+  ASSERT_TRUE(h.until([&] { return h.widget().lodFinished(); }));
+  h.frames(3);
+  const auto sorted = idsOf();
+  EXPECT_NE(sorted, natural);
+  EXPECT_EQ(std::set<uint32_t>(sorted.begin(), sorted.end()).size(), natural.size());
+}
+
+TEST(TimelineWidget, SortKeysIndependentOfTheBuildDoNotReorderWhenItFinishes) {
+  Harness h(/*deferBuild=*/true);
+  h.widget().options().sortKey = SortKey::SampleCount;
+  h.open("medium.tachyon", /*waitForLod=*/false);
+  h.frames(3);
+  const std::vector<ThreadIdx> before = h.widget().rowOrder();
+  h.widget().options().deferLodBuild = false;
+  ASSERT_TRUE(h.until([&] { return h.widget().lodFinished(); }));
+  h.frames(3);
+  EXPECT_EQ(h.widget().rowOrder(), before);
+}
+
+TEST(TimelineWidget, SymbolsResolveAfterOpenAndRedrawTheRows) {
+  Harness h;
+  const uint64_t genBefore = h.app.symbolGeneration();
+  h.open("medium.tachyon");
+  h.waitSymbols();
+  EXPECT_GT(h.app.symbolGeneration(), genBefore);
+  const symbols::SymbolService* svc = h.app.document()->symbols().get();
+  const symbols::SymbolProgress p = svc->progress();
+  EXPECT_EQ(p.done, p.total);
+  size_t resolved = 0;
+  for (size_t m = 0; m < h.app.document()->model().modules.size(); ++m) {
+    if (svc->moduleState(ModuleIdx(static_cast<uint32_t>(m))) == model::SymbolState::Resolved) ++resolved;
+  }
+  EXPECT_GT(resolved, 0u) << "the sidecar medium.symbols.json is registered by App";
+
+  // Clicking a sampled column selects the RESOLVED function key of the frame under the cursor.
+  const TimelineScreenGeometry g = h.widget().screenGeometry();
+  bool selected = false;
+  for (float f = 0.1f; f < 0.95f && !selected; f += 0.05f) {
+    h.mouse(g.plotX0 + g.plotWidth * f, h.stripY());
+    const HoveredItem hovered = h.bus().state().hovered;
+    h.button(0, true);
+    h.button(0, false);
+    if (!h.bus().state().selectedFunction) continue;
+    selected = true;
+    const model::TraceModel& m = h.app.document()->model();
+    const FrameIdx frame = m.nodes[hovered.callstack.get()].frame;
+    EXPECT_EQ(*h.bus().state().selectedFunction, symbols::functionKeyFor(*svc, frame));
+    const symbols::ResolvedAddress& r = svc->lookup(frame);
+    if (r.resolved) EXPECT_EQ(h.bus().state().selectedFunction->value, r.functionStartRva);
+  }
+  EXPECT_TRUE(selected);
+}
+
+TEST(TimelineWidget, RowCachesAreKeyedBySymbolGeneration) {
+  Harness h;
+  h.open("tiny.tachyon");
+  h.waitSymbols();
+  // Drive the widget by hand so the symbol generation can be changed deterministically.
+  TimelineWidget widget;
+  widget.options().buildInline = true;
+  PanelContext ctx;
+  ctx.document = h.app.document().get();
+  ctx.documentGeneration = 77;
+  ctx.symbols = ctx.document->symbols().get();
+  ctx.symbolGeneration = 1;
+  const auto frame = [&] {
+    ImGuiIO& io = ImGui::GetIO();
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(1200, 600));
+    ImGui::Begin("manual");
+    widget.draw(ctx);
+    ImGui::End();
+    ImGui::Render();
+  };
+  frame();
+  frame();
+  EXPECT_GT(widget.frameStats().rowsDrawn, 0u);
+  frame();
+  EXPECT_EQ(widget.frameStats().bandQueries, 0u) << "unchanged frames reuse the row caches";
+  ctx.symbolGeneration = 2;  // a module resolved
+  frame();
+  EXPECT_EQ(widget.frameStats().bandQueries, widget.frameStats().rowsDrawn);
+  frame();
+  EXPECT_EQ(widget.frameStats().bandQueries, 0u);
 }

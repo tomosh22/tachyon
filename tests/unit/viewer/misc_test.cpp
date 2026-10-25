@@ -2,9 +2,13 @@
 #include "viewer/cli_args.h"
 #include "viewer/command_registry.h"
 #include "viewer/file_browser.h"
+#include "viewer/paths.h"
+#include "viewer/settings.h"
 #include "viewer/theme.h"
 
 #include <gtest/gtest.h>
+
+#include <map>
 
 #include <fstream>
 
@@ -83,4 +87,23 @@ TEST(Theme, EffectiveScaleIsClamped) {
   EXPECT_FLOAT_EQ(effectiveUiScale(2.0f, 1.5f), 3.0f);
   EXPECT_FLOAT_EQ(effectiveUiScale(4.0f, 4.0f), Settings::kMaxUiScale);
   EXPECT_FLOAT_EQ(effectiveUiScale(0.1f, 0.1f), Settings::kMinUiScale);
+}
+
+TEST(ViewerPaths, SymbolCacheDirFollowsPlatformConventions) {
+  const auto env = [](std::map<std::string, std::string> vars) {
+    return [vars](const char* name) {
+      const auto it = vars.find(name);
+      return it == vars.end() ? std::string() : it->second;
+    };
+  };
+  EXPECT_EQ(symbolCacheDirFromEnv(env({{"XDG_CACHE_HOME", "/x"}, {"HOME", "/h"}}), false),
+            std::filesystem::path("/x/tachyon/symbols"));
+  EXPECT_EQ(symbolCacheDirFromEnv(env({{"HOME", "/h"}}), false),
+            std::filesystem::path("/h/.cache/tachyon/symbols"));
+  EXPECT_EQ(symbolCacheDirFromEnv(env({{"LOCALAPPDATA", "C:/L"}}), true),
+            std::filesystem::path("C:/L/Tachyon/symbols"));
+  EXPECT_TRUE(symbolCacheDirFromEnv(env({}), false).empty());
+  EXPECT_TRUE(symbolCacheDirFromEnv(env({}), true).empty());
+  // No symbol servers unless configured.
+  EXPECT_TRUE(Settings{}.symbolServers.empty());
 }
