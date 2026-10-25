@@ -15,7 +15,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-10 | Agent skeleton and control protocol | A | merged (CI green incl. windows named-pipe tests; Windows console checks queued) | wp/10-agent | 2026-10-25 |
 | WP-11 | ETW session controller | A | needs Windows verification (merged; 11 real ETW tests passed on elevated CI runner; 30 s dev-box run pending) | wp/11-etw-session | 2026-10-25 |
 | WP-12 | ETL to `.tachyon` converter | A | needs Windows verification (merged; CI windows job converted a real ETL; hot_a/b/c ranking and 2 GB timing unconfirmed) | wp/12-etlconvert | 2026-10-25 |
-| WP-13 | Launch, attach, process tree, CLI | A | in review (CI green incl. Windows launch acceptance) | wp/13-launch-cli | 2026-10-25 |
+| WP-13 | Launch, attach, process tree, CLI | A | merged; needs Windows verification (20 s dev-box run) | wp/13-launch-cli | 2026-10-25 |
+| WP-13b | CLI --json errors, pid-reuse targets, attach-exit, resume, circular child following | A | in progress | wp/13b-cli-fixes | 2026-10-25 |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | merged (oracle 0/929 mismatches; cold resolve 11.5 ms, memo 2.2 ns on CI) | wp/20-symbol-core | 2026-10-25 |
 | WP-21 | Symbol locator and HTTP client | B | merged (CI green incl. msdl.microsoft.com ntdll.pdb fetch) | wp/21-symbol-locator | 2026-10-25 |
@@ -101,6 +102,11 @@ Merged because the WP-36 per-query criterion is met and correctness probes (rand
 Verifier FAIL on the first commit (HTTP two-tier servers not handled), plus security hardening; all fixed in 05df6da: index2.txt probed once per server; remote `file.ptr` PATH followed only under configured roots (never UNC); 4 KiB file.ptr cap and a 2 GiB default download cap; curl protocols limited to http/https; percent-encoded URL components; WinHTTP truncated-body and timeout handling. Windows CI fetched ntdll.pdb from msdl.microsoft.com. Follow-ups: nothing calls `unpin()` yet (WP-22 or SymbolService should when providers close); the PDB name falls back to `<image stem>.pdb` because Module/ModuleRec has no PDB name field (proposal pending: carry the RSDS pdb file name).
 
 ## Windows / privileged verification queue
+
+WP-13 (CI on the elevated windows-2022 runner already ran the 3 s launch acceptance test and the attach/child-following tests). On a dev box, in an elevated prompt:
+1. `tachyon-agent --backend etw --pipe \\.\pipe\tachyon-agent`
+2. `tachyon-cli capture --launch tachyon-testbed.exe --args "--scenario spin --duration 20" --out spin.tachyon`
+Expect exit 0 and events_lost 0. Then `ctest --preset windows-release -R CaptureLaunchTestbedSpin -V` and send build/launch_cli_summary.txt (sample counts, first ntdll vs first exe sample offset).
 
 Commands for the user to run on a Windows (or privileged Linux) machine are listed here per WP once the code is merged.
 
