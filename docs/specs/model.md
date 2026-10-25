@@ -22,3 +22,12 @@ struct TraceModel {
 };
 ```
 Memory budget: resident size ≤ 3× the compressed `.tachyon` size for a 10-minute 8 kHz capture. Callstack node = 8 bytes. Sample = 16 bytes in memory (per-thread `SampleColumns`; tid implicit) and 20 bytes on disk (3.1 SoA columns). [Corrected 2026-10-25 by orchestrator; was "18 bytes", which matched neither layout.]
+
+## Orchestrator clarifications (binding; merged with WP-30, 2026-10-25)
+Header: `libs/model/model.h` (`tachyon::model`), now orchestrator-owned.
+- Additional types: `ModuleId` (layout from 3.6; lives here because libs/symbols depends on model), `SymbolState {Pending, Loading, Resolved, NotFound, Failed}`, `ThreadRole {Unknown, Main, Render, Worker, Other}` (name heuristic), `Process`, `FiberSwitch`, `FrameMark`, `Marker`, `PlotSeries` (SoA), `CaptureInfo`, `LoadOptions {threads, const std::atomic<bool>* cancel}`.
+- Additional TraceModel members: `isPartial`, `captureInfo`, raw `contextSwitches`, `readyEvents`, `scopeEvents`, `clockCalibrations` (as loaded, sorted by ts), `residentBytes()`.
+- `statesByThread` and `scopesByThread` are sized to the thread count and filled by WP-31 and WP-53.
+- `TraceModel::load(path, LoadOptions, progress)`. Progress is invoked only on the calling thread. Loading is deterministic for any worker count.
+- tid 0 on events means "no thread" (invalid ThreadIdx). The latest ThreadNames record by ts sets `Thread::name`. Duplicate ThreadRecs are kept, and `tidToThread` maps to the first.
+- Memory: 16 B/sample for sample columns; the "≤ 3× compressed" budget is under user review (synthetic fixtures compress 8:1 and measure 6.95–7.33×).
