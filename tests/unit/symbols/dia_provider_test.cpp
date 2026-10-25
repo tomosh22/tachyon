@@ -2,12 +2,14 @@
 // PDB identity conversion and the SymbolService factory. The msdia140-backed session is tested on Windows
 // (tests/windows/symbols/dia_provider_test.cpp).
 #include "symbols/dia/dia_provider.h"
+#include "core/platform.h"
 #include "symbols/dia/dia_errors.h"
 #include "symbols/dia/msvc_undecorate.h"
 #include "trace/trace_format.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <thread>
 
@@ -300,7 +302,7 @@ TEST(DiaErrors, MapsMissingAndMismatchingPdbsToNotFound) {
   EXPECT_NE(mapDiaLoadError(kEPdbInvalidAge, "a.pdb").message.find("age"), std::string::npos);
   const Error e = mapDiaLoadError(kEPdbNotFound, "dir/a.pdb");
   EXPECT_NE(e.message.find("a.pdb"), std::string::npos);
-  EXPECT_NE(e.message.find("0x806D0004"), std::string::npos);
+  EXPECT_NE(e.message.find("0x806D0005"), std::string::npos);
 }
 
 TEST(DiaErrors, MapsOtherFailures) {

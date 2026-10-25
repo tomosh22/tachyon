@@ -69,7 +69,8 @@ class ComPtr {
   T* m_p = nullptr;
 };
 
-// COM apartment for the duration of one call (calls arrive from SymbolService worker threads).
+// COM apartment of the calling thread, entered on first use and left when the thread exits (calls arrive from
+// SymbolService worker threads; initializing per call would dominate the cost of a lookup).
 class ComScope {
  public:
   ComScope() : m_hr(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {}
@@ -82,6 +83,11 @@ class ComScope {
  private:
   HRESULT m_hr;
 };
+
+void ensureComInitialized() {
+  thread_local ComScope scope;
+  (void)scope;
+}
 
 std::string wideToUtf8(const wchar_t* w, size_t len) {
   if (w == nullptr || len == 0) return {};
@@ -178,7 +184,7 @@ class ComSession final : public IDiaSymbolSession {
 
   std::optional<DiaRawFunction> findFunction(uint64_t rva) override {
     if (rva > std::numeric_limits<DWORD>::max()) return std::nullopt;
-    ComScope com;
+    ensureComInitialized();
     const DWORD rva32 = static_cast<DWORD>(rva);
     ComPtr<IDiaSymbol> sym;
     if (m_session->findSymbolByRVA(rva32, SymTagFunction, sym.put()) == S_OK && sym) {
@@ -219,7 +225,7 @@ class ComSession final : public IDiaSymbolSession {
 
   std::optional<DiaRawLine> findLine(uint64_t rva) override {
     if (rva > std::numeric_limits<DWORD>::max()) return std::nullopt;
-    ComScope com;
+    ensureComInitialized();
     ComPtr<IDiaEnumLineNumbers> lines;
     if (m_session->findLinesByRVA(static_cast<DWORD>(rva), 1, lines.put()) != S_OK || !lines) {
       return std::nullopt;
@@ -233,7 +239,7 @@ class ComSession final : public IDiaSymbolSession {
   std::vector<DiaRawInline> findInlines(const DiaRawFunction& function, uint64_t rva) override {
     std::vector<DiaRawInline> out;
     if (rva > std::numeric_limits<DWORD>::max()) return out;
-    ComScope com;
+    ensureComInitialized();
     const DWORD rva32 = static_cast<DWORD>(rva);
     if (!m_lastFunction || m_lastFunctionStart != function.startRva) {
       m_lastFunction.reset();
@@ -274,7 +280,7 @@ class ComSession final : public IDiaSymbolSession {
   Result<std::vector<DiaRawLine>> findLines(uint64_t rva, uint64_t size) override {
     std::vector<DiaRawLine> out;
     if (rva > std::numeric_limits<DWORD>::max() || size > std::numeric_limits<DWORD>::max()) return out;
-    ComScope com;
+    ensureComInitialized();
     ComPtr<IDiaEnumLineNumbers> lines;
     const HRESULT hr =
         m_session->findLinesByRVA(static_cast<DWORD>(rva), static_cast<DWORD>(size), lines.put());
@@ -307,7 +313,7 @@ class ComOpener final : public IDiaSessionOpener {
     if (!std::filesystem::exists(pdbFile, ec)) {
       return mapDiaLoadError(dia_hr::kEPdbNotFound, pdbFile);
     }
-    ComScope com;
+    ensureComInitialized();
     ComPtr<IDiaDataSource> source;
     HRESULT hr = m_lib->createDataSource(source);
     if (FAILED(hr)) return mapDiaLoadError(static_cast<uint32_t>(hr), pdbFile);

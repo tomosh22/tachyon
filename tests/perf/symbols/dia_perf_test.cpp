@@ -19,6 +19,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -40,6 +41,66 @@ constexpr double kBudgetSeconds = 20.0;
 double secondsSince(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
+
+// Decorator that times each backend call, to show where the time goes.
+struct CallStats {
+  std::atomic<uint64_t> findFunctionNs{0}, findLineNs{0}, findInlinesNs{0}, findLinesNs{0};
+  std::atomic<uint64_t> findFunctionN{0}, findLineN{0}, findInlinesN{0}, findLinesN{0};
+};
+
+class TimingSession final : public IDiaSymbolSession {
+ public:
+  TimingSession(std::unique_ptr<IDiaSymbolSession> inner, CallStats& stats)
+      : m_inner(std::move(inner)), m_stats(stats) {}
+  std::optional<DiaRawFunction> findFunction(uint64_t rva) override {
+    Timer t(m_stats.findFunctionNs, m_stats.findFunctionN);
+    return m_inner->findFunction(rva);
+  }
+  std::optional<DiaRawLine> findLine(uint64_t rva) override {
+    Timer t(m_stats.findLineNs, m_stats.findLineN);
+    return m_inner->findLine(rva);
+  }
+  std::vector<DiaRawInline> findInlines(const DiaRawFunction& f, uint64_t rva) override {
+    Timer t(m_stats.findInlinesNs, m_stats.findInlinesN);
+    return m_inner->findInlines(f, rva);
+  }
+  Result<std::vector<DiaRawLine>> findLines(uint64_t rva, uint64_t size) override {
+    Timer t(m_stats.findLinesNs, m_stats.findLinesN);
+    return m_inner->findLines(rva, size);
+  }
+
+ private:
+  struct Timer {
+    Timer(std::atomic<uint64_t>& ns, std::atomic<uint64_t>& n)
+        : m_ns(ns), m_t0(std::chrono::steady_clock::now()) {
+      ++n;
+    }
+    ~Timer() {
+      m_ns += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_t0)
+              .count());
+    }
+    std::atomic<uint64_t>& m_ns;
+    std::chrono::steady_clock::time_point m_t0;
+  };
+  std::unique_ptr<IDiaSymbolSession> m_inner;
+  CallStats& m_stats;
+};
+
+class TimingOpener final : public IDiaSessionOpener {
+ public:
+  TimingOpener(std::shared_ptr<IDiaSessionOpener> inner, CallStats& stats)
+      : m_inner(std::move(inner)), m_stats(stats) {}
+  Result<std::unique_ptr<IDiaSymbolSession>> open(const model::Module& module, const fs::path& pdb) override {
+    auto r = m_inner->open(module, pdb);
+    if (!r.ok()) return r.error();
+    return std::unique_ptr<IDiaSymbolSession>(std::make_unique<TimingSession>(std::move(r).value(), m_stats));
+  }
+
+ private:
+  std::shared_ptr<IDiaSessionOpener> m_inner;
+  CallStats& m_stats;
+};
 
 struct PerfModule {
   std::string name;
@@ -83,8 +144,10 @@ bool prepare(PerfModule& pm, SymbolLocator* locator, std::string& why) {
 
 TEST(DiaPerf, ResolveOneMillionRvasWarmCache) {
   std::string err;
-  auto opener = makeComDiaOpener(&err);
-  ASSERT_NE(opener, nullptr) << err;
+  auto realOpener = makeComDiaOpener(&err);
+  ASSERT_NE(realOpener, nullptr) << err;
+  CallStats stats;
+  auto opener = std::make_shared<TimingOpener>(realOpener, stats);
 
   const fs::path binaryDir(TACHYON_BINARY_DIR);
   const fs::path cache = binaryDir / "dia_perf_symcache";
@@ -178,6 +241,16 @@ TEST(DiaPerf, ResolveOneMillionRvasWarmCache) {
   std::snprintf(buf, sizeof(buf), ")\n[dia perf] session function lookups (function-cache misses): %llu\n",
                 static_cast<unsigned long long>(lookups));
   summary += buf;
+  const auto line = [&](const char* name, const std::atomic<uint64_t>& ns, const std::atomic<uint64_t>& n) {
+    std::snprintf(buf, sizeof(buf), "[dia perf] backend %-12s %9llu calls, %8.3f s total, %8.2f us/call\n",
+                  name, static_cast<unsigned long long>(n.load()), static_cast<double>(ns.load()) * 1e-9,
+                  n.load() ? static_cast<double>(ns.load()) * 1e-3 / static_cast<double>(n.load()) : 0.0);
+    summary += buf;
+  };
+  line("findFunction", stats.findFunctionNs, stats.findFunctionN);
+  line("findLine", stats.findLineNs, stats.findLineN);
+  line("findInlines", stats.findInlinesNs, stats.findInlinesN);
+  line("findLines", stats.findLinesNs, stats.findLinesN);
   std::printf("%s", summary.c_str());
   std::fflush(stdout);
   {

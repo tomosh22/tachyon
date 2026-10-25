@@ -11,26 +11,27 @@
 
 namespace tachyon::symbols {
 
-// HRESULTs of the E_PDB_* family (cvconst.h / DIA SDK) and the Win32 ones DIA forwards.
+// HRESULTs of the E_PDB_* family (E_PDB_OK = 0x806D0001, so E_PDB_FORMAT = 0x806D000C; verified against
+// msdia140 on the CI runner) and the Win32 ones DIA forwards.
 namespace dia_hr {
-inline constexpr uint32_t kEPdbUsage = 0x806D0001u;
-inline constexpr uint32_t kEPdbOutOfMemory = 0x806D0002u;
-inline constexpr uint32_t kEPdbFileSystem = 0x806D0003u;
-inline constexpr uint32_t kEPdbNotFound = 0x806D0004u;
-inline constexpr uint32_t kEPdbInvalidSig = 0x806D0005u;
-inline constexpr uint32_t kEPdbInvalidAge = 0x806D0006u;
-inline constexpr uint32_t kEPdbNotImplemented = 0x806D0009u;
-inline constexpr uint32_t kEPdbV1Pdb = 0x806D000Au;
-inline constexpr uint32_t kEPdbFormat = 0x806D000Bu;
-inline constexpr uint32_t kEPdbLimit = 0x806D000Cu;
-inline constexpr uint32_t kEPdbCorrupt = 0x806D000Du;
-inline constexpr uint32_t kEPdbTi16 = 0x806D000Eu;
-inline constexpr uint32_t kEPdbAccessDenied = 0x806D000Fu;
-inline constexpr uint32_t kEPdbInvalidExecutable = 0x806D0011u;
-inline constexpr uint32_t kEPdbDbgNotFound = 0x806D0012u;
-inline constexpr uint32_t kEPdbNoDebugInfo = 0x806D0013u;
-inline constexpr uint32_t kEPdbInvalidExeTimestamp = 0x806D0014u;
-inline constexpr uint32_t kEPdbDebugInfoNotInPdb = 0x806D0016u;
+inline constexpr uint32_t kEPdbUsage = 0x806D0002u;
+inline constexpr uint32_t kEPdbOutOfMemory = 0x806D0003u;
+inline constexpr uint32_t kEPdbFileSystem = 0x806D0004u;
+inline constexpr uint32_t kEPdbNotFound = 0x806D0005u;
+inline constexpr uint32_t kEPdbInvalidSig = 0x806D0006u;
+inline constexpr uint32_t kEPdbInvalidAge = 0x806D0007u;
+inline constexpr uint32_t kEPdbNotImplemented = 0x806D000Au;
+inline constexpr uint32_t kEPdbV1Pdb = 0x806D000Bu;
+inline constexpr uint32_t kEPdbFormat = 0x806D000Cu;
+inline constexpr uint32_t kEPdbLimit = 0x806D000Du;
+inline constexpr uint32_t kEPdbCorrupt = 0x806D000Eu;
+inline constexpr uint32_t kEPdbTi16 = 0x806D000Fu;
+inline constexpr uint32_t kEPdbAccessDenied = 0x806D0010u;
+inline constexpr uint32_t kEPdbInvalidExecutable = 0x806D0012u;
+inline constexpr uint32_t kEPdbDbgNotFound = 0x806D0013u;
+inline constexpr uint32_t kEPdbNoDebugInfo = 0x806D0014u;
+inline constexpr uint32_t kEPdbInvalidExeTimestamp = 0x806D0015u;
+inline constexpr uint32_t kEPdbDebugInfoNotInPdb = 0x806D0017u;
 inline constexpr uint32_t kEAccessDenied = 0x80070005u;
 inline constexpr uint32_t kEOutOfMemory = 0x8007000Eu;
 inline constexpr uint32_t kEInvalidArg = 0x80070057u;

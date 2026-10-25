@@ -90,12 +90,31 @@ class DiaWindows : public ::testing::Test {
     auto r = m_provider->load(m_tb.module, m_tb.pdb);
     ASSERT_TRUE(r.ok()) << r.error().toString();
     // Function start rva by name, from the exception directory.
+    size_t unresolved = 0;
+    size_t shifted = 0;
     for (const auto& range : m_tb.ranges) {
       const ResolvedAddress a = m_provider->resolve(range.beginRva);
-      if (a.resolved && a.functionStartRva == range.beginRva) {
-        m_byName.emplace(std::string(m_strings.get(a.function)), range);
+      if (!a.resolved) {
+        ++unresolved;
+        continue;
       }
+      const std::string name(m_strings.get(a.function));
+      if (a.functionStartRva != range.beginRva) {
+        ++shifted;
+        if (name.find("hot") != std::string::npos || name.find("inline") != std::string::npos) {
+          std::printf("[dia] pdata begin %x resolves to %s starting at %llx\n", range.beginRva, name.c_str(),
+                      static_cast<unsigned long long>(a.functionStartRva));
+        }
+        continue;
+      }
+      if (name.find("hot") != std::string::npos || name.find("inline") != std::string::npos ||
+          name.find("spin") != std::string::npos) {
+        std::printf("[dia] pdata function %x..%x = %s\n", range.beginRva, range.endRva, name.c_str());
+      }
+      m_byName.emplace(name, range);
     }
+    std::printf("[dia] %zu pdata functions: %zu named, %zu unresolved, %zu with a different start\n",
+                m_tb.ranges.size(), m_byName.size(), unresolved, shifted);
   }
 
   SymbolStringTable m_strings;
@@ -134,6 +153,7 @@ TEST_F(DiaWindows, InlineScenarioYieldsInlineChains) {
   ASSERT_NE(it, m_byName.end());
   std::set<std::string> innermost;
   size_t withInlines = 0;
+  std::map<std::string, size_t> chains;
   for (uint64_t rva = it->second.beginRva; rva < it->second.endRva; ++rva) {
     const ResolvedAddress a = m_provider->resolve(rva);
     ASSERT_TRUE(a.resolved);
@@ -141,6 +161,11 @@ TEST_F(DiaWindows, InlineScenarioYieldsInlineChains) {
     if (a.inlines.empty()) continue;
     ++withInlines;
     innermost.insert(std::string(m_strings.get(a.inlines.front().function)));
+    std::string chain;
+    for (const InlineFrame& f : a.inlines) {
+      chain += std::string(m_strings.get(f.function)) + ":" + std::to_string(f.line) + " < ";
+    }
+    ++chains[chain];
     for (const InlineFrame& f : a.inlines) {
       EXPECT_FALSE(m_strings.get(f.function).empty());
     }
@@ -154,6 +179,7 @@ TEST_F(DiaWindows, InlineScenarioYieldsInlineChains) {
   EXPECT_TRUE(has("inline_b"));
   EXPECT_TRUE(has("inline_c"));
   for (const std::string& n : innermost) std::printf("[dia] inline_hot_loop inlinee: %s\n", n.c_str());
+  for (const auto& [chain, count] : chains) std::printf("[dia] chain x%zu: %s\n", count, chain.c_str());
 }
 
 TEST_F(DiaWindows, FunctionBoundsMatchTheExceptionDirectory) {
