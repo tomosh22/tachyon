@@ -11,3 +11,13 @@ if(WIN32 AND TACHYON_ENABLE_DIA)
     tachyon_copy_dia_dll(dia_perf_tests)
   endif()
 endif()
+
+# DWARF provider perf budget (WP-72): Linux + libdw, resolves RVAs of the testbed and libc.
+if(TACHYON_ENABLE_LIBDW)
+  tachyon_add_perf_test(dwarf_perf_tests SOURCES dwarf_perf_test.cpp
+    DEPS tachyon::symbols tachyon::model tachyon::trace)
+  if(TARGET dwarf_perf_tests)
+    target_compile_definitions(dwarf_perf_tests PRIVATE TACHYON_TESTBED_EXE="$<TARGET_FILE:tachyon-testbed>")
+    add_dependencies(dwarf_perf_tests tachyon-testbed)
+  endif()
+endif()
