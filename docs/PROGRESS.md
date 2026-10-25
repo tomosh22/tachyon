@@ -25,7 +25,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
 | WP-32 | Attribution and aggregation | C | merged | wp/32-attribution | 2026-10-25 |
 | WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | merged | wp/32b-return-address | 2026-10-25 |
-| WP-33 | Filters, cancellation, query cache | C | not started | wp/33-filters | |
+| WP-33 | Filters, cancellation, query cache | C | in progress | wp/33-query-cache | 2026-10-25 |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
 | WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
@@ -33,7 +33,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | not started | wp/41-session-explorer | |
 | WP-42 | Threads timeline | D | merged; needs GPU verification (60 fps) | wp/42-threads-timeline | 2026-10-25 |
-| WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | in progress | wp/42b-timeline-symbols | 2026-10-25 |
+| WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | in progress (verifier FAIL: stale re-keyed selection; fixing) | wp/42b-timeline-symbols | 2026-10-25 |
 | WP-43 | Call graph panel | D | not started | wp/43-call-graph | |
 | WP-44 | Function list and butterfly | D | not started | wp/44-function-list | |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
@@ -114,6 +114,13 @@ Verifier FAIL on the first commit (HTTP two-tier servers not handled), plus secu
 All 8 fixtures match expected.json exactly. Large also matches exactly (verifier probe, 1055 functions). TSan is clean on concurrent queries. Spec 3.7 signature changed to `QueryContext` (see docs/specs/analysis-query.md), and the return-address rule is added, implemented by WP-32b.
 Recurring load flake: TestbedScenarios.EveryScenarioRunsAndProducesValidReport fails under `ctest -j` (seen 4 times) and passes alone. Queued as WP-02b (make the scenario assertions load-tolerant).
 WP-32b merged (verifier PASS): `SymbolService::lookupCaller` and `functionKeyForCaller`, `frameKeyAt`/`usesExactAddress` helpers in libs/analysis/attribution.h for WP-34/35/46, iterative NodeAgg destruction (NodeAgg is no longer an aggregate, so no brace-init), tracegen non-leaf offsets in [1, size) (only the medium manifest hash changed). Orchestrator fix: the worker memory budget now counts the kernel-leaf arrays.
+
+## Queued follow-ups
+
+- WP-02b: make TestbedScenarios.EveryScenarioRunsAndProducesValidReport load-tolerant (fails under ctest -j).
+- WP-21b: make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.
+- WP-36b: 64-row LOD frame under 4 ms.
+- `SymbolService::resolveAllAsync` should take `const TraceModel&` (the viewer const_casts today).
 
 ## Windows / privileged verification queue
 
