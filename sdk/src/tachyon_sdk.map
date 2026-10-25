@@ -1,0 +1,6 @@
+{
+  global:
+    Tachyon_*;
+  local:
+    *;
+};
