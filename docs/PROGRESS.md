@@ -53,7 +53,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-63 | Exporters | — | not started | wp/63-exporters | |
 | WP-64 | Large-trace performance pass | — | not started | wp/64-perf-pass | |
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
-| WP-70 | `perf_event_open` backend | — | not started | wp/70-perf-backend | |
+| WP-70 | `perf_event_open` backend | A | in progress | wp/70-perf-backend | 2026-10-25 |
 | WP-71 | Scheduler events | — | not started | wp/71-sched | |
 | WP-72 | DWARF symbol provider | B | merged (WP-72b follow-up) | wp/72-dwarf-provider | 2026-10-25 |
 | WP-73 | Linux SDK transport and privileges | — | not started | wp/73-linux-sdk | |
