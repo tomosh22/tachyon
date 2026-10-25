@@ -1,9 +1,8 @@
-// Perf budgets (WP-53). The blended bottomUpFunctions (scopes spliced into every sample, index warm) must
-// stay within 3x of the unblended one on a synthetic model with 1 M scopes and 5 M samples (asserted at 2x of
-// the budget, like the other perf tests); the cold first query (pairing + index build + query) has an
-// absolute budget of 3 s (asserted at 6 s). A realistic mix is used: every scope template samples a handful
-// of stacks, so the number of distinct (stack, scope stack) pairs stays in the tens of thousands. Measured
-// numbers are printed.
+// Perf budgets (WP-53b), on a synthetic model with 1 M scopes and 5 M samples, each asserted at 2x its
+// target: warm blended bottomUp, topDown and butterfly 100 ms; cold pairing + index + query 1 s; cold
+// fiber-aware 1 s. The ratio to the unblended query is printed only. A realistic mix is used: every scope
+// template samples a handful of stacks, so the number of distinct (stack, scope stack) pairs stays in the
+// tens of thousands. Measured numbers are printed.
 #include "aggregation_test_util.h"
 #include "analysis/fibers.h"
 #include "analysis/query.h"
@@ -53,7 +52,7 @@ struct Synthetic {
   std::vector<std::string> names;
   std::vector<TestFunction> functions;
 
-  Synthetic() {
+  explicit Synthetic(bool fibers = false) {
     Rng rng{0x9E3779B97F4A7C15ull};
     h.m.header.end_ts = uint64_t{kGroups} * kGroupTicks + 1000;
     names.reserve(kFunctions);
@@ -93,6 +92,12 @@ struct Synthetic {
         sc.end(base + 700, tid);
         sc.end(base + 1000, tid);
         sc.end(base + 1200, tid);
+        if (fibers) {  // two fibers per thread, switching after every group (no scope is open then)
+          const uint64_t cur = 1 + 2 * t + (g % 2), next = 1 + 2 * t + (1 - g % 2);
+          if (g == 0) sc.fiber(0, t, trace::kFiberSwitchEnd, cur);
+          sc.fiber(base + 1250, t, trace::kFiberSwitchBegin, cur, next);
+          sc.fiber(base + 1260, t, trace::kFiberSwitchEnd, next, cur);
+        }
         for (uint32_t s = 0; s < kSamplesPerGroup; ++s)
           h.sample(t, base + 100 * s + 50, stacks[tp.stack[rng.below(10)]]);
       }
@@ -112,7 +117,7 @@ double bestOf(int reps, const std::function<void(int)>& fn) {
   return best;
 }
 
-TEST(ScopeBlendPerf, BlendedBottomUpWithinThreeTimesTheUnblendedOne) {
+TEST(ScopeBlendPerf, BlendedQueriesOnFiveMillionSamplesAndOneMillionScopes) {
   Synthetic s;
   size_t samples = 0;
   for (const auto& c : s.h.m.samplesByThread) samples += c.ts.size();
@@ -153,31 +158,65 @@ TEST(ScopeBlendPerf, BlendedBottomUpWithinThreeTimesTheUnblendedOne) {
       "[scope blend perf] %zu samples, %zu scopes, %llu trie nodes, %llu segments, %u hw threads\n"
       "[scope blend perf] unblended bottomUp best %.4f s; blended cold (pair + index + query) %.4f s; "
       "blended "
-      "warm best %.4f s; ratio warm/unblended %.2f (budget 3.0, assert 6.0)\n",
+      "warm best %.4f s; ratio warm/unblended %.2f (informational)\n",
       samples, size_t{Synthetic::kThreads} * Synthetic::kGroups * 3,
       static_cast<unsigned long long>((*idx)->nodes.size()),
       static_cast<unsigned long long>((*idx)->segmentCount), std::thread::hardware_concurrency(), unblended,
       cold, warm, warm / unblended);
-  // The unblended query is a dense array update per sample (about 2 ns); below kFloor, timer and scheduler
-  // noise of the shared CI machines dominates the ratio, so the budget is 3x max(unblended, kFloor).
-  constexpr double kFloor = 0.015;
-  EXPECT_LT(warm, 3.0 * std::max(unblended, kFloor) * 2) << "blended bottomUp over 2x its 3x budget";
-  EXPECT_LT(cold, 3.0 * 2) << "cold blended query over 2x its 3 s budget";
+  // Absolute budgets (the ratio to the unblended query is informational: that one is a dense array update per
+  // sample, about 2 ns, which no per-sample scope lookup can match).
+  constexpr double kWarmTarget = 0.1, kColdTarget = 1.0;
+  EXPECT_LT(warm, kWarmTarget * 2) << "warm blended bottomUp over its 200 ms assert";
+  EXPECT_LT(cold, kColdTarget * 2) << "cold blended query over its 2 s assert";
 
-  // topDownTree and butterfly through the same flattener: informational, with a loose bound.
   auto t0 = Clock::now();
-  auto tree = topDownTree(blended, filterFor(7));
-  const double treeS = seconds(t0);
-  ASSERT_TRUE(tree.ok());
+  const double treeS = bestOf(3, [&](int i) {
+    auto tree = topDownTree(blended, filterFor(20 + i));
+    ASSERT_TRUE(tree.ok());
+  });
   t0 = Clock::now();
   auto tree0 = topDownTree(plain, filterFor(7));
   const double treeP = seconds(t0);
   ASSERT_TRUE(tree0.ok());
-  std::printf(
-      "[scope blend perf] topDownTree blended %.4f s, unblended %.4f s; blended nodes counted by root %llu "
-      "ticks\n",
-      treeS, treeP, static_cast<unsigned long long>(tree->inclusiveTicks));
+  auto tree = topDownTree(blended, filterFor(7));
+  ASSERT_TRUE(tree.ok());
   EXPECT_EQ(tree->inclusiveTicks, tree0->inclusiveTicks);
+  ASSERT_FALSE(first->empty());
+  const FunctionKey hot = (*first)[0].key;
+  const double bfS = bestOf(3, [&](int i) {
+    auto b = butterfly(blended, filterFor(30 + i), hot);
+    ASSERT_TRUE(b.ok());
+  });
+  std::printf(
+      "[scope blend perf] warm topDownTree %.4f s (unblended %.4f s), warm butterfly %.4f s; targets: warm "
+      "%.2f s each (assert %.2f), cold %.1f s (assert %.1f)\n",
+      treeS, treeP, bfS, kWarmTarget, kWarmTarget * 2, kColdTarget, kColdTarget * 2);
+  EXPECT_LT(treeS, kWarmTarget * 2) << "warm blended topDownTree";
+  EXPECT_LT(bfS, kWarmTarget * 2) << "warm blended butterfly";
+}
+
+TEST(ScopeBlendPerf, ColdFiberAwareBlendedQueryOnOneMillionScopes) {
+  Synthetic s(/*fibers=*/true);
+  AggregationOptions o;
+  o.blendScopes = true;
+  o.groupByFiber = true;
+  QueryContext ctx(s.h.m, *s.h.svc, o);
+  const auto t0 = Clock::now();
+  auto r = bottomUpFunctions(ctx, {});
+  const double cold = seconds(t0);
+  ASSERT_TRUE(r.ok()) << r.error().toString();
+  size_t scopeRows = 0;
+  for (const FunctionRow& row : *r) scopeRows += row.key.isScope() ? 1 : 0;
+  EXPECT_GT(scopeRows, 50u);
+  auto paired = pairedFibersFor(ctx);
+  ASSERT_TRUE(paired.ok());
+  size_t pieces = 0;
+  for (const FiberLane& l : (*paired)->lanes) pieces += l.pieces.size();
+  std::printf(
+      "[scope blend perf] cold fiber-aware (pair + pieces + index + query): %.4f s, %zu pieces, %zu lanes "
+      "(target 1 s, assert 2 s)\n",
+      cold, pieces, (*paired)->lanes.size());
+  EXPECT_LT(cold, 2.0);
 }
 
 TEST(ScopeBlendPerf, ScopesFixtureBlendedVersusUnblended) {

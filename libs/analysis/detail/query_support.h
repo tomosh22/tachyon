@@ -169,6 +169,7 @@ class StackFlattener {
   struct Range {
     uint64_t lo = 0, hi = 0;
     bool known = false;
+    bool exact = false;  // unmapped frame: only the address itself matches
   };
 
   bool frameContains(FrameIdx frame, bool caller, uint64_t addr) {
@@ -181,7 +182,7 @@ class StackFlattener {
       const model::Frame& f = m_model.frames[frame.get()];
       if (!f.module.valid()) {
         r.lo = f.addr_or_rva;
-        r.hi = r.lo + 1;
+        r.exact = true;
       } else if (f.module.get() < m_model.modules.size()) {
         const symbols::ResolvedAddress& ra =
             caller ? m_ctx.symbols().lookupCaller(frame) : m_ctx.symbols().lookup(frame);
@@ -196,7 +197,8 @@ class StackFlattener {
         }
       }
     }
-    return addr >= r.lo && addr < r.hi;
+    // caller_addr is a return address: it lies in (lo, hi] of the function that made the call.
+    return r.exact ? addr == r.lo : (addr > r.lo && addr <= r.hi);
   }
 
   uint32_t scopeKeyId(uint32_t node) {

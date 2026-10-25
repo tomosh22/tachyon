@@ -1,5 +1,6 @@
 #include "analysis/fibers.h"
 
+#include "analysis/detail/cancellable_sort.h"
 #include "analysis/query_cache.h"
 #include "trace/trace_format.h"
 
@@ -25,9 +26,12 @@ struct Ctx {
   uint64_t since = 0;
 };
 
-void computePieces(FiberLane& lane) {
+// False if cancelled (polled every 64k scopes and between the steps of the sort).
+bool computePieces(FiberLane& lane, Cancel cancel) {
   const std::vector<FiberRun>& runs = lane.runs;
+  size_t polled = 0;
   for (uint32_t s = 0; s < lane.scopes.size(); ++s) {
+    if ((++polled & 0xFFFFu) == 0 && cancel.requested()) return false;
     const ScopeInstance& si = lane.scopes[s];
     if (si.end <= si.begin) continue;
     size_t r =
@@ -35,16 +39,20 @@ void computePieces(FiberLane& lane) {
                                                  [&](const FiberRun& run) { return run.end <= si.begin; }) -
                             runs.begin());
     for (; r < runs.size() && runs[r].begin < si.end; ++r) {
+      if ((++polled & 0xFFFFu) == 0 && cancel.requested()) return false;
       const uint64_t b = std::max(runs[r].begin, si.begin), e = std::min(runs[r].end, si.end);
       if (e > b) lane.pieces.push_back(ScopePiece{s, runs[r].thread, b, e});
     }
   }
-  std::sort(lane.pieces.begin(), lane.pieces.end(), [&](const ScopePiece& a, const ScopePiece& b) {
-    if (a.begin != b.begin) return a.begin < b.begin;
-    const uint32_t da = lane.scopes[a.scope].depth, db = lane.scopes[b.scope].depth;
-    if (da != db) return da < db;
-    return a.scope < b.scope;
-  });
+  return detail::cancellableSort(
+      lane.pieces,
+      [&](const ScopePiece& a, const ScopePiece& b) {
+        if (a.begin != b.begin) return a.begin < b.begin;
+        const uint32_t da = lane.scopes[a.scope].depth, db = lane.scopes[b.scope].depth;
+        if (da != db) return da < db;
+        return a.scope < b.scope;
+      },
+      cancel);
 }
 
 }  // namespace
@@ -216,7 +224,8 @@ Result<PairedFibers> pairScopesByFiber(const model::TraceModel& m, Cancel cancel
   // Lanes: every fiber; thread contexts that hold scopes.
   for (Ctx& c : ctxs) {
     if (c.lane.fiberId == 0 && c.lane.scopes.empty()) continue;
-    computePieces(c.lane);
+    if (cancel.requested() || !computePieces(c.lane, cancel))
+      return makeError(ErrorCode::Cancelled, "query cancelled");
     out.lanes.push_back(std::move(c.lane));
   }
   std::sort(out.lanes.begin(), out.lanes.end(), [](const FiberLane& a, const FiberLane& b) {
