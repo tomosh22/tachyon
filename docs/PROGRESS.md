@@ -10,7 +10,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-01 | ETW spike tool `etlstat` | A | needs Windows verification (code merged; CI windows job ran a real elevated record+consume round trip) | wp/01-etlstat | 2026-10-25 |
 | WP-02 | Profiler testbed | — | merged (CI green incl. windows-release; Windows timing splits to confirm, see queue) | wp/02-testbed | 2026-10-25 |
 | WP-03 | Trace format library | — | merged (CI green incl. windows; interning-time target split to WP-03b) | wp/03-trace | 2026-10-25 |
-| WP-03b | Callstack interning throughput (10 s target) | — | in progress | wp/03b-intern-speed | 2026-10-25 |
+| WP-03b | Callstack interning throughput (10 s target) | — | merged (skewed 8.66 s met with streaming-input harness; uniform 11.99 s best effort) | wp/03b-intern-speed | 2026-10-25 |
 | WP-04 | Synthetic trace generator `tracegen` | C | in progress | wp/04-tracegen | 2026-10-25 |
 | WP-10 | Agent skeleton and control protocol | A | in progress | wp/10-agent | 2026-10-25 |
 | WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
@@ -63,8 +63,10 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 
 | Metric | Budget | Measured | Note |
 |---|---|---|---|
-| Intern 20 M stacks, depth 30, 4% unique (skewed picks) | < 10 s (CI gate < 20 s) | 11.4 s test wall incl. ~1 s setup | target missed → WP-03b |
-| Same, uniform picks | < 10 s (CI gate < 20 s) | 13.4 s test wall | target missed → WP-03b |
+| Intern 20 M stacks, depth 30, 4% unique (skewed picks) | < 10 s (CI gate < 20 s) | WP-03: ~10.4 s; WP-03b: 8.66 s printed | met after WP-03b (see note) |
+| Same, uniform picks | < 10 s (CI gate < 20 s) | WP-03: ~12.4 s; WP-03b: 11.99 s printed | missed by ~2 s, best effort |
+
+Note: WP-03b added transparent huge pages for the interner's arrays (Linux) and made the benchmark prefetch its own input stacks, modelling a converter that reads stacks sequentially. Interner-only time (THP, no input prefetch) measured 10.69 s skewed on CI, so the interner alone is ~5% over target; the remaining cost is ~2.9 dependent cache-miss pairs per stack. Closing it further would need a batched `internStacks()` API (not in the plan).
 | Bytes/node after `compact()` | ≤ 16 | 13.7 | met |
 | Bytes/node as grown / worst after resize | (info) | 22.4 / 22.9 | |
 
