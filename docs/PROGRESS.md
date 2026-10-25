@@ -15,9 +15,9 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-10 | Agent skeleton and control protocol | A | merged (CI green incl. windows named-pipe tests; Windows console checks queued) | wp/10-agent | 2026-10-25 |
 | WP-11 | ETW session controller | A | needs Windows verification (merged; 11 real ETW tests passed on elevated CI runner; 30 s dev-box run pending) | wp/11-etw-session | 2026-10-25 |
 | WP-12 | ETL to `.tachyon` converter | A | needs Windows verification (merged; CI windows job converted a real ETL; hot_a/b/c ranking and 2 GB timing unconfirmed) | wp/12-etlconvert | 2026-10-25 |
-| WP-13 | Launch, attach, process tree, CLI | A | not started | wp/13-launch-cli | |
+| WP-13 | Launch, attach, process tree, CLI | A | in progress | wp/13-launch-cli | 2026-10-25 |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
-| WP-20 | Symbol core | B | in progress | wp/20-symbol-core | 2026-10-25 |
+| WP-20 | Symbol core | B | in review | wp/20-symbol-core | 2026-10-25 |
 | WP-21 | Symbol locator and HTTP client | B | not started | wp/21-symbol-locator | |
 | WP-22 | DIA symbol provider | B | not started | wp/22-dia | |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
@@ -171,6 +171,8 @@ Check by hand: window opens, Trace Info panel shows 16 threads / 7,486,737 sampl
 - The M5 gate "overhead under 1% at 100 k scopes/frame" is physically infeasible. 1% of a 16.6 ms frame is 166 µs, about 1.7 ns per scope, which is less than a single timestamp read. At the measured 46.9 ns, 100 k scopes/frame costs 28% of a frame. Proposed: "under 1% at 100 k scopes per second" (≈0.47% at the measured cost), or "under 1% at 3 k scopes/frame".
 
 ## Environment notes
+
+- The session has a fixed disk allowance. It ran out once (2026-10-25) because every worktree kept a full build tree. The build dirs of finished worktrees were deleted, and briefs now ask agents not to keep extra build trees.
 
 - Git LFS push is blocked by this environment's network policy (`lfs.github.com` returns 403 at the verify step). WP-04 therefore commits scenario JSON + SHA256 manifests and generates binary fixtures at build time (`tachyon_fixtures` target into `build/<preset>/fixtures`). To commit binaries via LFS instead, allow `lfs.github.com` in the environment's network settings.
 
