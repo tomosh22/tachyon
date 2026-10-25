@@ -218,8 +218,12 @@ Result<ScenarioReport> runSpin(const RunConfig& config, const Calibration& cal) 
   ThreadReport thread;
   uint64_t checksum = 0;
   std::thread worker([&] {
+    // Name the thread before the workload so samples taken during the run see "tb-spin".
+    ThreadReport identity;
+    identifyThread(identity, "tb-spin");
     thread = spinImpl(cal, config.durationS, &checksum);
-    identifyThread(thread, "tb-spin");
+    thread.name = identity.name;
+    thread.tid = identity.tid;
   });
   worker.join();
   report.threads.push_back(std::move(thread));
