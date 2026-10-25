@@ -1,3 +1,4 @@
 tachyon_add_test(analysis_tests
-  SOURCES lod_test.cpp lod_fixture_test.cpp thread_states_test.cpp thread_states_fixture_test.cpp wait_reasons_test.cpp
-  DEPS tachyon::analysis tachyon::model tachyon::trace nlohmann_json::nlohmann_json)
+  SOURCES aggregation_test.cpp aggregation_fixture_test.cpp attribution_test.cpp lod_test.cpp lod_fixture_test.cpp
+          thread_states_test.cpp thread_states_fixture_test.cpp wait_reasons_test.cpp
+  DEPS tachyon::analysis tachyon::symbols tachyon::model tachyon::trace nlohmann_json::nlohmann_json)
