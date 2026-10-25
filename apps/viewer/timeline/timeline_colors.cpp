@@ -116,7 +116,7 @@ Color32 callstackColor(const model::TraceModel& model, CallstackIdx node, FrameC
   if (mode == FrameColorMode::ByFunction) {
     uint64_t value = f.addr_or_rva;
     if (symbols) {
-      if (const auto key = functionKeyForNode(model, symbols, node, position)) value = key->value;
+      if (const auto fk = functionKeyForNode(model, symbols, node, position)) value = fk->value;
     }
     key = (key << 40) ^ value;
   }
