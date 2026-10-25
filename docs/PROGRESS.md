@@ -16,7 +16,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-11 | ETW session controller | A | needs Windows verification (merged; 11 real ETW tests passed on elevated CI runner; 30 s dev-box run pending) | wp/11-etw-session | 2026-10-25 |
 | WP-12 | ETL to `.tachyon` converter | A | needs Windows verification (merged; CI windows job converted a real ETL; hot_a/b/c ranking and 2 GB timing unconfirmed) | wp/12-etlconvert | 2026-10-25 |
 | WP-13 | Launch, attach, process tree, CLI | A | merged; needs Windows verification (20 s dev-box run) | wp/13-launch-cli | 2026-10-25 |
-| WP-13b | CLI --json errors, pid-reuse targets, attach-exit, resume, circular child following | A | in progress | wp/13b-cli-fixes | 2026-10-25 |
+| WP-13b | CLI --json errors, pid-reuse targets, attach-exit, resume, circular child following | A | merged; attach-exit race untested on Windows | wp/13b-cli-fixes | 2026-10-25 |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | merged (oracle 0/929 mismatches; cold resolve 11.5 ms, memo 2.2 ns on CI) | wp/20-symbol-core | 2026-10-25 |
 | WP-21 | Symbol locator and HTTP client | B | merged (CI green incl. msdl.microsoft.com ntdll.pdb fetch) | wp/21-symbol-locator | 2026-10-25 |
