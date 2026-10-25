@@ -19,6 +19,8 @@ namespace tachyon::analysis {
 // differently by the return-address rule (see frameKeyAt).
 struct NodeWeight {
   CallstackIdx node;
+  uint32_t scopeStack =
+      0;  // WP-53: ScopeStackNode open at these samples (scope_blend.h); 0 = none/not blending
   uint64_t ticks = 0;
   uint32_t samples = 0;
   bool kernelLeaf = false;

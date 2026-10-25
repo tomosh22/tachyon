@@ -38,6 +38,7 @@ QueryKey weightsKey(const ResolvedFilter& f) {
   k.filter.t0 = f.canonical.t0;
   k.filter.t1 = f.canonical.t1;
   k.filter.threads = f.canonical.threads;
+  k.options = f.options;
   return k;
 }
 
@@ -82,13 +83,18 @@ NodeAgg cloneTree(const NodeAgg& src) {
 
 using WeightsPtr = std::shared_ptr<const std::vector<NodeWeight>>;
 
-Result<WeightsPtr> weightsFor(const QueryContext& ctx, const ResolvedFilter& f, Cancel cancel) {
+// `blend`: the context's blend index when scope blending is on (the weights are then keyed by open scope
+// stack as well); nullptr otherwise.
+Result<WeightsPtr> weightsFor(const QueryContext& ctx, const ResolvedFilter& f, const BlendIndex* blend,
+                              Cancel cancel) {
   QueryCache& cache = ctx.cache();
   const QueryKey key = weightsKey(f);
   if (auto hit = cache.find<std::vector<NodeWeight>>(key)) return hit;
   if (f.t0 >= f.t1) return std::make_shared<const std::vector<NodeWeight>>();
-  auto acc = accumulateNodeWeights(ctx.model(), f.t0, f.t1, f.threads, ctx.options().threads, cancel,
-                                   ctx.executor());
+  auto acc = blend != nullptr ? accumulateBlendedWeights(ctx.model(), *blend, f.t0, f.t1, f.threads,
+                                                         ctx.options().threads, cancel, ctx.executor())
+                              : accumulateNodeWeights(ctx.model(), f.t0, f.t1, f.threads,
+                                                      ctx.options().threads, cancel, ctx.executor());
   if (!acc) return acc.error();
   const size_t bytes = sizeof(std::vector<NodeWeight>) + 2 * kAllocOverhead + 32 + vectorBytes(*acc);
   auto value = std::make_shared<const std::vector<NodeWeight>>(std::move(*acc));
@@ -201,7 +207,9 @@ Result<std::shared_ptr<const std::vector<FunctionRow>>> bottomUpFunctionsShared(
   return cachedOrCompute<std::vector<FunctionRow>>(
       ctx, resultKey(*rf, QueryKind::BottomUp),
       [&]() -> Result<std::vector<FunctionRow>> {
-        auto w = weightsFor(ctx, *rf, cancel);
+        auto blend = blendIndexIfEnabled(ctx, cancel);
+        if (!blend) return blend.error();
+        auto w = weightsFor(ctx, *rf, blend->get(), cancel);
         if (!w) return w.error();
 
         KeyTable table;
@@ -214,9 +222,10 @@ Result<std::shared_ptr<const std::vector<FunctionRow>>> bottomUpFunctionsShared(
         uint32_t serial = 0;
         CancelMeter meter{cancel};
         flat.setCancel(cancel);
+        flat.setBlend(blend->get());
         for (const NodeWeight& nw : **w) {
           if (meter.due()) return cancelledError();
-          const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required);
+          const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required, nw.scopeStack);
           if (flat.aborted()) return cancelledError();
           meter.add(flat.lastCost() + ids.size());
           if (!kept || ids.empty()) continue;
@@ -260,7 +269,9 @@ Result<std::shared_ptr<const NodeAgg>> topDownTreeShared(const QueryContext& ctx
   return cachedOrCompute<NodeAgg>(
       ctx, resultKey(*rf, QueryKind::TopDown),
       [&]() -> Result<NodeAgg> {
-        auto w = weightsFor(ctx, *rf, cancel);
+        auto blend = blendIndexIfEnabled(ctx, cancel);
+        if (!blend) return blend.error();
+        auto w = weightsFor(ctx, *rf, blend->get(), cancel);
         if (!w) return w.error();
 
         struct TNode {
@@ -277,9 +288,10 @@ Result<std::shared_ptr<const NodeAgg>> topDownTreeShared(const QueryContext& ctx
         std::vector<uint32_t> ids;
         CancelMeter meter{cancel};
         flat.setCancel(cancel);
+        flat.setBlend(blend->get());
         for (const NodeWeight& nw : **w) {
           if (meter.due()) return cancelledError();
-          const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required);
+          const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required, nw.scopeStack);
           if (flat.aborted()) return cancelledError();
           meter.add(flat.lastCost() + ids.size());
           if (!kept) continue;
@@ -347,7 +359,9 @@ Result<std::shared_ptr<const Butterfly>> butterflyShared(const QueryContext& ctx
   return cachedOrCompute<Butterfly>(
       ctx, resultKey(*rf, QueryKind::Butterfly, key),
       [&]() -> Result<Butterfly> {
-        auto w = weightsFor(ctx, *rf, cancel);
+        auto blend = blendIndexIfEnabled(ctx, cancel);
+        if (!blend) return blend.error();
+        auto w = weightsFor(ctx, *rf, blend->get(), cancel);
         if (!w) return w.error();
 
         KeyTable table;
@@ -361,9 +375,10 @@ Result<std::shared_ptr<const Butterfly>> butterflyShared(const QueryContext& ctx
         std::vector<uint32_t> ids;
         CancelMeter meter{cancel};
         flat.setCancel(cancel);
+        flat.setBlend(blend->get());
         for (const NodeWeight& nw : **w) {
           if (meter.due()) return cancelledError();
-          const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required);
+          const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required, nw.scopeStack);
           if (flat.aborted()) return cancelledError();
           meter.add(flat.lastCost() + ids.size());
           if (!kept) continue;

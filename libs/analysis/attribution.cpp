@@ -196,7 +196,7 @@ Result<std::vector<NodeWeight>> accumulateNodeWeights(const model::TraceModel& m
         samples += (kernel ? loc.ksamples : loc.samples)[n];
       }
       if (samples == 0) continue;
-      out.push_back(NodeWeight{CallstackIdx(static_cast<uint32_t>(n)), ticks,
+      out.push_back(NodeWeight{CallstackIdx(static_cast<uint32_t>(n)), 0, ticks,
                                static_cast<uint32_t>(std::min<uint64_t>(samples, UINT32_MAX)), kernel});
     }
   }
