@@ -7,7 +7,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP | Title | Lane | Status | Branch | Date |
 |---|---|---|---|---|---|
 | WP-00 | Repository skeleton and CI | — | merged (CI green: linux-release, linux-asan, windows-release) | main | 2026-10-24 |
-| WP-01 | ETW spike tool `etlstat` | A | in progress | wp/01-etlstat | 2026-10-25 |
+| WP-01 | ETW spike tool `etlstat` | A | in review | wp/01-etlstat | 2026-10-25 |
 | WP-02 | Profiler testbed | — | merged (CI green incl. windows-release; Windows timing splits to confirm, see queue) | wp/02-testbed | 2026-10-25 |
 | WP-03 | Trace format library | — | in progress (rework: MSVC build, interning speed) | wp/03-trace | 2026-10-25 |
 | WP-04 | Synthetic trace generator `tracegen` | C | not started | wp/04-tracegen | |
