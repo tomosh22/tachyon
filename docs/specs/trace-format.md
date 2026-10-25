@@ -81,3 +81,6 @@ Header: `libs/trace/trace_format.h` (namespace `tachyon::trace`), now orchestrat
 - `ModuleRec.id_kind` 3 = PE timestamp+size (`kModuleIdPeTimestampSize`, added with WP-12): `id_len` 8, u32 TimeDateStamp then u32 SizeOfImage, little-endian, age 0; used when the PE has no CodeView RSDS record or the file is missing/different from the loaded image. RSDS GUIDs (id_kind 1) are stored in on-disk GUID struct byte order (Data1..3 little-endian), `age` in the age field.
 - `ContextSwitchRec.reserved` / `ReadyRec.reserved` bit0 (`kSwitchFlagStackFromOtherThread`, added with WP-12): the attached stack was walked on a thread other than `old_tid` / `readying_tid`. Other bits stay 0.
 - Converters write ModuleRec `load_ts` = trace start for modules loaded before the trace and `unload_ts` = trace end when still loaded; kernel modules use pid 0.
+
+## Clarification added with WP-72 (2026-10-25, binding)
+- ELF modules: `ModuleRec.base` is the load address of the module's lowest PT_LOAD segment (not the executable segment's mmap address). RVA = address − base. The DWARF provider maps RVA → ELF vaddr as `rva + (lowest PT_LOAD p_vaddr aligned down to 4096)`. The perf backend (WP-70) must fill `base` accordingly.

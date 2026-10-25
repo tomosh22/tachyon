@@ -55,7 +55,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
 | WP-70 | `perf_event_open` backend | — | not started | wp/70-perf-backend | |
 | WP-71 | Scheduler events | — | not started | wp/71-sched | |
-| WP-72 | DWARF symbol provider | B | in progress | wp/72-dwarf-provider | 2026-10-25 |
+| WP-72 | DWARF symbol provider | B | merged (WP-72b follow-up) | wp/72-dwarf-provider | 2026-10-25 |
 | WP-73 | Linux SDK transport and privileges | — | not started | wp/73-linux-sdk | |
 
 ## Milestone gates
@@ -170,7 +170,13 @@ Verifier PASS. Rows match bottomUpFunctions. The Butterfly matches analysis::but
 
 Verifier PASS (conditional on D1). Rule-5 placement matches a brute-force oracle written from the spec in 10,800 comparisons, and the oracle catches mutations. With blending off, results are byte-identical to main over 294 configurations. Fibers match the fixture field by field. Lock summary is exact. Blended, warm, 5 M samples / 1 M scopes: bottomUp 58–70 ms, topDown 42–90 ms. Cold (pairing, index and query): 0.23–0.26 s, or 0.55–0.80 s fiber-aware. BlendIndex memory for 1 M scopes: 38 MB; PairedFibers: 184 MB. Orchestrator fix: the viewer's AnalysisContext snapshot now keys on blendScopes and groupByFiber.
 
+## WP-72 notes
+
+Verifier PASS. An independent llvm-symbolizer oracle on 2000 testbed and 2000 libc addresses shows 0 chain-length, function-start, file or line mismatches; the remaining differences are demangler style or an intended line fallback. Fuzzing at scale 10 under ASan is clean, TSan is clean with 8 threads, and memory is about 4–7 KB per function. 1 M RVAs resolve in 0.16 s warm (budget 20 s).
+
 ## Queued follow-ups
+
+- WP-72b (in progress): `functionBounds(rva)` returns the piece that contains rva (split functions); names are stripped of parameter lists to match DIA (prefer the DIE qualified name, and strip symtab names); cap and evict per-CU line rows.
 
 - WP-53b (in progress): poll cancellation in the fiber piece computation and the blend-index sorts (cold fiber-aware cancel took 134–212 ms); replace the 3× ratio with absolute budgets (warm blended bottomUp/topDown/butterfly ≤ 100 ms, assert 200 ms; cold ≤ 1 s, assert 2 s, on the 5 M / 1 M model); match mapped frames with `lo < caller_addr <= hi`, since caller_addr is a return address; thread-safety comment on lockSummaryShared.
 
