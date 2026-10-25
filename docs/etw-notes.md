@@ -219,3 +219,9 @@ Observed event versions and sizes (copy from `etlstat stats` table):
 | Image / 2,3,4,10 | TBD | TBD | TBD |
 | StackWalk / 32 | TBD | TBD | TBD |
 | StackWalk / 34..37 | TBD | TBD | TBD |
+
+## Observed on the GitHub windows-2022 runner (WP-11 CI, 2026-10-25)
+- [OBSERVED] `TraceSetInformation(TraceSampledProfileIntervalInfo)` fails with the session handle and succeeds with handle 0.
+- [OBSERVED] A unique session name and GUID with EVENT_TRACE_SYSTEM_LOGGER_MODE start without the SystemTraceControlGuid fallback.
+- [OBSERVED] 2 s system capture at 8 kHz on 4 cores: EventsLost 0, 43,965 samples, 15 MB ETL, 250 KB .tachyon. A 5 s testbed spin: the testbed's busy thread got 41,902 samples (≈ 8,380/s); EventsLost, LogBuffersLost and RealTimeBuffersLost all 0.
+- [OBSERVED] Flush via FLUSH + stop + restart: capture gap ≈ 47–54 ms.

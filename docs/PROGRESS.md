@@ -13,7 +13,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-03b | Callstack interning throughput (10 s target) | — | merged (skewed 8.66 s met with streaming-input harness; uniform 11.99 s best effort) | wp/03b-intern-speed | 2026-10-25 |
 | WP-04 | Synthetic trace generator `tracegen` | C | merged (CI green incl. windows manifest; independent oracle 0 mismatches) | wp/04-tracegen | 2026-10-25 |
 | WP-10 | Agent skeleton and control protocol | A | merged (CI green incl. windows named-pipe tests; Windows console checks queued) | wp/10-agent | 2026-10-25 |
-| WP-11 | ETW session controller | A | in review | wp/11-etw-session | 2026-10-25 |
+| WP-11 | ETW session controller | A | needs Windows verification (merged; 11 real ETW tests passed on elevated CI runner; 30 s dev-box run pending) | wp/11-etw-session | 2026-10-25 |
 | WP-12 | ETL to `.tachyon` converter | A | needs Windows verification (merged; CI windows job converted a real ETL; hot_a/b/c ranking and 2 GB timing unconfirmed) | wp/12-etlconvert | 2026-10-25 |
 | WP-13 | Launch, attach, process tree, CLI | A | not started | wp/13-launch-cli | |
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
@@ -132,6 +132,17 @@ type build\windows-release\etlconvert_real_summary.txt
 Confirm in the summary: the hot_a > hot_b > hot_c ranking was asserted, not "skipped: no PDB"; the sample count equals etlstat's; and the match-role histograms. Copy the histograms into docs/etw-notes.md to resolve the [VERIFY] items.
 30 s run: `etlstat record --out t.etl --seconds 30 --hz 8000 --exe tachyon-testbed.exe --exe-args "--scenario spin --duration 30"`, then convert it (a CLI wrapper arrives with WP-13) and compare samplesWritten with `etlstat stats t.etl --image tachyon-testbed.exe`.
 2 GB timing: convert a real ~2 GB ETL and check ConvertStats.seconds < 90 on an 8-core machine. On Linux the pipeline alone measured 1.40 M events/s, about 20 s extrapolated for 2 GB.
+
+### WP-11 (elevated prompt, dev box)
+```
+ctest --preset windows-release -R "EtwCapture|PipeSecurity|ServerStall" --output-on-failure
+type build\windows-release\etw_capture_summary.txt
+tachyon-agent --backend etw --log-level info            (shell 1, elevated)
+tachyon-cli start --mode system --out sys.tachyon       (shell 2, non-elevated: this also exercises the pipe DACL)
+tachyon-testbed --scenario spin --duration 30
+tachyon-cli stop --wait                                 (check events_lost == 0 in capture_done)
+```
+Hardening follow-ups assigned to WP-13: pipe client SQOS flags (SECURITY_SQOS_PRESENT|SECURITY_IDENTIFICATION); an RAII guard for the agent's flush-in-flight flag; call the interval setter with handle 0 directly.
 
 ## Open questions (Part 7) and assumed defaults
 

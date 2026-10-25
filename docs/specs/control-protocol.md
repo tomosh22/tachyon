@@ -25,3 +25,8 @@ Headers: `libs/control/protocol.h` (`tachyon::control`), now orchestrator-owned.
 - `cancel` stops the backend and deletes the output.
 - `inst_hello` reply: `{"id":N,"ok":true,"pipe":"<name>"}`; Linux `<agent socket dir>/tachyon-inst-<pid>.sock`, Windows `\\.\pipe\tachyon-inst-<pid>`.
 - Overrides: `--socket <path>` / `--pipe <name>` / env `TACHYON_AGENT_PIPE`.
+
+## Clarifications added with WP-11 (2026-10-25)
+- Server: every response and event to a client goes through a per-client outbound queue with its own writer thread (cap 2 MiB). A client that stops reading is dropped and never blocks other clients or state changes. Events emitted while handling a request precede its response.
+- During an in-flight `flush` the state stays `capturing`. A concurrent `stop`/`cancel` waits for the flush to finish, then proceeds, and a second `flush` gets `EBUSY`.
+- Windows named pipe: DACL `D:P` denies network logons and grants SYSTEM, Administrators and the owner full control, and Authenticated Users `0x12019b` (read/write without create-instance). `PIPE_REJECT_REMOTE_CLIENTS` and `FILE_FLAG_FIRST_PIPE_INSTANCE` are set. Clients open the pipe with `FILE_GENERIC_READ|FILE_WRITE_DATA|FILE_WRITE_ATTRIBUTES` and retry `ERROR_PIPE_BUSY` for up to 5 s.
