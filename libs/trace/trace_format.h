@@ -35,8 +35,8 @@ inline constexpr uint16_t kSampleFlagKernelLeaf = 1u << 0;
 // ModuleRec::id_kind values.
 inline constexpr uint8_t kModuleIdPdb = 1;
 inline constexpr uint8_t kModuleIdGnuBuildId = 2;
-// PE image identified only by IMAGE_FILE_HEADER.TimeDateStamp + OptionalHeader.SizeOfImage (no CodeView record or
-// file unavailable): id_len 8, u32 TimeDateStamp then u32 SizeOfImage, little-endian; age 0.
+// PE image identified only by IMAGE_FILE_HEADER.TimeDateStamp + OptionalHeader.SizeOfImage (no CodeView
+// record or file unavailable): id_len 8, u32 TimeDateStamp then u32 SizeOfImage, little-endian; age 0.
 inline constexpr uint8_t kModuleIdPeTimestampSize = 3;
 
 // ContextSwitchRec::reserved / ReadyRec::reserved bits.
