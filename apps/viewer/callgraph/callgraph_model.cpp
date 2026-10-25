@@ -168,10 +168,6 @@ double percentOf(uint64_t ticks, uint64_t rootTotal, uint64_t parentTotal, Perce
   return 100.0 * static_cast<double>(ticks) / static_cast<double>(base);
 }
 
-double ticksToMs(uint64_t ticks, double clockHz) {
-  return clockHz > 0.0 ? static_cast<double>(ticks) * 1000.0 / clockHz : 0.0;
-}
-
 std::vector<PieSlice> pieSlices(const NodeAgg& node, size_t maxChildren) {
   std::vector<PieSlice> slices;
   const size_t n = node.children.size();
@@ -212,16 +208,6 @@ std::vector<PieSlice> pieSlices(const NodeAgg& node, size_t maxChildren) {
     s.angle1 = static_cast<float>(kTwoPi * static_cast<double>(acc) / static_cast<double>(total));
   }
   return slices;
-}
-
-analysis::Filter toQueryFilter(const std::optional<ViewFilter>& filter) {
-  analysis::Filter f;  // [0, UINT64_MAX), all threads
-  if (!filter) return f;
-  f.t0 = filter->t0;
-  f.t1 = filter->t1;
-  f.threads = filter->threads;
-  f.subtreeRoot = filter->subtreeRoot;
-  return f;
 }
 
 }  // namespace tachyon::viewer::callgraph

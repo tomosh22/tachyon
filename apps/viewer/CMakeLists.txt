@@ -14,9 +14,16 @@ add_library(tachyon_viewer_core STATIC
   callgraph/callgraph_panel.cpp
   callgraph/subtree_resolver.cpp
   cli_args.cpp
+  common/function_names.cpp
+  common/imgui_util.cpp
+  common/query_filter.cpp
   command_registry.cpp
   document.cpp
   file_browser.cpp
+  functions/butterfly_model.cpp
+  functions/butterfly_panel.cpp
+  functions/function_list_model.cpp
+  functions/function_list_panel.cpp
   interaction/arrow_geometry.cpp
   interaction/interaction_model.cpp
   interaction/interaction_panel.cpp

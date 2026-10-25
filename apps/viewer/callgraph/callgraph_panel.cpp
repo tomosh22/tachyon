@@ -2,6 +2,8 @@
 
 #include "viewer/builtin_panels.h"
 #include "viewer/callgraph/subtree_resolver.h"
+#include "viewer/common/function_names.h"
+#include "viewer/common/imgui_util.h"
 #include "viewer/document.h"
 
 #include <imgui.h>
@@ -14,6 +16,8 @@ namespace tachyon::viewer {
 
 namespace cg = callgraph;
 using analysis::NodeAgg;
+using common::drawSpinner;
+using common::textRight;
 using symbols::FunctionKey;
 
 namespace {
@@ -22,37 +26,8 @@ constexpr auto kThrottleWhileResolving = std::chrono::milliseconds(200);
 constexpr uint32_t kMaxIndentLevels =
     48;  // deeper rows share the last indent (a 100 k deep chain stays on screen)
 
-std::string hexName(uint64_t v) {
-  char buf[32];
-  std::snprintf(buf, sizeof buf, "0x%llx", static_cast<unsigned long long>(v));
-  return buf;
-}
-
 bool isPseudoKey(const FunctionKey& k) {
   return k == analysis::kRootKey || k == analysis::kKernelKey;
-}
-
-// Right-aligned text in the current table cell.
-void textRight(const char* text) {
-  const float w = ImGui::CalcTextSize(text).x;
-  const float avail = ImGui::GetContentRegionAvail().x;
-  if (avail > w) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - w);
-  ImGui::TextUnformatted(text);
-}
-
-void drawSpinner(float radius, ImU32 color) {
-  const ImVec2 pos = ImGui::GetCursorScreenPos();
-  const ImVec2 centre(pos.x + radius, pos.y + radius + 1.0f);
-  ImDrawList* draw = ImGui::GetWindowDrawList();
-  const float start = static_cast<float>(ImGui::GetTime()) * 6.0f;
-  draw->PathClear();
-  constexpr int kSegments = 24;
-  for (int i = 0; i < kSegments; ++i) {
-    const float a = start + (static_cast<float>(i) / kSegments) * 4.5f;
-    draw->PathLineTo(ImVec2(centre.x + std::cos(a) * radius, centre.y + std::sin(a) * radius));
-  }
-  draw->PathStroke(color, 0, 2.0f);
-  ImGui::Dummy(ImVec2(radius * 2.0f, radius * 2.0f + 2.0f));
 }
 
 ImU32 sliceColor(size_t i, bool other) {
@@ -302,27 +277,7 @@ void CallGraphPanel::resolveExternalSelection() {
 const CallGraphPanel::NameParts& CallGraphPanel::nameOf(const FunctionKey& key) {
   const auto it = m_names.find(key);
   if (it != m_names.end()) return it->second;
-  NameParts parts;
-  if (key == analysis::kRootKey) {
-    parts.full = parts.function = "<root>";
-  } else if (key == analysis::kKernelKey) {
-    parts.full = parts.function = "<kernel>";
-  } else if (!m_shownSnapshot) {
-    parts.full = parts.function = hexName(key.value);
-  } else {
-    parts.full = analysis::functionKeyName(m_shownSnapshot->context(), key);
-    parts.inlined = key.isInline();
-    parts.function = parts.full;
-    if (key.module.valid() && !key.isScope()) {
-      const size_t bang = parts.full.find('!');
-      if (bang != std::string::npos) {
-        parts.module = parts.full.substr(0, bang);
-        // An unresolved frame shows as module!0x<rva>: keep it whole in the Function column.
-        const bool unresolved = parts.full.compare(bang + 1, 2, "0x") == 0;
-        if (!unresolved) parts.function = parts.full.substr(bang + 1);
-      }
-    }
-  }
+  NameParts parts = common::splitFunctionName(m_shownSnapshot ? &m_shownSnapshot->context() : nullptr, key);
   return m_names.emplace(key, std::move(parts)).first->second;
 }
 

@@ -17,6 +17,7 @@
 #include "symbols/function_key.h"
 #include "viewer/analysis_context.h"
 #include "viewer/callgraph/callgraph_model.h"
+#include "viewer/common/function_names.h"
 #include "viewer/panel.h"
 
 #include <chrono>
@@ -55,10 +56,7 @@ class CallGraphPanel final : public IPanel {
     }
   };
 
-  struct NameParts {
-    std::string function, module, full;
-    bool inlined = false;
-  };
+  using NameParts = common::NameParts;
 
   CallGraphPanel();
   ~CallGraphPanel() override;
