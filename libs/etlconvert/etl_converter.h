@@ -34,9 +34,21 @@ enum class CaptureMode : uint8_t {
   System,   // keep everything (system-wide samples, all switches); target threads are still flagged
 };
 
+// A pid that counts as a target only between two timestamps (raw trace ticks, inclusive). Lets a capture
+// follow children without also keeping the samples of an unrelated process that later reuses a pid.
+struct TargetInterval {
+  uint32_t pid = 0;
+  uint64_t start = 0;           // 0: from the beginning of the trace
+  uint64_t end = ~uint64_t{0};  // ~0: until the end of the trace
+};
+
 struct ConvertOptions {
-  // Target processes. Empty means system mode: keep everything, regardless of `mode`.
+  // Target processes. Empty (together with empty targetIntervals) means system mode: keep everything,
+  // regardless of `mode`. A pid listed here without an interval is a target for the whole trace.
   std::vector<uint32_t> targetPids;
+  // Pids that are targets only inside the given intervals (several per pid allowed). A pid that appears in
+  // both lists is scoped by its intervals.
+  std::vector<TargetInterval> targetIntervals;
   CaptureMode mode = CaptureMode::Process;
   uint32_t samplingHz = 0;  // recorded in CaptureInfo
   uint64_t eventsLost = 0;  // from the recording session (ControlTrace); max'ed with the ETL header value

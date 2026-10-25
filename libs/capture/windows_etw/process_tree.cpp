@@ -38,46 +38,69 @@ ProcessTreeTracker::ProcessTreeTracker(std::vector<uint32_t> roots, bool followC
                                        std::string childFilter, bool caseInsensitive)
     : m_follow(followChildren), m_filter(std::move(childFilter)), m_ci(caseInsensitive) {
   for (uint32_t r : roots) {
-    if (r == 0 || std::find(m_targets.begin(), m_targets.end(), r) != m_targets.end()) continue;
+    if (r == 0 || m_roots.count(r) != 0) continue;
+    m_roots[r] = true;
     m_targets.push_back(r);
-    m_live.insert(r);
-    m_roots.insert(r);
+    m_live[r] = m_intervals.size();
+    m_intervals.push_back({r, 0, ~uint64_t{0}});  // accepted from the beginning of the trace
   }
 }
 
-bool ProcessTreeTracker::onProcessStart(const ProcessStartInfo& info) {
-  // A launched root is created after the session, so its own Start event is in the trace: it stays a target.
-  if (m_roots.count(info.pid) != 0) return false;
-  // A Start for a pid we think is alive means its End was missed (or the pid was reused): forget it.
-  m_live.erase(info.pid);
+bool ProcessTreeTracker::accept(const ProcessStartInfo& info, uint64_t start) {
   if (!m_follow || m_live.count(info.parentPid) == 0) return false;
   if (!matchesChildFilter(m_filter, info.imageName, info.commandLine, m_ci)) {
     ++m_rejected;
     return false;
   }
-  if (std::find(m_targets.begin(), m_targets.end(), info.pid) == m_targets.end()) {
+  if (std::find(m_targets.begin(), m_targets.end(), info.pid) == m_targets.end())
     m_targets.push_back(info.pid);
-    m_children.push_back({info.pid, info.parentPid, info.imageName});
-  }
-  m_live.insert(info.pid);
+  m_children.push_back({info.pid, info.parentPid, info.imageName});
+  m_live[info.pid] = m_intervals.size();
+  m_intervals.push_back({info.pid, start, ~uint64_t{0}});
   return true;
 }
 
-void ProcessTreeTracker::onProcessEnd(uint32_t pid) {
-  m_live.erase(pid);
+bool ProcessTreeTracker::onProcessStart(const ProcessStartInfo& info, uint64_t ts) {
+  // A launched root is created after the session, so its own Start event is in the trace: it stays a target.
+  if (m_roots.count(info.pid) != 0) return false;
+  // A Start for a pid we think is alive means its End was missed (or the pid was reused): close the old one.
+  if (auto it = m_live.find(info.pid); it != m_live.end()) {
+    m_intervals[it->second].end = ts > 0 ? ts - 1 : 0;
+    m_live.erase(it);
+  }
+  return accept(info, ts);
+}
+
+void ProcessTreeTracker::onProcessEnd(uint32_t pid, uint64_t ts) {
+  auto it = m_live.find(pid);
+  if (it == m_live.end()) return;
+  m_intervals[it->second].end = ts;
+  m_live.erase(it);
+}
+
+bool ProcessTreeTracker::onProcessExisting(const ProcessStartInfo& info) {
+  if (m_live.count(info.pid) != 0 || m_roots.count(info.pid) != 0) return false;  // already tracked
+  return accept(info, 0);
+}
+
+std::vector<etlconvert::TargetInterval> ProcessTreeTracker::intervals() const {
+  return m_intervals;
 }
 
 bool ProcessTreeTracker::onEvent(const etlconvert::EtwEvent& e) {
   if (e.provider != etlconvert::guids::kProcess) return false;
-  if (e.opcode != etlconvert::opcodes::kProcessStart && e.opcode != etlconvert::opcodes::kProcessEnd)
+  if (e.opcode != etlconvert::opcodes::kProcessStart && e.opcode != etlconvert::opcodes::kProcessEnd &&
+      e.opcode != etlconvert::opcodes::kProcessDcStart)
     return false;
   const auto p = etlconvert::decodeProcess(e.payload, e.version);
   if (!p) return false;
   if (e.opcode == etlconvert::opcodes::kProcessEnd) {
-    onProcessEnd(p->processId);
+    onProcessEnd(p->processId, e.timestamp);
     return false;
   }
-  return onProcessStart({p->processId, p->parentId, p->imageFileName, p->commandLine});
+  const ProcessStartInfo info{p->processId, p->parentId, p->imageFileName, p->commandLine};
+  if (e.opcode == etlconvert::opcodes::kProcessDcStart) return onProcessExisting(info);
+  return onProcessStart(info, e.timestamp);
 }
 
 }  // namespace tachyon::capture::etw

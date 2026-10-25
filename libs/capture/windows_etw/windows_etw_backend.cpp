@@ -169,13 +169,16 @@ Result<void> WindowsEtwBackend::start(const CaptureOptions& options) {
       return ok();  // lifecycle and state stay Starting until the second start()
     }
   } else if (options.mode == CaptureMode::Attach) {
+    // The target must stay watchable: without the handle a target that exits mid-capture would go unnoticed.
+    // A pid that vanished between the alive check above and here is NotFound; the session never starts.
     auto proc = etw::TargetProcess::open(options.pid);
-    if (proc.ok()) {
-      target = std::make_unique<etw::TargetProcess>(std::move(*proc));
-    } else {
-      TACHYON_LOG_WARN("etw: attach target {} cannot be watched for exit: {}", options.pid,
-                       proc.error().toString());
+    if (!proc.ok()) {
+      if (proc.error().code == ErrorCode::NotFound)
+        return fail(makeError(ErrorCode::NotFound, "attach target pid " + std::to_string(options.pid) +
+                                                       " exited before the capture could start"));
+      return fail(proc.error());
     }
+    target = std::make_unique<etw::TargetProcess>(std::move(*proc));
   }
   return startRecording(effective, std::move(target), launchNow);
 #endif
@@ -229,6 +232,10 @@ Result<void> WindowsEtwBackend::startRecording(const CaptureOptions& requested,
     }
   }
 
+  {
+    std::lock_guard trackerLock(m_trackerMutex);
+    m_tracker.reset();  // a fresh capture starts with a fresh process tree (never under m_mutex: lock order)
+  }
   std::lock_guard lock(m_mutex);
   m_options = options;
   m_session = std::move(*session);
@@ -272,32 +279,39 @@ etlconvert::ConvertOptions WindowsEtwBackend::convertOptionsFor(const CaptureOpt
                                                                 const SessionConfig& cfg,
                                                                 const SessionCounters& counters) {
   etlconvert::ConvertOptions co;
+  std::vector<uint32_t> reported;
   if (options.mode != CaptureMode::System) {
-    co.targetPids = {options.pid};
     co.mode = etlconvert::CaptureMode::Process;
-    if (options.followChildren) {
-      // The converter filters by a fixed pid list: complete it from the ETL's process events.
-      etw::ProcessTreeTracker tracker({options.pid}, true, options.childFilter);
-      auto scanned = etw::scanEtlProcessEvents(cfg.etlPath, tracker);
-      if (scanned.ok()) {
-        co.targetPids = tracker.targets();
+    // The converter filters by pid; the tracker supplies the pids WITH their lifetimes (so a pid reused by an
+    // unrelated process is not kept) and, across the segments of a circular capture, remembers the children
+    // accepted earlier.
+    std::lock_guard trackerLock(m_trackerMutex);
+    if (!m_tracker)
+      m_tracker = std::make_unique<etw::ProcessTreeTracker>(std::vector<uint32_t>{options.pid},
+                                                            options.followChildren, options.childFilter);
+    auto scanned = etw::scanEtlProcessEvents(cfg.etlPath, *m_tracker);
+    if (scanned.ok()) {
+      co.targetIntervals = m_tracker->intervals();
+      reported = m_tracker->targets();
+      if (options.followChildren)
         TACHYON_LOG_INFO("etw: following {} child process(es) of pid {} ({} rejected by filter '{}')",
-                         tracker.children().size(), options.pid, tracker.rejectedChildren(),
+                         m_tracker->children().size(), options.pid, m_tracker->rejectedChildren(),
                          options.childFilter);
-        std::lock_guard lock(m_mutex);
-        m_diag.followedChildren = tracker.children();
-      } else {
-        TACHYON_LOG_WARN("etw: child scan failed, converting the root only: {}", scanned.error().toString());
-      }
+      std::lock_guard lock(m_mutex);
+      m_diag.followedChildren = m_tracker->children();
+    } else {
+      TACHYON_LOG_WARN("etw: process scan failed, converting the root only: {}", scanned.error().toString());
+      co.targetPids = {options.pid};
+      reported = co.targetPids;
     }
     std::lock_guard lock(m_mutex);
-    m_diag.targetPids = co.targetPids;
+    m_diag.targetPids = reported;
   } else {
     co.mode = etlconvert::CaptureMode::System;
   }
   co.samplingHz = static_cast<uint32_t>(std::lround(etw::intervalUnitsToHz(cfg.profileIntervalUnits)));
   co.eventsLost = counters.eventsLost;
-  co.captureOptionsJson = etw::captureOptionsJson(options, cfg, co.targetPids);
+  co.captureOptionsJson = etw::captureOptionsJson(options, cfg, reported);
   co.agentVersion = m_config.agentVersion;
   return co;
 }

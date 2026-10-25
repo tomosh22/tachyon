@@ -10,9 +10,10 @@
 // Deferred launch (WP-13): a `start` with mode launch and start_immediately=false launches the target parked
 // (suspended) and leaves the state at `starting`. Exactly then a second `start` with start_immediately=true
 // is the trigger: the backend starts recording and resumes the target, the state becomes `capturing`; every
-// other field of that second request is ignored (the CLI sends exe "-"). `cancel` in this state terminates
-// the parked process and returns to idle; `stop` is rejected with EBUSY. Only backends implementing
-// capture::ITargetWatch (the ETW backend) can defer.
+// other field of that second request is ignored (the CLI sends exe "-", which is never launched:
+// with no parked launch such a request is answered ENOTFOUND "no parked launch"). `cancel` in this state
+// terminates the parked process and returns to idle; `stop` is rejected with EBUSY. Only backends
+// implementing capture::ITargetWatch (the ETW backend) can defer.
 //
 // Target exit (WP-13): for such backends the agent watches the launched or attached target of a capturing
 // session and, when ITargetWatch::targetExited() turns true, finishes the capture by itself exactly as if a

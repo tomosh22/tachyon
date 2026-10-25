@@ -20,12 +20,14 @@
 // stop(): the capture ends, the game keeps running.
 //
 // Child following (followChildren): the converter takes a fixed pid list, so the list is completed at
-// conversion time. stop() / flush() first scan the ETL's Process Start/End events (extra ProcessTrace pass,
-// process events only) with a ProcessTreeTracker: a Start whose parent is a live target and whose image
-// matches childFilter (glob, case-insensitive; see process_tree.h) joins the target set, recursively.
-// There is no live tracking of the target list (that needs a real-time consumer, a v1.1 option). Live
-// tracking exists only for exit detection, through the job object. Children that existed before an attach
-// are not followed.
+// conversion time. stop() / flush() first scan the ETL's Process Start/End/DCStart events (extra ProcessTrace
+// pass, process events only) with one ProcessTreeTracker per capture (see process_tree.h): a Start whose
+// parent is a live target and whose image matches childFilter joins the target set, recursively. Targets are
+// handed to the converter as pid + time interval, so a pid reused after the process ended is not kept. The
+// tracker survives flushes, so children of earlier circular segments stay targets. There is no live tracking
+// of the target list (that needs a real-time consumer, a v1.1 option); the job object is used only for exit
+// detection. Children that existed before an attach are not followed, except through a rundown record in a
+// later segment.
 //
 // Files: the ETL of a capture is "<outPath>.etl" (see etlSegmentPath); flush restarts on "<outPath>.<n>.etl".
 // A flush writes "<dir of outPath>/<name>.tachyon" (+ "<name>.etl" when keepRawEtl).
@@ -123,7 +125,9 @@ class WindowsEtwBackend final : public ICaptureBackend, public ITargetWatch {
   etw::SessionConfig m_sessionConfig;  // config of the live session (for the converter's JSON)
   std::unique_ptr<etw::EtwSession> m_session;
   std::unique_ptr<etw::TargetProcess> m_target;  // launched (or attached) root process, if any
-  bool m_pending = false;                        // launched suspended, waiting for the second start()
+  std::mutex m_trackerMutex;
+  std::unique_ptr<etw::ProcessTreeTracker> m_tracker;  // process tree of the live capture, all segments
+  bool m_pending = false;                              // launched suspended, waiting for the second start()
   std::atomic<uint32_t> m_nameCounter{0};
   std::chrono::steady_clock::time_point m_startTime;
   std::function<void(CaptureState, float)> m_callback;

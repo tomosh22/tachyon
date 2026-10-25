@@ -133,10 +133,31 @@ TEST(AgentLaunch, DeferredLaunchParksThenStartsOnSecondStart) {
   EXPECT_FALSE(rig.backend->launchPending());
   EXPECT_EQ(rig.backend->lastStart().exe, "game.exe") << "the trigger does not change the launch";
 
-  EXPECT_EQ(rig.call(trigger).code, ErrorCode::Busy) << "a third start while capturing";
+  EXPECT_EQ(rig.call(trigger).code, ErrorCode::NotFound) << "a second trigger finds no parked launch";
   ASSERT_TRUE(rig.call(StopRequest{}).ok);
   ASSERT_TRUE(rig.waitForState(CaptureState::Idle));
   EXPECT_EQ(rig.countEvents([](const Event& e) { return std::holds_alternative<CaptureDoneEvent>(e); }), 1u);
+}
+
+TEST(AgentLaunch, ResumeWithoutAParkedLaunchIsNotFoundAndLaunchesNothing) {
+  Rig rig;
+  StartRequest resume;
+  resume.mode = capture::CaptureMode::Launch;
+  resume.exe = "-";
+  resume.start_immediately = true;
+  Response r = rig.call(resume);
+  EXPECT_FALSE(r.ok);
+  EXPECT_EQ(r.code, ErrorCode::NotFound);
+  EXPECT_NE(r.error.find("no parked launch"), std::string::npos) << r.error;
+  EXPECT_EQ(rig.backend->startCalls(), 0) << "the backend must not be asked to launch \"-\"";
+  EXPECT_EQ(rig.stateNow(), CaptureState::Idle);
+
+  // While recording (nothing parked) it is the same answer, and the capture is undisturbed.
+  ASSERT_TRUE(rig.call(rig.launch()).ok);
+  r = rig.call(resume);
+  EXPECT_EQ(r.code, ErrorCode::NotFound);
+  EXPECT_EQ(rig.backend->startCalls(), 1);
+  EXPECT_EQ(rig.stateNow(), CaptureState::Capturing);
 }
 
 TEST(AgentLaunch, CancelTerminatesAParkedLaunch) {
