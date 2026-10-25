@@ -129,6 +129,9 @@ struct TooltipInput {
   CallstackIdx spanNode;  // invalid for a merged span
   uint64_t spanTicks = 0;
   uint32_t spanMerged = 1;
+  // WP-46 (Ctrl held): when the cursor is on a Waiting / Ready interval, append the waker, wait / latency and
+  // the top 8 frames of the blocking and unblocking stacks.
+  bool showInteraction = false;
 };
 // Thread-safe (pure). The tooltip text, one entry per line: thread, time, state with wait reason and
 // category, interval length, and the top function (strip) or the hovered span.

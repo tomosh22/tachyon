@@ -1,5 +1,7 @@
 #include "symbols/demangle.h"
 
+#include "symbols/dia/msvc_undecorate.h"
+
 #if __has_include(<cxxabi.h>)
 #include <cxxabi.h>
 
@@ -10,7 +12,7 @@
 namespace tachyon::symbols {
 
 std::string demangleMsvc(std::string_view mangled) {
-  return std::string(mangled);
+  return undecorateMsvc(mangled);  // DbgHelp on Windows, pass-through elsewhere
 }
 
 std::string demangleItanium(std::string_view mangled) {

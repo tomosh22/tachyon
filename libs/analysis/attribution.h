@@ -52,7 +52,9 @@ Result<void> checkAttributable(const model::TraceModel& model);
 // trace::kSampleFlag* bits, passed when fn accepts a fourth uint16_t parameter) for the samples of `thread`
 // with t0 <= ts < t1, in time order. weight (rule 1) = min(sampleIntervalTicks, end of the enclosing Running
 // interval - ts), or 0 when no Running interval encloses the sample. Requires checkAttributable. Returns
-// false if cancelled (checked every 65536 samples).
+// false if cancelled (checked every 65536 samples). Precondition: the thread's samples are sorted by ts (the
+// time range is found by binary search); TraceModel::load guarantees it (stable re-sort in its per-thread
+// order check), hand-built models must sort their samples.
 template <typename Fn>
 bool forEachWeightedSample(const model::TraceModel& m, ThreadIdx thread, uint64_t t0, uint64_t t1,
                            Cancel cancel, Fn&& fn) {
@@ -87,9 +89,16 @@ bool forEachWeightedSample(const model::TraceModel& m, ThreadIdx thread, uint64_
 // Thread-safe for concurrent const access. Sums weights and sample counts per leaf callstack node over the
 // given threads and time range (invalid callstacks count as the empty stack, node 0). Runs on up to `workers`
 // threads (0 = hardware_concurrency); the result (sorted by node) does not depend on it. Returns Cancelled if
-// `cancel` fires.
+// `cancel` fires (checked every 65536 samples of a scan and every 4096 nodes of the merge).
+//
+// With an `executor` the extra workers are tasks submitted to it (at the priority of the calling task)
+// instead of new threads. This cannot deadlock even when the caller itself runs on an executor thread and
+// every other worker is busy: the calling thread always does a worker's share itself and never waits for a
+// helper task that has not started; a helper that starts after the scan is over finds the work closed and
+// returns at once.
 Result<std::vector<NodeWeight>> accumulateNodeWeights(const model::TraceModel& model, uint64_t t0,
                                                       uint64_t t1, std::span<const ThreadIdx> threads,
-                                                      unsigned workers, Cancel cancel);
+                                                      unsigned workers, Cancel cancel,
+                                                      QueryExecutor* executor = nullptr);
 
 }  // namespace tachyon::analysis

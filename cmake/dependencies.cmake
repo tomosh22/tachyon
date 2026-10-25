@@ -161,3 +161,55 @@ function(tachyon_require_imgui)
   set_target_properties(tachyon_imgui PROPERTIES COMPILE_WARNING_AS_ERROR OFF)
   add_library(tachyon::imgui ALIAS tachyon_imgui)
 endfunction()
+
+# --- DIA SDK (Windows only, ships with Visual Studio 2022) ------------------------------------------------------
+# Finds <VS>/DIA SDK via, in order: -DTACHYON_DIA_SDK_DIR=..., $ENV{VSINSTALLDIR} (set by vcvars / msvc-dev-cmd),
+# vswhere. Sets TACHYON_DIA_INCLUDE_DIR (dia2.h) and TACHYON_DIA_DLL (bin/amd64/msdia140.dll) and fails the
+# configure with a clear message when either is missing. Nothing from the SDK is committed; msdia140.dll is
+# copied next to the test executables at build time by tachyon_copy_dia_dll().
+function(tachyon_find_dia_sdk)
+  if(TACHYON_DIA_DLL AND TACHYON_DIA_INCLUDE_DIR)
+    return()
+  endif()
+  set(_roots "")
+  if(TACHYON_DIA_SDK_DIR)
+    list(APPEND _roots "${TACHYON_DIA_SDK_DIR}")
+  endif()
+  if(DEFINED ENV{VSINSTALLDIR})
+    file(TO_CMAKE_PATH "$ENV{VSINSTALLDIR}" _vsdir)
+    list(APPEND _roots "${_vsdir}/DIA SDK")
+  endif()
+  set(_pf86 "$ENV{ProgramFiles\(x86\)}")
+  if(_pf86 AND EXISTS "${_pf86}/Microsoft Visual Studio/Installer/vswhere.exe")
+    execute_process(
+      COMMAND "${_pf86}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products * -property installationPath
+      OUTPUT_VARIABLE _vswhere_out OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_vswhere_out)
+      file(TO_CMAKE_PATH "${_vswhere_out}" _vswhere_out)
+      list(APPEND _roots "${_vswhere_out}/DIA SDK")
+    endif()
+  endif()
+  foreach(_root IN LISTS _roots)
+    if(EXISTS "${_root}/include/dia2.h" AND EXISTS "${_root}/bin/amd64/msdia140.dll")
+      set(TACHYON_DIA_INCLUDE_DIR "${_root}/include" CACHE INTERNAL "DIA SDK include directory")
+      set(TACHYON_DIA_DLL "${_root}/bin/amd64/msdia140.dll" CACHE INTERNAL "msdia140.dll (x64)")
+      message(STATUS "DIA SDK: ${_root}")
+      return()
+    endif()
+  endforeach()
+  message(FATAL_ERROR
+    "TACHYON_ENABLE_DIA is ON but the DIA SDK was not found. Install the 'C++ ATL/MSVC' components of Visual "
+    "Studio 2022 (they include 'DIA SDK'), run from a VS developer prompt (VSINSTALLDIR), or pass "
+    "-DTACHYON_DIA_SDK_DIR=<VS>/DIA SDK, or configure with -DTACHYON_ENABLE_DIA=OFF. Searched: ${_roots}")
+endfunction()
+
+# tachyon_copy_dia_dll(<target>): copies msdia140.dll next to the target's executable after each build.
+function(tachyon_copy_dia_dll target)
+  if(NOT WIN32 OR NOT TACHYON_ENABLE_DIA)
+    return()
+  endif()
+  tachyon_find_dia_sdk()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${TACHYON_DIA_DLL}" "$<TARGET_FILE_DIR:${target}>"
+    VERBATIM)
+endfunction()

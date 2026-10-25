@@ -258,7 +258,11 @@ TEST(SymbolStringTableTest, ConcurrentInternAndRead) {
 }
 
 TEST(DemangleTest, DefaultsArePassThroughForPlainNames) {
-  EXPECT_EQ(demangleMsvc("?foo@@YAXXZ"), "?foo@@YAXXZ");
+#if !defined(_WIN32)
+  EXPECT_EQ(demangleMsvc("?foo@@YAXXZ"), "?foo@@YAXXZ");  // undecorated through DbgHelp on Windows (WP-22)
+#else
+  EXPECT_EQ(demangleMsvc("?foo@@YAXXZ"), "foo");
+#endif
   EXPECT_EQ(demangleItanium("Engine::update"), "Engine::update");
   EXPECT_EQ(demangle("main"), "main");
   EXPECT_EQ(demangleItanium("_Znot_valid"), "_Znot_valid");

@@ -1,4 +1,4 @@
-tachyon_add_test(testbed_tests
+tachyon_add_test(testbed_tests SERIAL
   SOURCES calibration_test.cpp report_test.cpp scenarios_test.cpp
   DEPS tachyon::testbed_core)
 

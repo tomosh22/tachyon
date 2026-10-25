@@ -1,6 +1,6 @@
 // Demangler interface (WP-20). The defaults are pass-through, except that Itanium names are demangled with
-// abi::__cxa_demangle when <cxxabi.h> is available. A real MSVC demangler (UnDecorateSymbolName) lands with
-// the DIA provider.
+// abi::__cxa_demangle when <cxxabi.h> is available. The MSVC demangler (UnDecorateSymbolName) is
+// Windows-only.
 #pragma once
 
 #include <string>
@@ -8,7 +8,8 @@
 
 namespace tachyon::symbols {
 
-// Thread-safe: pure function. Pass-through for now; returns `mangled` unchanged.
+// Thread-safe. Windows: UnDecorateSymbolName (name only, serialized internally); elsewhere returns `mangled`
+// unchanged.
 std::string demangleMsvc(std::string_view mangled);
 
 // Thread-safe: pure function. Demangles an Itanium-ABI name (e.g. "_ZN3Foo3barEv"); returns `mangled`

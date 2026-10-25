@@ -40,6 +40,24 @@ void SelectionBus::setHovered(const HoveredItem& item) {
   publish(SelectionField::Hovered);
 }
 
+void SelectionBus::setSelectedWait(std::optional<WaitSelection> wait) {
+  if (m_state.selectedWait == wait) return;
+  m_state.selectedWait = wait;
+  publish(SelectionField::SelectedWait);
+}
+
+uint64_t SelectionBus::requestNavigation(ThreadIdx thread, uint64_t t0, uint64_t t1) {
+  m_state.navigation = NavigationRequest{m_nextSerial++, thread, t0, t1};
+  publish(SelectionField::Navigation);
+  return m_state.navigation.serial;
+}
+
+uint64_t SelectionBus::requestPanel(std::string name) {
+  m_state.panelRequest = PanelRequest{m_nextSerial++, std::move(name)};
+  publish(SelectionField::PanelRequest);
+  return m_state.panelRequest.serial;
+}
+
 void SelectionBus::clear() {
   m_state = SelectionState{};
   publish(SelectionField::All);

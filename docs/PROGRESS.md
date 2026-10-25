@@ -20,14 +20,14 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-14 | Capture validation on the engine | A | not started | wp/14-capture-validation | |
 | WP-20 | Symbol core | B | merged (oracle 0/929 mismatches; cold resolve 11.5 ms, memo 2.2 ns on CI) | wp/20-symbol-core | 2026-10-25 |
 | WP-21 | Symbol locator and HTTP client | B | merged (CI green incl. msdl.microsoft.com ntdll.pdb fetch) | wp/21-symbol-locator | 2026-10-25 |
-| WP-22 | DIA symbol provider | B | in progress | wp/22-dia-provider | 2026-10-25 |
+| WP-22 | DIA symbol provider | B | merged (Windows CI ran real DIA tests) | wp/22-dia-provider | 2026-10-25 |
 | WP-30 | Model loader | C | merged (medium 0.15 s on CI vs 2 s; large 6.4 s on 4 cores vs 30 s; resident 6.95× compressed — budget under review) | wp/30-model | 2026-10-25 |
 | WP-31 | Thread state intervals | C | merged (medium 3.9 ms on CI vs 0.5 s; independent oracle 0 mismatches on 8 fixtures) | wp/31-thread-states | 2026-10-25 |
 | WP-32 | Attribution and aggregation | C | merged | wp/32-attribution | 2026-10-25 |
 | WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | merged | wp/32b-return-address | 2026-10-25 |
-| WP-33 | Filters, cancellation, query cache | C | in progress | wp/33-query-cache | 2026-10-25 |
+| WP-33 | Filters, cancellation, query cache | C | merged | wp/33-query-cache | 2026-10-25 |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
-| WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
+| WP-35 | Function and scope statistics, frames | C | in progress | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
@@ -37,7 +37,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-43 | Call graph panel | D | not started | wp/43-call-graph | |
 | WP-44 | Function list and butterfly | D | not started | wp/44-function-list | |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
-| WP-46 | Thread interaction | D | not started | wp/46-thread-interaction | |
+| WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
@@ -63,6 +63,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | Gate | Result | Date | Notes |
 |---|---|---|---|
 | M0 | passed with exceptions | 2026-10-25 | CI green on Linux and Windows. etlstat numbers pending the user's Windows run (WP-01). Fixtures are generated at build time and checked against SHA256s, because LFS push is blocked. Trace round-trip/interning budget: skewed met (8.66 s), uniform 11.99 s against 10 s, memory met after compact. |
+| M1 | passed for the testbed; engine part pending WP-14 (user-assisted) | 2026-10-25 | Windows CI (elevated runner): `tachyon-cli capture --launch tachyon-testbed.exe` gives a trace with 0 lost events, loader samples before main, child following and attach; the trace opens in TraceReader. Engine capture and conversion-time budget on a real engine capture need the user (WP-14). 20 s dev-box run queued below. |
+| M2 | passed with exceptions | 2026-10-25 | Windows CI: DIA resolves testbed hot functions to file:line and the inline scenario to inline chains (every frame has a line); 1 M RVAs in about 4 s (budget 20 s); ntdll.pdb fetched from msdl.microsoft.com. No team symbol store yet (Part 7 default), so the team-store fetch is untested. An end-to-end symbolized testbed capture in the viewer on Windows is queued for the user. Known limits: hot/cold separated blocks resolve only when the parent's length covers them; an unbounded last public symbol claims trailing addresses. |
 
 ## WP-03 measured numbers (GitHub ubuntu-24.04 runner)
 
@@ -115,14 +117,33 @@ All 8 fixtures match expected.json exactly. Large also matches exactly (verifier
 Recurring load flake: TestbedScenarios.EveryScenarioRunsAndProducesValidReport fails under `ctest -j` (seen 4 times) and passes alone. Queued as WP-02b (make the scenario assertions load-tolerant).
 WP-32b merged (verifier PASS): `SymbolService::lookupCaller` and `functionKeyForCaller`, `frameKeyAt`/`usesExactAddress` helpers in libs/analysis/attribution.h for WP-34/35/46, iterative NodeAgg destruction (NodeAgg is no longer an aggregate, so no brace-init), tracegen non-leaf offsets in [1, size) (only the medium manifest hash changed). Orchestrator fix: the worker memory budget now counts the kernel-leaf arrays.
 
+## WP-33 notes
+
+Merged after the verifier FAIL was fixed in 71a9d73 (lost wakeup in waitIdle, racy executor tests, deep-stack cancellation latency, cache byte accounting, task exceptions reported as Cancelled). The verifier confirmed filters against brute force on all fixtures (about 1,100 combinations on medium), cache key canonicalisation and forced collisions, a TSan-clean concurrent workload, and the claim that nested fan-out through the executor cannot deadlock.
+
+| Metric | Measured | Budget |
+|---|---|---|
+| cache hit (shared API) | 0.11–0.18 µs | 50 µs |
+| bottomUp over a 10% range, medium, cold | 1.0–2.7 ms | 30 ms |
+| cancellation latency (medium / 20 M samples / executor / 100k-deep stacks) | 12.5 / 8.7 / 7.3 / 4.3 ms worst | 50 ms |
+| full-range bottomUp, medium (post-merge main) | 14.6 ms | 300 ms |
+
+API additions in query.h: `FunctionRegistry` (`ctx.functionIdx(key)`), `QueryCacheConfig`, the `*Shared` queries, `QueryExecutor` with `GenerationToken`, and `setExecutor`. Subtree root 0 now means no subtree. `Filter::function` tests the stack after the subtree cut. A FunctionIdx from another context is not detected (documented).
+
+## WP-46 notes
+
+Verifier PASS. Wait episodes were checked against brute force on 4 fixtures; the Waiting and Ready pieces form one episode, nothing is double-counted, and the scan is ASan-clean on document close. Longest-waits scan on medium: 0.46–0.50 ms (N=50), 2.6 ms (N=5000), budget 50 ms. The timeline frame medians over 5 ms come from machine load; main's binary shows the same spread. Low follow-ups: a ReadyRec at the switch-out ts is labelled "Preempted"; arrow clipping is done in float, so it misplaces markers beyond about 1e8 px (clip in double).
+
 ## Queued follow-ups
 
-- WP-02b: make TestbedScenarios.EveryScenarioRunsAndProducesValidReport load-tolerant (fails under ctest -j).
+- WP-02b: done by the orchestrator. testbed_tests are RUN_SERIAL (the CPU-share checks failed when ctest -j oversubscribed the cores; the verifier reproduced this on pre-existing binaries). LocatorTest.ConcurrentDownloadsAreBounded now asserts only the bound (≤ 2), not that the limit is reached. CancellationTest.TwentyMillion measured 42.6 ms against 50 ms under load average 10; watch it.
 - WP-21b: make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.
 - WP-36b: 64-row LOD frame under 4 ms.
 - `SymbolService::resolveAllAsync` should take `const TraceModel&` (the viewer const_casts today).
 
 ## Windows / privileged verification queue
+
+M2 end-to-end (Windows dev box): capture the testbed (`tachyon-cli capture --launch tachyon-testbed.exe --args "--scenario inline --duration 10" --out inline.tachyon`), open it in `tachyon-viewer.exe` and check that the timeline tooltips and flame chart show testbed function names, and that inline frames resolve. Symbol servers come from Settings (empty by default); add `https://msdl.microsoft.com/download/symbols` to resolve system DLLs.
 
 WP-42 GPU check (needs a mid-range GPU): `cmake --build --preset windows-release --target tachyon_fixtures_large`, open `build/windows-release/fixtures/large.tachyon` in `tachyon-viewer.exe` at 1080p and 1440p with all 64 rows visible, wait for "Building timeline index" to finish, then wheel-zoom from the whole trace to about 100 µs at 3 positions and drag-pan continuously; repeat with 4 rows expanded and during the first minute while the LOD builds. Report p95 and worst frame time (target: steady 60 fps, no frame > 16.6 ms). CPU-only frame cost measured on Linux: large, 64 collapsed rows, 1920 px: worst 5.2–6.9 ms, median about 3 ms; peak about 367 k vertices per frame.
 
