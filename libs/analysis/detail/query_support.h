@@ -104,7 +104,7 @@ class StackFlattener {
     m_slots.clear();
     if (m_blend != nullptr && scopeStack != 0 && scopeStack < m_blend->nodes.size()) {
       m_open.clear();
-      for (uint32_t n = scopeStack; n != 0; n = m_blend->nodes[n].parent) m_open.push_back(n);
+      for (uint32_t sn = scopeStack; sn != 0; sn = m_blend->nodes[sn].parent) m_open.push_back(sn);
       std::reverse(m_open.begin(), m_open.end());  // outermost first
       // The root of the stack is its first frame (depth 0): an unmatched scope sits directly above it, so no
       // scope ever precedes the first frame (tracegen's reference blending agrees; see the clarification).
