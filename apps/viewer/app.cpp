@@ -90,6 +90,8 @@ bool App::init(std::string& error) {
   m_panels.add(makeThreadsTimelinePanel());
   m_panels.add(makeThreadInteractionPanel());
   m_panels.add(makeCallGraphPanel());
+  m_panels.add(makeFunctionListPanel());
+  m_panels.add(makeButterflyPanel());
   m_selectionSub = m_selection.subscribe([this](const SelectionState& state, SelectionField field) {
     // WP-46: a panel asked for another panel to be shown (the panel itself takes the focus).
     if (field == SelectionField::PanelRequest) {

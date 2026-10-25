@@ -22,4 +22,12 @@ std::unique_ptr<IPanel> makeThreadInteractionPanel();
 // callgraph/callgraph_panel.cpp.
 std::unique_ptr<IPanel> makeCallGraphPanel();
 
+// Thread-safe: factory. WP-44: bottom-up function table ("Function List"); implemented in
+// functions/function_list_panel.cpp.
+std::unique_ptr<IPanel> makeFunctionListPanel();
+
+// Thread-safe: factory. WP-44: callers above / callees below the selected function ("Butterfly");
+// implemented in functions/butterfly_panel.cpp.
+std::unique_ptr<IPanel> makeButterflyPanel();
+
 }  // namespace tachyon::viewer
