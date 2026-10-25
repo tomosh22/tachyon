@@ -27,7 +27,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | merged | wp/32b-return-address | 2026-10-25 |
 | WP-33 | Filters, cancellation, query cache | C | merged | wp/33-query-cache | 2026-10-25 |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
-| WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
+| WP-35 | Function and scope statistics, frames | C | in progress | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
