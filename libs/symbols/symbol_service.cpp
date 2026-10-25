@@ -7,9 +7,12 @@
 namespace tachyon::symbols {
 
 struct SymbolService::Job {
-  model::TraceModel* model = nullptr;
+  model::TraceModel* mutableModel =
+      nullptr;                  // set by the non-const resolveAllAsync overload (waitAll target)
   std::vector<Module> modules;  // snapshot: workers never read the live model's modules
   std::unique_ptr<std::atomic<uint8_t>[]> state;
+  // Cache files pinned in the service's SymbolLocator per module (empty = none); released together.
+  std::vector<std::filesystem::path> pinned;
   std::vector<std::string> errors;  // written by the owning worker before the final state's release store
   std::vector<std::unique_ptr<ISymbolProvider>> providers;
   std::vector<ResolvedAddress> memo;  // indexed by FrameIdx; slot written before its module's release store
@@ -39,7 +42,7 @@ bool isFinal(SymbolState s) {
 
 SymbolService::SymbolService(std::vector<std::string> servers, std::filesystem::path cacheDir)
     : m_servers(std::move(servers)), m_cacheDir(std::move(cacheDir)), m_locator(m_servers, m_cacheDir) {
-  m_locate = [this](const Module& m) { return m_locator.locate(m); };
+  m_locate = [this](const Module& m, const std::atomic<bool>* cancel) { return m_locator.locate(m, cancel); };
   m_factory = [this](const Module&, const std::filesystem::path& file) -> std::unique_ptr<ISymbolProvider> {
     if (file.extension() == ".json") return std::make_unique<JsonSymbolProvider>(m_strings);
     return nullptr;
@@ -47,16 +50,43 @@ SymbolService::SymbolService(std::vector<std::string> servers, std::filesystem::
 }
 
 SymbolService::~SymbolService() {
-  if (m_job) {
-    m_job->cancel.store(true, std::memory_order_relaxed);
-    for (std::thread& t : m_job->threads) {
-      if (t.joinable()) t.join();
-    }
+  cancel();
+}
+
+void SymbolService::cancel() {
+  if (!m_job) return;
+  m_job->cancel.store(true, std::memory_order_release);
+  for (std::thread& t : m_job->threads) {
+    if (t.joinable()) t.join();
+  }
+  releasePins();
+}
+
+void SymbolService::releasePins() {
+  if (!m_job) return;
+  for (std::filesystem::path& p : m_job->pinned) {
+    if (p.empty()) continue;
+    m_locator.unpin(p);
+    p.clear();
   }
 }
 
 void SymbolService::setLocate(LocateFn locate) {
+  m_defaultLocate = false;
+  if (!locate) {
+    m_locate = nullptr;
+    return;
+  }
+  m_locate = [fn = std::move(locate)](const Module& m, const std::atomic<bool>*) { return fn(m); };
+}
+
+void SymbolService::setLocate(CancellableLocateFn locate) {
+  m_defaultLocate = false;
   m_locate = std::move(locate);
+}
+
+void SymbolService::configureLocator(SymbolLocatorConfig config) {
+  m_locator = SymbolLocator(std::move(config));
 }
 
 void SymbolService::setProviderFactory(ProviderFactory factory) {
@@ -72,10 +102,16 @@ Result<void> SymbolService::addSymbolFileOverride(const std::filesystem::path& s
 
 void SymbolService::resolveAllAsync(model::TraceModel& model,
                                     std::function<void(ModuleIdx, SymbolState)> onModule) {
+  resolveAllAsync(static_cast<const model::TraceModel&>(model), std::move(onModule));
+  m_job->mutableModel = &model;  // workers never read this
+}
+
+void SymbolService::resolveAllAsync(const model::TraceModel& model,
+                                    std::function<void(ModuleIdx, SymbolState)> onModule) {
   waitAll();
+  releasePins();  // the previous run's providers are destroyed with its job below
 
   auto job = std::make_unique<Job>();
-  job->model = &model;
   job->modules = model.modules;
   const size_t moduleCount = job->modules.size();
   job->state.reset(new std::atomic<uint8_t>[moduleCount]);
@@ -84,6 +120,7 @@ void SymbolService::resolveAllAsync(model::TraceModel& model,
   }
   job->errors.resize(moduleCount);
   job->providers.resize(moduleCount);
+  job->pinned.resize(moduleCount);
   job->memo.resize(model.frames.size());
   job->framesOfModule.resize(moduleCount);
   // A frame is non-leaf when some callstack node referencing it has a child: the child's parent is that node.
@@ -159,14 +196,29 @@ void SymbolService::processModule(Job& job, uint32_t idx) {
       }
     }
   }
-  if (!found && m_locate) located = m_locate(module);
+  auto abandon = [&] {  // cancelled: back to Pending without a callback
+    job.state[idx].store(static_cast<uint8_t>(SymbolState::Pending), std::memory_order_release);
+  };
+  if (job.cancel.load(std::memory_order_acquire)) return abandon();
+  const bool pinnedByLocator = !found && m_locate && m_defaultLocate;
+  if (!found && m_locate) located = m_locate(module, &job.cancel);
   if (!located.ok()) {
+    if (located.error().code == ErrorCode::Cancelled) return abandon();
     setState(job, idx, SymbolState::NotFound, located.error().toString());
     return;
   }
+  // The default locate pins what it returns; keep it pinned while the provider lives (until the run ends).
+  if (pinnedByLocator) job.pinned[idx] = located.value();
+  auto releaseNow = [&] {
+    if (pinnedByLocator) {
+      m_locator.unpin(job.pinned[idx]);
+      job.pinned[idx].clear();
+    }
+  };
 
   std::unique_ptr<ISymbolProvider> provider = m_factory ? m_factory(module, located.value()) : nullptr;
   if (!provider) {
+    releaseNow();
     setState(job, idx, SymbolState::Failed, "no symbol provider for " + located.value().string());
     return;
   }
@@ -174,6 +226,8 @@ void SymbolService::processModule(Job& job, uint32_t idx) {
   if (!loaded.ok()) {
     const SymbolState s =
         loaded.error().code == ErrorCode::NotFound ? SymbolState::NotFound : SymbolState::Failed;
+    provider.reset();
+    releaseNow();
     setState(job, idx, s, loaded.error().toString());
     return;
   }
@@ -195,12 +249,23 @@ void SymbolService::waitAll() {
   for (std::thread& t : m_job->threads) {
     if (t.joinable()) t.join();
   }
+  if (m_job->mutableModel) applyStates(*m_job->mutableModel);
+}
+
+void SymbolService::waitAll(model::TraceModel& model) {
+  if (!m_job) return;
+  for (std::thread& t : m_job->threads) {
+    if (t.joinable()) t.join();
+  }
+  applyStates(model);
+}
+
+void SymbolService::applyStates(model::TraceModel& model) {
   if (m_job->applied) return;
   m_job->applied = true;
   for (const uint32_t m : m_job->referenced) {
-    if (m < m_job->model->modules.size()) {
-      m_job->model->modules[m].state =
-          static_cast<SymbolState>(m_job->state[m].load(std::memory_order_acquire));
+    if (m < model.modules.size()) {
+      model.modules[m].state = static_cast<SymbolState>(m_job->state[m].load(std::memory_order_acquire));
     }
   }
 }

@@ -10,8 +10,12 @@
 #include <windows.h>
 #include <winhttp.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <fstream>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace tachyon::symbols {
@@ -27,6 +31,62 @@ struct InternetHandle {
   ~InternetHandle() {
     if (h) WinHttpCloseHandle(h);
   }
+};
+
+// A request handle that can be closed from two threads (the transferring thread and the cancel watcher):
+// the atomic exchange guarantees WinHttpCloseHandle runs exactly once. Closing a request handle unblocks a
+// pending synchronous WinHttpSendRequest / WinHttpReceiveResponse / WinHttpReadData on another thread (they
+// fail with an error; callers then consult the cancel flag).
+class SharedRequest {
+ public:
+  SharedRequest() = default;
+  explicit SharedRequest(HINTERNET h) : m_handle(h) {}
+  SharedRequest(const SharedRequest&) = delete;
+  SharedRequest& operator=(const SharedRequest&) = delete;
+  ~SharedRequest() { close(); }
+  HINTERNET get() const { return m_handle.load(std::memory_order_acquire); }
+  void close() {
+    HINTERNET h = m_handle.exchange(nullptr, std::memory_order_acq_rel);
+    if (h) WinHttpCloseHandle(h);
+  }
+
+ private:
+  std::atomic<HINTERNET> m_handle{nullptr};
+};
+
+// Watches `cancel` while a transfer runs and closes the request when it flips. Stopped (and joined) by the
+// destructor, so it never outlives the transfer.
+class CancelWatcher {
+ public:
+  CancelWatcher(SharedRequest& request, const std::atomic<bool>* cancel) {
+    if (!cancel) return;
+    m_thread = std::thread([this, &request, cancel] {
+      std::unique_lock lock(m_mutex);
+      while (!m_stop) {
+        if (cancel->load(std::memory_order_relaxed)) {
+          request.close();
+          return;
+        }
+        m_cv.wait_for(lock, std::chrono::milliseconds(20));
+      }
+    });
+  }
+  CancelWatcher(const CancelWatcher&) = delete;
+  CancelWatcher& operator=(const CancelWatcher&) = delete;
+  ~CancelWatcher() {
+    {
+      std::lock_guard lock(m_mutex);
+      m_stop = true;
+    }
+    m_cv.notify_all();
+    if (m_thread.joinable()) m_thread.join();
+  }
+
+ private:
+  std::mutex m_mutex;
+  std::condition_variable m_cv;
+  bool m_stop = false;
+  std::thread m_thread;
 };
 
 std::wstring widen(const std::string& s) {
@@ -82,21 +142,25 @@ class WinHttpClient final : public RetryingHttpClient {
     InternetHandle connection(WinHttpConnect(m_session.h, host.c_str(), parts.nPort, 0));
     if (!connection.h) return winError("WinHttpConnect", GetLastError());
     const DWORD flags = parts.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0;
-    InternetHandle request(WinHttpOpenRequest(connection.h, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
-                                              WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
-    if (!request.h) return winError("WinHttpOpenRequest", GetLastError());
+    SharedRequest request(WinHttpOpenRequest(connection.h, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                             WINHTTP_DEFAULT_ACCEPT_TYPES, flags));
+    if (!request.get()) return winError("WinHttpOpenRequest", GetLastError());
+    CancelWatcher watcher(request, cancel);
+    const auto cancelled = [cancel] { return cancel && cancel->load(std::memory_order_relaxed); };
     const auto started = std::chrono::steady_clock::now();
     const auto budget = std::chrono::milliseconds(options().totalTimeoutMs);
     {
       // Explicit per-request timeouts (resolve, connect, send, receive).
       const int connect = static_cast<int>(options().connectTimeoutMs);
       const int total = static_cast<int>(options().totalTimeoutMs);
-      WinHttpSetTimeouts(request.h, connect, connect, total, total);
+      WinHttpSetTimeouts(request.get(), connect, connect, total, total);
     }
 
-    if (!WinHttpSendRequest(request.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-        !WinHttpReceiveResponse(request.h, nullptr)) {
+    if (!WinHttpSendRequest(request.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0,
+                            0) ||
+        !WinHttpReceiveResponse(request.get(), nullptr)) {
       const DWORD err = GetLastError();
+      if (cancelled()) return makeError(ErrorCode::Cancelled, "cancelled");
       if (std::chrono::steady_clock::now() - started >= budget) {
         return makeError(ErrorCode::Timeout, "request timed out, error " + std::to_string(err));
       }
@@ -107,14 +171,15 @@ class WinHttpClient final : public RetryingHttpClient {
     }
     DWORD status = 0;
     DWORD statusSize = sizeof(status);
-    if (!WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+    if (!WinHttpQueryHeaders(request.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                              WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX)) {
+      if (cancelled()) return makeError(ErrorCode::Cancelled, "cancelled");
       return winError("WinHttpQueryHeaders", GetLastError());
     }
     uint64_t total = 0;
     DWORD lengthValue = 0;
     DWORD lengthSize = sizeof(lengthValue);
-    if (WinHttpQueryHeaders(request.h, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+    if (WinHttpQueryHeaders(request.get(), WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
                             WINHTTP_HEADER_NAME_BY_INDEX, &lengthValue, &lengthSize,
                             WINHTTP_NO_HEADER_INDEX)) {
       total = lengthValue;
@@ -134,7 +199,8 @@ class WinHttpClient final : public RetryingHttpClient {
         return makeError(ErrorCode::Cancelled, "cancelled");
       if (std::chrono::steady_clock::now() > deadline) return makeError(ErrorCode::Timeout, "total timeout");
       DWORD got = 0;
-      if (!WinHttpReadData(request.h, buffer.data(), static_cast<DWORD>(buffer.size()), &got)) {
+      if (!WinHttpReadData(request.get(), buffer.data(), static_cast<DWORD>(buffer.size()), &got)) {
+        if (cancelled()) return makeError(ErrorCode::Cancelled, "cancelled");
         return winError("WinHttpReadData", GetLastError());
       }
       if (got == 0) break;

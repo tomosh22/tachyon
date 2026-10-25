@@ -38,7 +38,8 @@ class SymbolService {
   // Thread-safe (constructor). `servers` and `cacheDir` configure the default SymbolLocator (WP-21),
   // consulted after the symbol file overrides.
   SymbolService(std::vector<std::string> servers, std::filesystem::path cacheDir);
-  // Cancels pending module loads, joins the workers. Does not touch the model.
+  // Cancels pending module loads and in-flight downloads, joins the workers (returns promptly even against a
+  // stalled symbol server), unpins cache files. Does not touch the model.
   ~SymbolService();
   SymbolService(const SymbolService&) = delete;
   SymbolService& operator=(const SymbolService&) = delete;
@@ -48,12 +49,29 @@ class SymbolService {
   void setWorkerThreads(unsigned n) { m_workerThreads = n; }
   // Replaces the locate function consulted after the overrides. Default: SymbolLocator(servers, cacheDir).
   void setLocate(LocateFn locate);
+  // Same, for a locate function that honours the service's cancel flag (cancel() / destructor). The flag
+  // pointer stays valid for the duration of the call.
+  void setLocate(CancellableLocateFn locate);
+  // Replaces the default SymbolLocator with one built from `config` (servers/cacheDir of the constructor are
+  // dropped). Not thread-safe; call before resolveAllAsync(). Has no effect after setLocate().
+  void configureLocator(SymbolLocatorConfig config);
+  // Thread-safe. The default locator: the service pins the symbol files it locates here for as long as their
+  // provider lives and unpins them when the run ends (cancel(), the next resolveAllAsync(), destruction) or
+  // the provider is discarded after a failed load.
+  SymbolLocator& locator() { return m_locator; }
   // Replaces the provider factory. Default: JsonSymbolProvider for *.json paths; nullptr result = Failed.
   // Providers must intern into stringSink() so their StringIdx values are valid for symbolStrings().
   void setProviderFactory(ProviderFactory factory);
   // Registers a tracegen `.symbols.json`. Modules whose ModuleId (or, lacking ids, path) matches an entry of
   // it get this file as their symbol file, ahead of the locate function. Not thread-safe.
   Result<void> addSymbolFileOverride(const std::filesystem::path& symbolsJson);
+
+  // Thread-safe flag set, then joins the workers (call from the owning thread; not concurrently with
+  // resolveAllAsync/waitAll). Aborts in-flight downloads and backoff sleeps, skips modules not yet started
+  // (they stay Pending) and unpins cache files. Typically returns
+  // within tens of milliseconds, bounded by the slowest non-cancellable provider load. The service stays
+  // usable: a later resolveAllAsync() starts a fresh run.
+  void cancel();
 
   // Starts resolution of every module referenced by a frame of `model` and returns immediately. Workers
   // transition each module Pending -> Loading -> Resolved / NotFound / Failed and call `onModule` from the
@@ -64,11 +82,19 @@ class SymbolService {
   // worker; Module::state is written only by waitAll() on the calling thread. Calling it again waits for the
   // previous run first. Not thread-safe against other members except the const queries below, which may run
   // concurrently with the workers (not with this call's setup phase).
+  void resolveAllAsync(const model::TraceModel& model,
+                       std::function<void(ModuleIdx, SymbolState)> onModule = {});
+  // Compatibility overload for callers that own a mutable model: identical, but remembers the model so that
+  // waitAll() can write Module::state back into it.
   void resolveAllAsync(model::TraceModel& model, std::function<void(ModuleIdx, SymbolState)> onModule = {});
 
   // Blocks until every worker finished, then copies the final states into Module::state of the model passed
-  // to resolveAllAsync. Call from one thread (the one that owns the model). No-op if nothing is running.
+  // to the non-const resolveAllAsync overload (nothing is written when the const overload was used; use
+  // moduleState() then). Call from one thread (the one that owns the model). No-op if nothing is running.
   void waitAll();
+  // Same, writing the final states into `model` (the one passed to the const overload; must be the same
+  // object). Call from the thread that owns the model.
+  void waitAll(model::TraceModel& model);
 
   // Thread-safe, lock-free. Modules done / total (total = modules referenced by frames).
   SymbolProgress progress() const;
@@ -111,6 +137,8 @@ class SymbolService {
   struct Job;
   void workerLoop(Job* job);
   void processModule(Job& job, uint32_t moduleIdx);
+  void releasePins();
+  void applyStates(model::TraceModel& model);
   void setState(Job& job, uint32_t moduleIdx, SymbolState state, std::string error);
 
   struct Override {
@@ -121,7 +149,8 @@ class SymbolService {
   std::vector<std::string> m_servers;
   std::filesystem::path m_cacheDir;
   SymbolLocator m_locator;
-  LocateFn m_locate;
+  CancellableLocateFn m_locate;
+  bool m_defaultLocate = true;  // m_locate is the built-in one: its results are pinned in m_locator
   ProviderFactory m_factory;
   unsigned m_workerThreads = 0;
   std::vector<Override> m_overrides;
