@@ -24,6 +24,10 @@
 
 struct ImGuiContext;
 
+namespace tachyon::analysis {
+class QueryExecutor;
+}  // namespace tachyon::analysis
+
 namespace tachyon::viewer {
 
 // Module state changes reported by the symbol workers, handed to the main thread.
@@ -76,6 +80,8 @@ class App {
   Settings& settings() { return m_settings; }
   SelectionBus& selection() { return m_selection; }
   JobQueue& jobs() { return m_jobs; }
+  // WP-43: the analysis query executor shared by all panels (2 worker threads).
+  analysis::QueryExecutor& queryExecutor() { return *m_queryExecutor; }
   PanelRegistry& panels() { return m_panels; }
   CommandRegistry& commands() { return m_commands; }
   const std::shared_ptr<Document>& document() const { return m_document; }
@@ -122,6 +128,7 @@ class App {
   SelectionBus m_selection;
   SelectionBus::SubscriptionId m_selectionSub = SelectionBus::kNoSubscription;
   JobQueue m_jobs;
+  std::unique_ptr<analysis::QueryExecutor> m_queryExecutor;  // declared before m_document: outlives it
   PanelRegistry m_panels;
   CommandRegistry m_commands;
   FileBrowser m_fileBrowser;

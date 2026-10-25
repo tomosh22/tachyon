@@ -17,6 +17,9 @@ class JobQueue;
 namespace tachyon::symbols {
 class SymbolService;
 }  // namespace tachyon::symbols
+namespace tachyon::analysis {
+class QueryExecutor;
+}  // namespace tachyon::analysis
 namespace tachyon::viewer {
 
 // What a panel may touch while drawing. `document` is null when no trace is open. Valid only during the call.
@@ -36,6 +39,10 @@ struct PanelContext {
   // `symbolGeneration`: caches keyed by function keys must be keyed by it.
   const symbols::SymbolService* symbols = nullptr;
   uint64_t symbolGeneration = 0;
+  // WP-43: the app-owned analysis query executor (a small pool; Foreground/Background priorities). Queries
+  // run on it through Document::analysis(). Null in bare test setups. Thread-safe object, but handed out for
+  // the main thread's use.
+  analysis::QueryExecutor* queryExecutor = nullptr;
   // Hook behind requestRedraw(); set by App.
   void (*redrawFn)(void*) = nullptr;
   void* redrawUser = nullptr;

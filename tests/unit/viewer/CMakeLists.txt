@@ -7,6 +7,7 @@ tachyon_add_test(viewer_tests
           timeline_math_test.cpp timeline_rows_test.cpp timeline_colors_test.cpp timeline_widget_test.cpp
           timeline_data_test.cpp interaction_model_test.cpp interaction_arrow_test.cpp
           interaction_runner_test.cpp interaction_widget_test.cpp
+          callgraph_model_test.cpp callgraph_widget_test.cpp
   DEPS tachyon::viewer_core tachyon::analysis tachyon::symbols)
 
 # Headless end-to-end checks of the real binary: no display, Null renderer, 100 frames.

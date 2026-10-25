@@ -1,5 +1,6 @@
 #include "viewer/app.h"
 
+#include "analysis/query_executor.h"
 #include "analysis/thread_states.h"
 #include "core/log.h"
 #include "core/platform.h"
@@ -42,7 +43,9 @@ void drawSpinner(float radius, float thickness, ImU32 color) {
 }  // namespace
 
 App::App(std::unique_ptr<IRenderer> renderer, AppOptions options)
-    : m_renderer(std::move(renderer)), m_options(std::move(options)) {}
+    : m_renderer(std::move(renderer)),
+      m_options(std::move(options)),
+      m_queryExecutor(std::make_unique<analysis::QueryExecutor>(analysis::QueryExecutor::Options{2, 16})) {}
 
 App::~App() {
   m_jobs.cancelAll();
@@ -86,6 +89,7 @@ bool App::init(std::string& error) {
   m_panels.add(makeTraceInfoPanel());
   m_panels.add(makeThreadsTimelinePanel());
   m_panels.add(makeThreadInteractionPanel());
+  m_panels.add(makeCallGraphPanel());
   m_selectionSub = m_selection.subscribe([this](const SelectionState& state, SelectionField field) {
     // WP-46: a panel asked for another panel to be shown (the panel itself takes the focus).
     if (field == SelectionField::PanelRequest) {
@@ -105,6 +109,7 @@ PanelContext App::panelContext() const {
   c.selection = const_cast<SelectionBus*>(&m_selection);
   c.settings = &m_settings;
   c.jobs = const_cast<JobQueue*>(&m_jobs);
+  c.queryExecutor = m_queryExecutor.get();
   c.documentGeneration = m_documentGeneration;
   c.symbols = m_document ? m_document->symbols().get() : nullptr;
   c.symbolGeneration = m_symbolGeneration;

@@ -7,8 +7,12 @@ endif()
 tachyon_require_imgui()
 
 add_library(tachyon_viewer_core STATIC
+  analysis_context.cpp
   app.cpp
   builtin_panels.cpp
+  callgraph/callgraph_model.cpp
+  callgraph/callgraph_panel.cpp
+  callgraph/subtree_resolver.cpp
   cli_args.cpp
   command_registry.cpp
   document.cpp
