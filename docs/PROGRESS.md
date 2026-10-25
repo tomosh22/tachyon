@@ -35,7 +35,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-42 | Threads timeline | D | merged; needs GPU verification (60 fps) | wp/42-threads-timeline | 2026-10-25 |
 | WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | merged | wp/42b-timeline-symbols | 2026-10-25 |
 | WP-43 | Call graph panel | D | merged | wp/43-call-graph | 2026-10-25 |
-| WP-44 | Function list and butterfly | D | not started | wp/44-function-list | |
+| WP-44 | Function list and butterfly | D | in progress | wp/44-function-list | 2026-10-25 |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
 | WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
