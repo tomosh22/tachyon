@@ -16,6 +16,7 @@
 // Filter semantics: samples with t0 <= ts < t1 on the selected threads. Weights are NOT re-clipped to t1.
 #pragma once
 
+#include "analysis/function_registry.h"
 #include "core/result.h"
 #include "core/strong_id.h"
 #include "model/model.h"
@@ -33,6 +34,9 @@ namespace tachyon::analysis {
 
 using symbols::FunctionKey;
 
+class QueryCache;     // query_cache.h
+class QueryExecutor;  // query_executor.h
+
 // Cooperative cancellation token (spec 3.7 "cancellable via a token"). Default: never cancelled.
 struct Cancel {
   const std::atomic<bool>* flag = nullptr;
@@ -44,7 +48,12 @@ struct Filter {
   uint64_t t0 = 0, t1 = UINT64_MAX;               // half-open [t0, t1) on sample timestamps
   std::optional<std::vector<ThreadIdx>> threads;  // nullopt = all threads
   std::optional<CallstackIdx> subtreeRoot;        // only samples whose stack passes through this node
-  std::optional<FunctionIdx> function;            // not supported by WP-32: setting it returns Unsupported
+  // Only samples whose stack contains this function: the stack as the query sees it, i.e. after the subtree
+  // cut, with the context's inline expansion and kernel frame handling applied. A handle issued by
+  // QueryContext::functionIdx(); an index the context never issued is rejected with InvalidArgument.
+  // Limitation: handles are dense indices without a context id, so an index that happens to be issued by
+  // BOTH contexts is not detected as foreign; keep a handle with the context that issued it.
+  std::optional<FunctionIdx> function;
 
   // Thread-safe (value type).
   bool operator==(const Filter&) const = default;
@@ -99,18 +108,29 @@ struct AggregationOptions {
   unsigned threads = 0;  // worker threads; 0 = hardware_concurrency. Results do not depend on it.
 };
 
+// hits / misses count every cache lookup of a query, including the lookup of the internal per-leaf-node
+// weight table that tree and row queries share; resultHits / resultMisses count the lookups of final results
+// only (one per query call). WP-33 additions: the fields after `misses`.
 struct CacheStats {
   uint64_t hits = 0, misses = 0;
+  uint64_t resultHits = 0, resultMisses = 0;
+  uint64_t evictions = 0;
+  uint64_t entries = 0, bytes = 0;  // current content
 };
 
-// Binds a model and its symbols for the queries below and owns the per-filter memo (WP-33 adds the general
-// query cache). The model, the symbol service and the symbols' module resolution must stay unchanged and
-// alive while the context is used. Queries may run concurrently on one context.
+struct QueryCacheConfig {
+  size_t budgetBytes = size_t{256} << 20;  // approximate bound on the bytes held by cached results
+};
+
+// Binds a model and its symbols for the queries below and owns the QueryCache (results keyed by query, extra
+// arguments and filter, LRU within a byte budget) and the FunctionRegistry. The model, the symbol service and
+// the symbols' module resolution must stay unchanged and alive while the context is used. Queries may run
+// concurrently on one context.
 class QueryContext {
  public:
   // Thread-safe (constructor). Requires TraceModel::statesByThread to be built (buildThreadStates).
   QueryContext(const model::TraceModel& model, const symbols::SymbolService& symbols,
-               AggregationOptions options = {});
+               AggregationOptions options = {}, QueryCacheConfig cache = {});
   ~QueryContext();
   QueryContext(const QueryContext&) = delete;
   QueryContext& operator=(const QueryContext&) = delete;
@@ -119,9 +139,25 @@ class QueryContext {
   const model::TraceModel& model() const;
   const symbols::SymbolService& symbols() const;
   const AggregationOptions& options() const;
-  // Drops every memoized result.
+  // Drops every cached result (the FunctionRegistry is kept). Results already handed out stay valid.
   void clearCache();
   CacheStats cacheStats() const;
+  // Thread-safe. The cache itself (budget, counters per kind); see query_cache.h.
+  QueryCache& cache() const;
+  // Thread-safe (the cache locks internally). Changes the byte budget and evicts down to it.
+  void setCacheBudget(size_t bytes);
+
+  // FunctionIdx handles for Filter::function. Thread-safe; indices are issued per context and never reused.
+  FunctionRegistry& functions() const;
+  FunctionIdx functionIdx(FunctionKey key) const { return functions().intern(key); }
+  std::optional<FunctionKey> functionKey(FunctionIdx idx) const { return functions().key(idx); }
+
+  // Optional executor (owned by the caller, must outlive every query run on this context): the scan of a
+  // query then fans out through it instead of starting its own threads. Not thread-safe against running
+  // queries: call it before queries start (the pointer itself is read atomically).
+  void setExecutor(QueryExecutor* executor);
+  // Thread-safe.
+  QueryExecutor* executor() const;
 
   struct Impl;
   Impl& impl() const { return *m_impl; }
@@ -129,6 +165,18 @@ class QueryContext {
  private:
   std::unique_ptr<Impl> m_impl;
 };
+
+// Shared-result variants (WP-33). Same queries and semantics, but the result is the cache's own immutable
+// copy: a hit costs a lookup and a reference count, not a copy. The by-value functions below return a copy of
+// it. All three are thread-safe like their by-value forms; the returned object is immutable and may be held
+// and read from any thread for as long as the pointer lives (it survives eviction and clearCache()).
+Result<std::shared_ptr<const NodeAgg>> topDownTreeShared(const QueryContext& ctx, const Filter& filter,
+                                                         Cancel cancel = {});
+Result<std::shared_ptr<const std::vector<FunctionRow>>> bottomUpFunctionsShared(const QueryContext& ctx,
+                                                                                const Filter& filter,
+                                                                                Cancel cancel = {});
+Result<std::shared_ptr<const Butterfly>> butterflyShared(const QueryContext& ctx, const Filter& filter,
+                                                         FunctionKey key, Cancel cancel = {});
 
 // Thread-safe. Merged top-down call tree (merge by FunctionKey per depth). The root has key kRootKey,
 // inclusive = total weight of the selected samples, exclusive = weight of samples with an empty stack. With

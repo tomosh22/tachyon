@@ -285,8 +285,8 @@ TEST(AggregationTest, InvalidFiltersAreRejected) {
   bad.threads = std::vector<ThreadIdx>{ThreadIdx(9)};
   EXPECT_EQ(bottomUpFunctions(ctx, bad).error().code, ErrorCode::InvalidArgument);
   Filter fn;
-  fn.function = FunctionIdx(1);
-  EXPECT_EQ(topDownTree(ctx, fn).error().code, ErrorCode::Unsupported);
+  fn.function = FunctionIdx(1);  // never issued by ctx.functionIdx()
+  EXPECT_EQ(topDownTree(ctx, fn).error().code, ErrorCode::InvalidArgument);
   Filter badRoot;
   badRoot.subtreeRoot = CallstackIdx(1u << 20);
   EXPECT_EQ(butterfly(ctx, badRoot, fk(kF)).error().code, ErrorCode::InvalidArgument);
