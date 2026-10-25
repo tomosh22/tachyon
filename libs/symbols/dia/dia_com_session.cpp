@@ -25,7 +25,6 @@
 #pragma warning(pop)
 
 #include <algorithm>
-#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -191,14 +190,8 @@ class ComSession final : public IDiaSymbolSession {
     ComPtr<IDiaSymbol> global;
     HRESULT hr = m_session->get_globalScope(global.put());
     if (FAILED(hr) || !global) return FAILED(hr) ? hr : E_FAIL;
-    const auto t0 = GetTickCount64();
-    std::fprintf(stderr, "[dia-trace] enumerating functions\n");
     enumerate(global.get(), SymTagFunction, /*isPublic=*/false, m_functions);
-    std::fprintf(stderr, "[dia-trace] %zu functions after %llu ms; enumerating publics\n", m_functions.size(),
-                 static_cast<unsigned long long>(GetTickCount64() - t0));
     enumerate(global.get(), SymTagPublicSymbol, /*isPublic=*/true, m_publics);
-    std::fprintf(stderr, "[dia-trace] %zu publics after %llu ms\n", m_publics.size(),
-                 static_cast<unsigned long long>(GetTickCount64() - t0));
     return S_OK;
   }
 
@@ -307,14 +300,11 @@ class ComSession final : public IDiaSymbolSession {
   void enumerate(IDiaSymbol* global, enum SymTagEnum tag, bool isPublic, std::vector<Entry>& out) {
     ComPtr<IDiaEnumSymbols> en;
     if (FAILED(global->findChildren(tag, nullptr, nsNone, en.put())) || !en) return;
-    size_t seen = 0;
     for (;;) {
       ComPtr<IDiaSymbol> sym;
       ULONG fetched = 0;
       const HRESULT hr = en->Next(1, sym.put(), &fetched);
       if (hr != S_OK || fetched != 1) break;
-      if (++seen % 1000 == 0)
-        std::fprintf(stderr, "[dia-trace] ... %zu symbols (tag %d)\n", seen, static_cast<int>(tag));
       DWORD rva = 0;
       if (FAILED(sym->get_relativeVirtualAddress(&rva)) || rva == 0) continue;
       ULONGLONG length = 0;
