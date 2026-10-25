@@ -708,8 +708,10 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
         m.plots.back().name = r.v.name;
       }
       PlotSeries& p = m.plots[it->second];
-      p.ts.push_back(r.v.ts);
-      p.value.push_back(r.v.value);
+      const uint64_t ts = r.v.ts;
+      const double value = r.v.value;
+      p.ts.push_back(ts);
+      p.value.push_back(value);
     }
   }
 
