@@ -321,6 +321,12 @@ TEST(AgentStateMachine, ShutdownStopsRunningCapture) {
 TEST(AgentStateMachine, InstHelloReturnsPipeName) {
   Harness h;
   Client c = h.connect();
+  // WP-52: outside a capture nothing is recorded, so the SDK is told no (and uses its sidecar file).
+  auto idle = callOk(c, InstHelloRequest{1234, kProtocolApiVersion});
+  EXPECT_FALSE(idle->ok);
+  EXPECT_EQ(idle->code, ErrorCode::NotFound);
+
+  ASSERT_TRUE(callOk(c, h.startRequest("hello.tachyon"))->ok);
   auto r = callOk(c, InstHelloRequest{1234, kProtocolApiVersion});
   ASSERT_TRUE(r->ok) << r->error;
   const auto* body = std::get_if<InstHelloBody>(&r->body);

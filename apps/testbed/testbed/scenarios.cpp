@@ -155,6 +155,7 @@ uint64_t secondsToNs(double seconds) {
 
 void identifyThread(ThreadReport& report, const std::string& name) {
   setCurrentThreadName(name);
+  onThreadNamed(name);
   report.name = name;
   report.tid = currentThreadId();
 }
@@ -183,19 +184,32 @@ ThreadReport spinImpl(const Calibration& cal, double durationS, uint64_t* checks
   const uint64_t deadline = readTsc() + secondsToTsc(cal, durationS);
   uint64_t t = readTsc();
   while (t < deadline) {
-    state = hot_a(counts[0], state);
+    TB_SCOPE("spin_cycle");
+    {
+      TB_SCOPE("hot_a");
+      state = hot_a(counts[0], state);
+    }
     uint64_t next = readTsc();
     ticks[0] += next - t;
     t = next;
-    state = hot_b(counts[1], state);
+    {
+      TB_SCOPE("hot_b");
+      state = hot_b(counts[1], state);
+    }
     next = readTsc();
     ticks[1] += next - t;
     t = next;
-    state = hot_c(counts[2], state);
+    {
+      TB_SCOPE("hot_c");
+      state = hot_c(counts[2], state);
+    }
     next = readTsc();
     ticks[2] += next - t;
     t = next;
-    state = spin_rest(counts[3], state);
+    {
+      TB_SCOPE("spin_rest");
+      state = spin_rest(counts[3], state);
+    }
     next = readTsc();
     ticks[3] += next - t;
     t = next;
@@ -294,11 +308,17 @@ Result<ScenarioReport> runLock(const RunConfig& config, const Calibration& cal) 
       uint64_t waitTicks = 0, criticalTicks = 0, outsideTicks = 0, state = static_cast<uint64_t>(i) + 1;
       uint64_t t = readTsc();
       while (t < deadline) {
-        lock_wait(&mutex);
+        {
+          InstLockScope waiting(&mutex, "testbed.lock");
+          lock_wait(&mutex);
+        }
         uint64_t next = readTsc();
         waitTicks += next - t;
         t = next;
-        state = lock_critical_section(t + holdTsc, state);
+        {
+          TB_SCOPE("lock_critical_section");
+          state = lock_critical_section(t + holdTsc, state);
+        }
         ++acquisitions[i];
         mutex.unlock();
         next = readTsc();
@@ -504,8 +524,12 @@ Result<ScenarioReport> runInline(const RunConfig& config, const Calibration& cal
 // ---- fibers
 // -----------------------------------------------------------------------------------------------------
 
+// Fiber ids reported to the SDK: the worker thread's own context and fibers 1..kFiberCount.
+constexpr uint64_t kMainFiberId = 100;
+
 struct FiberCtx {
   FiberGroup* group = nullptr;
+  uint64_t fiberId = 0;
   uint64_t sliceTsc = 0;
   uint64_t state = 1;
 };
@@ -514,7 +538,12 @@ template <uint64_t (*WorkFn)(uint64_t, uint64_t)>
 void fiberBody(void* arg) {
   auto* ctx = static_cast<FiberCtx*>(arg);
   for (;;) {
-    ctx->state = WorkFn(readTsc() + ctx->sliceTsc, ctx->state);
+    onFiberSwitchEnd(ctx->fiberId);  // this fiber was just resumed
+    {
+      TB_SCOPE("fiber_slice");
+      ctx->state = WorkFn(readTsc() + ctx->sliceTsc, ctx->state);
+    }
+    onFiberSwitchBegin(ctx->fiberId, kMainFiberId);
     ctx->group->yield();
   }
 }
@@ -537,6 +566,7 @@ Result<ScenarioReport> runFibers(const RunConfig& config, const Calibration& cal
                                                     &fiberBody<&fiber_work_2>, &fiberBody<&fiber_work_3>};
     for (uint32_t i = 0; i < kFiberCount; ++i) {
       ctx[i].group = &group;
+      ctx[i].fiberId = i + 1;
       ctx[i].sliceTsc = secondsToTsc(cal, kFiberSliceS);
       ctx[i].state = i + 1;
       if (group.add(entries[i], &ctx[i]) < 0) {
@@ -545,15 +575,21 @@ Result<ScenarioReport> runFibers(const RunConfig& config, const Calibration& cal
       }
     }
     uint64_t ticks[kFiberCount] = {};
+    onFiberRegister(kMainFiberId);
+    for (uint32_t i = 0; i < kFiberCount; ++i) onFiberRegister(i + 1);
     const uint64_t deadline = readTsc() + secondsToTsc(cal, config.durationS);
     uint64_t t = readTsc();
     for (uint32_t turn = 0; t < deadline; ++turn) {
       const uint32_t i = turn % kFiberCount;
+      onFiberSwitchBegin(kMainFiberId, i + 1);
       group.resume(static_cast<int>(i));
+      onFiberSwitchEnd(kMainFiberId);
       const uint64_t next = readTsc();
       ticks[i] += next - t;
       t = next;
     }
+    for (uint32_t i = 0; i < kFiberCount; ++i) onFiberUnregister(i + 1);
+    onFiberUnregister(kMainFiberId);
     thread.enforced = true;
     thread.tolerance = 0.05;
     thread.expected = makeExpected(
@@ -608,12 +644,19 @@ Result<ScenarioReport> runJobs(const RunConfig& config, const Calibration& cal) 
       uint64_t waitTicks = 0, execTicks = 0, state = i + 1;
       uint64_t t = readTsc();
       for (;;) {
-        const bool gotJob = jobWait(&queue);
+        bool gotJob = false;
+        {
+          TB_SCOPE("job_wait");
+          gotJob = jobWait(&queue);
+        }
         uint64_t next = readTsc();
         waitTicks += next - t;
         t = next;
         if (!gotJob) break;
-        state = job_execute(jobIters, state);
+        {
+          TB_SCOPE("job_execute");
+          state = job_execute(jobIters, state);
+        }
         ++jobsRun[i];
         next = readTsc();
         execTicks += next - t;
@@ -685,18 +728,29 @@ Result<ScenarioReport> runFrames(const RunConfig& config, const Calibration& cal
     uint64_t frameStart = readTsc();
     while (frameStart < deadline) {
       onFrameBegin(frames);
+      TB_SCOPE("frame");
       const bool hitchFrame = frames % expect.framesPerHitch == expect.framesPerHitch - 1;
       uint64_t t = frameStart;
-      state = frame_update(t + updateTsc, state);
+      {
+        TB_SCOPE("frame_update");
+        state = frame_update(t + updateTsc, state);
+      }
       uint64_t next = readTsc();
       updateTicks += next - t;
       t = next;
-      state = frame_render(t + renderTsc, state);
+      {
+        TB_SCOPE("frame_render");
+        state = frame_render(t + renderTsc, state);
+      }
       next = readTsc();
       renderTicks += next - t;
       t = next;
       if (hitchFrame) {
-        state = frame_hitch(t + hitchTsc, state);
+        onHitch(frames);
+        {
+          TB_SCOPE("frame_hitch");
+          state = frame_hitch(t + hitchTsc, state);
+        }
         next = readTsc();
         hitchTicks += next - t;
         t = next;
@@ -704,12 +758,16 @@ Result<ScenarioReport> runFrames(const RunConfig& config, const Calibration& cal
       }
       const uint64_t target = frameStart + periodTsc;
       if (t < target) {
-        frame_wait(secondsToNs(tscToSeconds(cal, target - t)));
+        {
+          TB_SCOPE("frame_wait");
+          frame_wait(secondsToNs(tscToSeconds(cal, target - t)));
+        }
         next = readTsc();
         waitTicks += next - t;
         t = next;
       }
       maxFrameMs = std::max(maxFrameMs, tscToSeconds(cal, t - frameStart) * 1e3);
+      onFrameTime(tscToSeconds(cal, t - frameStart) * 1e3);
       onFrameEnd(frames);
       ++frames;
       // On time: keep the 60 Hz cadence. Late (hitch): start the next frame now, no catch-up.

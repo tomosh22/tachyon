@@ -22,14 +22,28 @@
 //
 // Environment: a launched process gets TACHYON_AGENT_PIPE=<AgentConfig::agentAddress> merged over the
 // request's env, so the SDK connects to this agent.
+//
+// Instrumentation (WP-52): while a capture is starting or capturing, an `inst_hello` from an SDK client opens
+// a per-process listener (instrumentationAddress) and a spool file next to the output trace
+// (`<out>.inst/inst-<pid>.tachyon-inst`); raw wire frames are appended to the spool as they arrive. When the
+// capture ends the connections are drained, the backend converts as usual, and the spools are merged into the
+// finished trace (inst::mergeInstrumentation: scope / fiber / frame-mark / marker / plot / thread-name
+// chunks, kFlagHasInstrumentation). A `flush` merges a snapshot of the spools into the flushed trace, clipped
+// to its window. With no spooled data the trace is left byte for byte as the backend wrote it. A merge
+// failure is logged and the spool directory is kept (`tachyon-cli merge` can redo it); the capture still
+// completes. An `inst_hello` while no capture is running is answered ENOTFOUND: the SDK then falls back to
+// its sidecar file and retries.
 #pragma once
 
 #include "capture/capture_backend.h"
 #include "capture/windows_etw/target_watch.h"
 #include "control/server.h"
+#include "inst/ingest.h"
+#include "inst/merge.h"
 
 #include <atomic>
 #include <condition_variable>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -42,6 +56,18 @@ struct AgentConfig {
   std::string backendName;   // reported by status
   std::string agentAddress;  // used to derive instrumentation addresses for inst_hello
   bool elevated = false;     // reported by status
+
+  // Instrumentation ingestion (WP-52).
+  // Per-process spool cap in bytes; frames past it are dropped and reported as tachyon.dropped markers.
+  uint64_t maxInstSpoolBytes = inst::kDefaultMaxSpoolBytes;
+  // Directory for the spool directories; empty: next to the output trace.
+  std::filesystem::path instSpoolRoot;
+  // At the end of a capture each SDK connection is read until silent for instDrainIdleMs, at most
+  // instDrainMaxMs.
+  int instDrainIdleMs = 200;
+  int instDrainMaxMs = 2000;
+  // Keep the spool files after a successful merge (diagnostics).
+  bool keepInstSpool = false;
 };
 
 class Agent final : public control::IRequestHandler {
@@ -83,6 +109,16 @@ class Agent final : public control::IRequestHandler {
   void emit(const control::Event& event);
   void conversionWorker();
 
+  // The instrumentation ingest of the running capture, or null.
+  std::shared_ptr<inst::Ingest> currentIngest();
+  // Detaches the session's ingest (null when none) and reports whether it is a circular capture.
+  std::shared_ptr<inst::Ingest> takeIngest(bool& circular);
+  // Stops the ingest, runs the backend's stop() and merges the spools into the result. Never holds m_mutex.
+  Result<capture::CaptureResult> stopAndMerge();
+  // Merges the spools into the trace of `result`; logs problems instead of failing the capture.
+  void mergeSpools(inst::Ingest& ingest, const std::vector<inst::SpoolInfo>& spools,
+                   const capture::CaptureResult& result, bool clip, bool removeWhenDone);
+
   std::unique_ptr<capture::ICaptureBackend> m_backend;
   AgentConfig m_config;
   EventSink m_sink;
@@ -101,6 +137,9 @@ class Agent final : public control::IRequestHandler {
   std::atomic<capture::CaptureState> m_state{capture::CaptureState::Idle};
   std::atomic<double> m_progress{0.0};
   std::thread m_worker;
+
+  std::shared_ptr<inst::Ingest> m_ingest;  // guarded by m_mutex
+  bool m_circular = false;                 // guarded by m_mutex: the running capture is a flight recorder
 };
 
 }  // namespace tachyon::agent

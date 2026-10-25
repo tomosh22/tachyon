@@ -4,12 +4,15 @@
 #include "control/client.h"
 #include "control/protocol.h"
 #include "control/transport.h"
+#include "inst/merge.h"
+#include "inst/sidecar_paths.h"
 
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <ostream>
 #include <sstream>
@@ -232,6 +235,10 @@ void printUsage(std::ostream& err) {
          "  resume                       begin recording a launch parked with 'start --no-start'\n"
          "  flush   --name N --seconds S\n"
          "  cancel\n"
+         "  merge   TRACE.tachyon INST.tachyon-inst [--out PATH] [--clip] [--no-siblings]\n"
+         "                               adds an instrumentation sidecar (and its numbered siblings) to a "
+         "trace;\n"
+         "                               needs no agent\n"
          "  capture <target> [start options] [--duration S]\n"
          "target: --launch EXE | --attach PID | --system | --mode launch|attach|system [--exe E] [--pid N]\n"
          "start options: [--args \"A B\" | --args A B | --arg A]... [--cwd D] [--env K=V]... [--hz N]\n"
@@ -377,9 +384,111 @@ int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream&
   return code;
 }
 
+// `merge TRACE INST [--out PATH] [--clip] [--no-siblings]`: offline, needs no agent.
+int runMerge(const std::vector<std::string>& args, bool json, std::ostream& out, std::ostream& err) {
+  namespace fs = std::filesystem;
+  std::vector<std::string> positional;
+  std::string outPath;
+  bool clip = false, siblings = true;
+  for (size_t i = 0; i < args.size(); ++i) {
+    const std::string& a = args[i];
+    if (a == "--out") {
+      if (i + 1 >= args.size()) {
+        reportFailure(json, out, err, "EUSAGE", "missing value for --out");
+        return kExitUsage;
+      }
+      outPath = args[++i];
+    } else if (a == "--clip") {
+      clip = true;
+    } else if (a == "--no-siblings") {
+      siblings = false;
+    } else if (a == "--json") {
+      // already handled
+    } else if (a.rfind("--", 0) == 0) {
+      reportFailure(json, out, err, "EUSAGE", "unknown argument: " + a);
+      return kExitUsage;
+    } else {
+      positional.push_back(a);
+    }
+  }
+  if (positional.size() != 2) {
+    reportFailure(json, out, err, "EUSAGE", "merge expects TRACE.tachyon and INST.tachyon-inst");
+    return kExitUsage;
+  }
+  const fs::path tracePath = positional[0];
+  const fs::path instPath = positional[1];
+  std::error_code ec;
+  if (!fs::is_regular_file(tracePath, ec)) {
+    reportFailure(json, out, err, "ENOTFOUND", "trace not found: " + tracePath.string());
+    return kExitProtocolError;
+  }
+  if (!fs::is_regular_file(instPath, ec)) {
+    reportFailure(json, out, err, "ENOTFOUND", "instrumentation file not found: " + instPath.string());
+    return kExitProtocolError;
+  }
+  std::vector<inst::MergeInput> inputs;
+  for (const fs::path& file :
+       siblings ? inst::expandSidecarSiblings(instPath) : std::vector<fs::path>{instPath})
+    inputs.push_back({file, ~uint64_t{0}});
+  inst::MergeOptions options;
+  options.outPath = outPath;
+  options.clipToTraceRange = clip;
+  auto merged = inst::mergeInstrumentation(tracePath, inputs, options);
+  if (!merged.ok()) {
+    reportFailure(json, out, err, "EINTERNAL", "merge failed: " + merged.error().toString());
+    return kExitProtocolError;
+  }
+  const inst::MergeReport& r = *merged;
+  if (json) {
+    out << "{\"ok\":true,\"output\":\"" << jsonEscape(r.outputPath.string())
+        << "\",\"written\":" << (r.wroteOutput ? "true" : "false") << ",\"inputs\":[";
+    for (size_t i = 0; i < inputs.size(); ++i)
+      out << (i ? "," : "") << "\"" << jsonEscape(inputs[i].file.string()) << "\"";
+    out << "],\"streams\":" << r.streams.size() << ",\"scope_events\":" << r.scopeEvents
+        << ",\"fiber_events\":" << r.fiberEvents << ",\"frame_marks\":" << r.frameMarks
+        << ",\"markers\":" << r.markers << ",\"plot_samples\":" << r.plots
+        << ",\"thread_names\":" << r.threadNames << ",\"dropped_records\":" << r.decode.droppedRecords
+        << ",\"clipped_records\":" << r.clippedRecords
+        << ",\"unmatched_scope_ends\":" << r.decode.unmatchedScopeEnds
+        << ",\"unclosed_scopes\":" << r.decode.unclosedScopes << ",\"warnings\":[";
+    for (size_t i = 0; i < r.warnings.size(); ++i)
+      out << (i ? "," : "") << "\"" << jsonEscape(r.warnings[i]) << "\"";
+    out << "]}\n";
+    return kExitOk;
+  }
+  if (r.wroteOutput) {
+    out << "merged " << inputs.size() << " instrumentation file(s) into " << r.outputPath.string() << ": "
+        << r.scopeEvents << " scope events, " << r.fiberEvents << " fiber events, " << r.frameMarks
+        << " frame marks, " << r.markers << " markers, " << r.plots << " plot samples, " << r.threadNames
+        << " thread names\n";
+  } else {
+    out << "nothing merged; " << r.outputPath.string() << " is unchanged\n";
+  }
+  for (const std::string& w : r.warnings) err << "tachyon-cli: warning: " << w << "\n";
+  return kExitOk;
+}
+
+// Index of the command word in args (skipping the global options and their values), or npos.
+size_t commandIndex(const std::vector<std::string>& args) {
+  for (size_t i = 0; i < args.size(); ++i) {
+    const std::string& a = args[i];
+    if (a == "--socket" || a == "--pipe" || a == "--timeout" || a == "--connect-timeout-ms") {
+      ++i;
+    } else if (a.rfind("--", 0) != 0) {
+      return i;
+    }
+  }
+  return std::string::npos;
+}
+
 }  // namespace
 
 int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
+  if (const size_t at = commandIndex(args); at != std::string::npos && args[at] == "merge") {
+    const bool json = std::find(args.begin(), args.end(), "--json") != args.end();
+    return runMerge(std::vector<std::string>(args.begin() + static_cast<std::ptrdiff_t>(at) + 1, args.end()),
+                    json, out, err);
+  }
   Parsed p;
   if (const std::string e = parse(args, p); !e.empty()) {
     // parse() may have stopped before it saw --json, so look for it directly.
