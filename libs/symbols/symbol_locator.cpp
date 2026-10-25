@@ -634,4 +634,9 @@ LocateFn makeDefaultLocate(SymbolLocatorConfig config) {
   return [locator](const Module& m) { return locator->locate(m); };
 }
 
+CancellableLocateFn makeDefaultCancellableLocate(SymbolLocatorConfig config) {
+  auto locator = std::make_shared<SymbolLocator>(std::move(config));
+  return [locator](const Module& m, const std::atomic<bool>* cancel) { return locator->locate(m, cancel); };
+}
+
 }  // namespace tachyon::symbols

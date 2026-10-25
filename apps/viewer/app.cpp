@@ -198,16 +198,14 @@ void App::startSymbolResolution(Document& document) {
   m_symbolMailbox->wake = [renderer] { renderer->wake(); };
   document.setSymbols(service);
   auto mailbox = m_symbolMailbox;
-  // CONST_CAST: resolveAllAsync() wants a non-const model, but the service only READS the frames and modules
-  // from its workers. It writes the model (Module::state) solely in waitAll(), which the viewer must never
-  // call while panels read the model; module states are read with SymbolService::moduleState() instead.
-  service->resolveAllAsync(const_cast<model::TraceModel&>(document.model()),
-                           [mailbox](ModuleIdx module, symbols::SymbolState state) {
-                             const std::lock_guard<std::mutex> lock(mailbox->mutex);
-                             mailbox->events.emplace_back(module, state);
-                             mailbox->dirty.store(true);
-                             if (mailbox->wake) mailbox->wake();
-                           });
+  // The const overload never writes the model (Module::state is written only by the non-const overload's
+  // waitAll()); module states are read with SymbolService::moduleState().
+  service->resolveAllAsync(document.model(), [mailbox](ModuleIdx module, symbols::SymbolState state) {
+    const std::lock_guard<std::mutex> lock(mailbox->mutex);
+    mailbox->events.emplace_back(module, state);
+    mailbox->dirty.store(true);
+    if (mailbox->wake) mailbox->wake();
+  });
 }
 
 void App::onDocumentLoaded(std::shared_ptr<Document> document) {

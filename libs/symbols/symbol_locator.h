@@ -17,6 +17,10 @@
 namespace tachyon::symbols {
 
 using LocateFn = std::function<Result<std::filesystem::path>(const Module&)>;
+// Cancellable variant: `cancel` (may be null) flips to true when the owner wants outstanding work to stop;
+// the function should then return ErrorCode::Cancelled promptly.
+using CancellableLocateFn =
+    std::function<Result<std::filesystem::path>(const Module&, const std::atomic<bool>* cancel)>;
 
 struct SymbolLocatorConfig {
   // Searched first. A directory is probed for the symbol file name, the symstore layout
@@ -76,5 +80,7 @@ class SymbolLocator {
 
 // Thread-safe. LocateFn for SymbolService::setLocate backed by a shared SymbolLocator.
 LocateFn makeDefaultLocate(SymbolLocatorConfig config);
+// Thread-safe. Cancellable LocateFn backed by a shared SymbolLocator (forwards `cancel` to locate()).
+CancellableLocateFn makeDefaultCancellableLocate(SymbolLocatorConfig config);
 
 }  // namespace tachyon::symbols

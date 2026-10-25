@@ -61,6 +61,49 @@ int xferCallback(void* user, curl_off_t dlTotal, curl_off_t dlNow, curl_off_t, c
   return 0;
 }
 
+// Runs `curl` to completion, polling `st.cancel` every kPollMs. On cancel the transfer is dropped at once
+// and `st.aborted` is set.
+CURLcode performCancellable(CURL* curl, TransferState& st) {
+  constexpr int kPollMs = 25;
+  CURLM* multi = curl_multi_init();
+  if (!multi) return CURLE_FAILED_INIT;
+  if (curl_multi_add_handle(multi, curl) != CURLM_OK) {
+    curl_multi_cleanup(multi);
+    return CURLE_FAILED_INIT;
+  }
+  CURLcode result = CURLE_OK;
+  bool finished = false;
+  int running = 1;
+  while (!finished) {
+    const CURLMcode mc = curl_multi_perform(multi, &running);
+    if (mc != CURLM_OK) {
+      result = CURLE_RECV_ERROR;
+      break;
+    }
+    int queued = 0;
+    while (CURLMsg* msg = curl_multi_info_read(multi, &queued)) {
+      if (msg->msg == CURLMSG_DONE && msg->easy_handle == curl) {
+        result = msg->data.result;
+        finished = true;
+      }
+    }
+    if (finished || running == 0) break;
+    if (st.cancel && st.cancel->load(std::memory_order_relaxed)) {
+      st.aborted = true;
+      result = CURLE_ABORTED_BY_CALLBACK;
+      break;
+    }
+#if LIBCURL_VERSION_NUM >= 0x074200
+    curl_multi_poll(multi, nullptr, 0, kPollMs, nullptr);
+#else
+    curl_multi_wait(multi, nullptr, 0, kPollMs, nullptr);
+#endif
+  }
+  curl_multi_remove_handle(multi, curl);
+  curl_multi_cleanup(multi);
+  return result;
+}
+
 class CurlHttpClient final : public RetryingHttpClient {
  public:
   explicit CurlHttpClient(const HttpOptions& options) : RetryingHttpClient(options) {
@@ -112,7 +155,9 @@ class CurlHttpClient final : public RetryingHttpClient {
       }
     }
 
-    const CURLcode rc = curl_easy_perform(curl);
+    // Drive the transfer through the multi interface so a stalled server cannot hold us past a cancel:
+    // curl_easy_perform only polls the progress callback about once a second while idle.
+    const CURLcode rc = performCancellable(curl, st);
     long status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     std::string detail = curl_easy_strerror(rc);
