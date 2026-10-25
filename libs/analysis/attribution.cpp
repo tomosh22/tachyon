@@ -84,7 +84,8 @@ Result<std::vector<NodeWeight>> accumulateNodeWeights(const model::TraceModel& m
 
   unsigned w = workers != 0 ? workers : std::max(1u, std::thread::hardware_concurrency());
   w = static_cast<unsigned>(std::min<size_t>(w, std::max<size_t>(threads.size(), 1)));
-  const size_t perWorker = nodeCount * (sizeof(uint64_t) + sizeof(uint32_t));  // kernel-leaf arrays are rare
+  // Budget the regular and the lazily allocated kernel-leaf arrays so the worst case stays in the cap.
+  const size_t perWorker = 2 * nodeCount * (sizeof(uint64_t) + sizeof(uint32_t));
   w = static_cast<unsigned>(std::max<size_t>(1, std::min<size_t>(w, kWorkerMemoryBudget / perWorker)));
 
   struct Local {
