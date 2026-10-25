@@ -1,0 +1,1 @@
+tachyon_add_perf_test(trace_perf_tests SOURCES callstack_interner_perf_test.cpp DEPS tachyon::trace)
