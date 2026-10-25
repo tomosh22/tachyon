@@ -3,6 +3,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "core/platform.h"
+
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -503,9 +505,11 @@ TEST(HexFixtures, WP01SyntheticBasicConverts) {
   EXPECT_EQ(rb->str(rb->processes[0].name), "game.exe");
   ASSERT_EQ(rb->modules.size(), 1u);
   EXPECT_EQ(rb->str(rb->modules[0].path), "\\Device\\HarddiskVolume3\\game\\game.exe");
-  EXPECT_EQ(rb->modules[0].id_kind, 0);  // no such file here: fallback
-  EXPECT_EQ(rb->modules[0].base, 0x7ff600000000ull);
-  EXPECT_EQ(rb->modules[0].size, 0x10000u);
+  EXPECT_EQ(rb->modules[0].id_kind, 0);        // no such file here: fallback
+  const uint64_t base0 = rb->modules[0].base;  // packed member: copy before binding a reference
+  EXPECT_EQ(base0, 0x7ff600000000ull);
+  const uint64_t size0 = rb->modules[0].size;
+  EXPECT_EQ(size0, 0x10000u);
   bool renamed = false;
   for (const auto& n : rb->names) renamed |= rb->str(n.name) == "RenderThread";
   EXPECT_TRUE(renamed);
@@ -529,8 +533,19 @@ std::string scenarioAsHex(const EventScript& s) {
 
 TEST(HexFixtures, FixtureMatchesBuilder) {
   const std::string text = scenarioAsHex(multiProcessScenario());
-  if (const char* dir = std::getenv("TACHYON_WRITE_FIXTURES")) {
-    std::ofstream(std::string(dir) + "/convert_multiproc.hexevents", std::ios::binary) << text;
+  std::string dir;
+#if TACHYON_PLATFORM_WINDOWS
+  char* raw = nullptr;
+  size_t rawLen = 0;
+  if (_dupenv_s(&raw, &rawLen, "TACHYON_WRITE_FIXTURES") == 0 && raw != nullptr) {
+    dir = raw;
+    free(raw);
+  }
+#else
+  if (const char* env = std::getenv("TACHYON_WRITE_FIXTURES")) dir = env;
+#endif
+  if (!dir.empty()) {
+    std::ofstream(dir + "/convert_multiproc.hexevents", std::ios::binary) << text;
     GTEST_SKIP() << "fixture written";
   }
   std::ifstream f(std::string(TACHYON_FIXTURE_DIR) + "/etw/convert_multiproc.hexevents", std::ios::binary);

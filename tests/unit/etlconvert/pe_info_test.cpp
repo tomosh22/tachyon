@@ -1,6 +1,6 @@
 #include "test_util.h"
 
-#include <cstdio>
+#include <fstream>
 
 namespace tachyon::etlconvert {
 namespace {
@@ -120,10 +120,9 @@ TEST(PeInfo, ParsesFileFromDisk) {
   const ByteVec pe = buildPe(spec);
   const auto path = tempPath("fake.dll");
   {
-    FILE* f = std::fopen(path.string().c_str(), "wb");
-    ASSERT_NE(f, nullptr);
-    std::fwrite(pe.data(), 1, pe.size(), f);
-    std::fclose(f);
+    std::ofstream f(path, std::ios::binary);
+    ASSERT_TRUE(f.good());
+    f.write(reinterpret_cast<const char*>(pe.data()), static_cast<std::streamsize>(pe.size()));
   }
   auto info = parsePeFile(path);
   ASSERT_TRUE(info.ok()) << info.error().toString();
