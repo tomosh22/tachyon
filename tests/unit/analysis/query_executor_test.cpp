@@ -10,6 +10,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <new>
+#include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace tachyon::analysis {
@@ -76,8 +79,8 @@ TEST(QueryExecutorTest, RunsTasksAndReportsState) {
 }
 
 TEST(QueryExecutorTest, ForegroundIsDequeuedBeforeBackground) {
+  Gate gate;  // declared before the executor: tasks use it until the executor is destroyed
   QueryExecutor ex(oneThread(1000));
-  Gate gate;
   Order order;
   ex.submit(Priority::Foreground, [&](Cancel) { gate.hold(); });
   gate.waitEntered();
@@ -92,8 +95,8 @@ TEST(QueryExecutorTest, ForegroundIsDequeuedBeforeBackground) {
 }
 
 TEST(QueryExecutorTest, BackgroundNeverStarvesUnderForegroundLoad) {
+  Gate gate;  // declared before the executor: tasks use it until the executor is destroyed
   QueryExecutor ex(oneThread(4));
-  Gate gate;
   Order order;
   ex.submit(Priority::Foreground, [&](Cancel) { gate.hold(); });
   gate.waitEntered();
@@ -108,8 +111,8 @@ TEST(QueryExecutorTest, BackgroundNeverStarvesUnderForegroundLoad) {
 }
 
 TEST(QueryExecutorTest, CancellingAQueuedTaskNeverRunsIt) {
+  Gate gate;  // declared before the executor: tasks use it until the executor is destroyed
   QueryExecutor ex(oneThread());
-  Gate gate;
   std::atomic<int> ran{0};
   std::atomic<int> finishedState{-1};
   ex.submit(Priority::Foreground, [&](Cancel) { gate.hold(); });
@@ -146,8 +149,8 @@ TEST(QueryExecutorTest, CancellingARunningTaskRaisesItsFlag) {
 }
 
 TEST(QueryExecutorTest, StaleGenerationsAreDroppedBeforeTheyRun) {
+  Gate gate;  // declared before the executor: tasks use it until the executor is destroyed
   QueryExecutor ex(oneThread());
-  Gate gate;
   std::atomic<int> ran{0};
   GenerationToken token;
   ex.submit(Priority::Foreground, [&](Cancel) { gate.hold(); });
@@ -196,13 +199,13 @@ TEST(QueryExecutorTest, GuardWithoutExplicitGenerationUsesTheCurrentOne) {
 }
 
 TEST(QueryExecutorTest, SubmitQueryReturnsTheResult) {
+  Gate gate;  // declared before the executor: tasks use it until the executor is destroyed
   QueryExecutor ex(oneThread());
   SubmitOptions o;
   auto f = ex.submitQuery<int>(o, [](Cancel) -> Result<int> { return 42; });
   ASSERT_TRUE(f.get().ok());
   EXPECT_EQ(*f.get(), 42);
   // A task that never ran reports Cancelled.
-  Gate gate;
   ex.submit(Priority::Foreground, [&](Cancel) { gate.hold(); });
   gate.waitEntered();
   auto g = ex.submitQuery<int>(o, [](Cancel) -> Result<int> { return 1; });
@@ -243,6 +246,71 @@ TEST(QueryExecutorTest, ManyTasksFromManyThreads) {
   for (auto& t : producers) t.join();
   ex.waitIdle();
   EXPECT_EQ(sum.load(), 2000);
+}
+
+TEST(QueryExecutorTest, WaitIdleIsWokenWhenCancelEmptiesTheQueue) {
+  // Regression: cancel() removed a queued task without waking waitIdle(); a hang (caught by the ctest
+  // timeout) showed up after a few hundred iterations.
+  QueryExecutor ex(oneThread());
+  for (int i = 0; i < 5000; ++i) {
+    TaskHandle h = ex.submit(Priority::Foreground, [](Cancel) {});
+    std::thread canceller([&] { ex.cancel(h); });
+    ex.waitIdle();
+    canceller.join();
+    h.wait();
+  }
+}
+
+TEST(QueryExecutorTest, WaitIdleCompletesWhenASupersededTaskIsDropped) {
+  Gate gate;
+  GenerationToken token;
+  QueryExecutor ex(oneThread());
+  ex.submit(Priority::Foreground, [&](Cancel) { gate.hold(); });
+  gate.waitEntered();
+  SubmitOptions o;
+  o.guard = &token;
+  o.generation = token.advance();
+  ex.submit(o, [](Cancel) {});
+  token.advance();  // the queued task is now stale and will be dropped by the worker
+  std::thread waiter([&] { ex.waitIdle(); });
+  gate.release();
+  waiter.join();
+  EXPECT_EQ(ex.queued(Priority::Foreground), 0u);
+}
+
+TEST(QueryExecutorTest, ExceptionsAreReportedNotMistakenForCancellation) {
+  QueryExecutor ex(oneThread());
+  auto bad = ex.submitQuery<int>(SubmitOptions{}, [](Cancel) -> Result<int> { throw std::bad_alloc(); });
+  EXPECT_EQ(bad.get().error().code, ErrorCode::OutOfMemory);
+  EXPECT_EQ(bad.handle().failure(), ErrorCode::OutOfMemory);
+  auto other =
+      ex.submitQuery<int>(SubmitOptions{}, [](Cancel) -> Result<int> { throw std::runtime_error("boom"); });
+  EXPECT_EQ(other.get().error().code, ErrorCode::Internal);
+  EXPECT_EQ(other.handle().failure(), ErrorCode::Internal);
+  TaskHandle raw = ex.submit(Priority::Foreground, [](Cancel) { throw 42; });
+  raw.wait();
+  EXPECT_EQ(raw.state(), TaskState::Done);
+  EXPECT_EQ(raw.failure(), ErrorCode::Internal);
+  auto fine = ex.submitQuery<int>(SubmitOptions{}, [](Cancel) -> Result<int> { return 1; });
+  EXPECT_TRUE(fine.get().ok());
+  EXPECT_EQ(fine.handle().failure(), ErrorCode::Ok);
+}
+
+TEST(QueryExecutorTest, ThrowingCompletionCallbackDoesNotHurtThePool) {
+  Gate gate;
+  QueryExecutor ex(oneThread());
+  SubmitOptions o;
+  o.onFinished = [](TaskState) { throw std::runtime_error("callback"); };
+  ex.submit(Priority::Foreground, [&](Cancel) { gate.hold(); });
+  gate.waitEntered();
+  TaskHandle queued = ex.submit(o, [](Cancel) {});
+  ex.cancel(queued);  // callback throws on this thread
+  EXPECT_EQ(queued.state(), TaskState::Cancelled);
+  gate.release();
+  TaskHandle ran = ex.submit(o, [](Cancel) {});  // callback throws on the worker
+  ran.wait();
+  auto after = ex.submitQuery<int>(SubmitOptions{}, [](Cancel) -> Result<int> { return 5; });
+  EXPECT_EQ(*after.get(), 5);
 }
 
 // ---- queries on an executor ----
@@ -315,17 +383,18 @@ TEST(QueryExecutorTest, ManyConcurrentQueriesSaturatingTheExecutorComplete) {
 
 TEST(QueryExecutorTest, QueryCancelledThroughTheTaskFlag) {
   Hand hand;
+  Gate gate;  // declared before the executor: tasks use it until the executor is destroyed
   QueryExecutor ex(oneThread());
   QueryContext ctx(hand.h.m, *hand.h.svc);
   ctx.setExecutor(&ex);
-  Gate gate;
   ex.submit(Priority::Foreground, [&](Cancel) { gate.hold(); });
   gate.waitEntered();
   auto f = ex.submitQuery<std::vector<FunctionRow>>(SubmitOptions{},
                                                     [&](Cancel c) { return bottomUpFunctions(ctx, {}, c); });
+  ex.cancel(f.handle());  // still queued behind the gate task: deterministic
   gate.release();
-  ex.cancel(f.handle());
   EXPECT_EQ(f.get().error().code, ErrorCode::Cancelled);
+  ex.waitIdle();
 }
 
 }  // namespace

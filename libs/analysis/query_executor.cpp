@@ -1,6 +1,7 @@
 #include "analysis/query_executor.h"
 
 #include <algorithm>
+#include <new>
 
 namespace tachyon::analysis {
 
@@ -56,6 +57,7 @@ QueryExecutor::~QueryExecutor() {
     for (auto& t : m_runningTasks) t->cancelFlag.store(true, std::memory_order_relaxed);
   }
   m_cv.notify_all();
+  m_idleCv.notify_all();
   for (auto& t : dropped) {
     t->cancelFlag.store(true, std::memory_order_relaxed);
     finish(t, TaskState::Cancelled);
@@ -108,6 +110,8 @@ void QueryExecutor::cancel(const TaskHandle& handle) {
     if (it != q.end()) {
       q.erase(it);
       removed = true;
+      // The queue may just have become empty: wake waitIdle() (the worker only notifies when it finishes).
+      if (m_queues[0].empty() && m_queues[1].empty() && m_runningTasks.empty()) m_idleCv.notify_all();
     }
   }
   if (removed) finish(t, TaskState::Cancelled);
@@ -160,7 +164,13 @@ void QueryExecutor::finish(const std::shared_ptr<detail::TaskControl>& t, TaskSt
     t->state = state;
   }
   t->cv.notify_all();
-  if (t->onFinished) t->onFinished(state);
+  if (t->onFinished) {
+    try {
+      t->onFinished(state);
+    } catch (...) {
+      // A throwing completion callback must not take the pool (or the caller of cancel()) down.
+    }
+  }
 }
 
 void QueryExecutor::workerMain() {
@@ -196,8 +206,10 @@ void QueryExecutor::workerMain() {
       t_priority = t->priority;
       try {
         t->fn(Cancel{&t->cancelFlag});
+      } catch (const std::bad_alloc&) {
+        t->failure.store(static_cast<unsigned>(ErrorCode::OutOfMemory), std::memory_order_relaxed);
       } catch (...) {
-        // A task must not take the pool down; the owner of the task reports its own errors.
+        t->failure.store(static_cast<unsigned>(ErrorCode::Internal), std::memory_order_relaxed);
       }
       t_priority = Priority::Foreground;
       t->fn = nullptr;  // release the captures before waiters are released

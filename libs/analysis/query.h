@@ -50,7 +50,9 @@ struct Filter {
   std::optional<CallstackIdx> subtreeRoot;        // only samples whose stack passes through this node
   // Only samples whose stack contains this function: the stack as the query sees it, i.e. after the subtree
   // cut, with the context's inline expansion and kernel frame handling applied. A handle issued by
-  // QueryContext::functionIdx(); a handle the context did not issue is rejected with InvalidArgument.
+  // QueryContext::functionIdx(); an index the context never issued is rejected with InvalidArgument.
+  // Limitation: handles are dense indices without a context id, so an index that happens to be issued by
+  // BOTH contexts is not detected as foreign; keep a handle with the context that issued it.
   std::optional<FunctionIdx> function;
 
   // Thread-safe (value type).
@@ -140,9 +142,9 @@ class QueryContext {
   // Drops every cached result (the FunctionRegistry is kept). Results already handed out stay valid.
   void clearCache();
   CacheStats cacheStats() const;
-  // The cache itself (budget, counters per kind); see query_cache.h.
+  // Thread-safe. The cache itself (budget, counters per kind); see query_cache.h.
   QueryCache& cache() const;
-  // Changes the byte budget and evicts down to it.
+  // Thread-safe (the cache locks internally). Changes the byte budget and evicts down to it.
   void setCacheBudget(size_t bytes);
 
   // FunctionIdx handles for Filter::function. Thread-safe; indices are issued per context and never reused.
@@ -151,8 +153,10 @@ class QueryContext {
   std::optional<FunctionKey> functionKey(FunctionIdx idx) const { return functions().key(idx); }
 
   // Optional executor (owned by the caller, must outlive every query run on this context): the scan of a
-  // query then fans out through it instead of starting its own threads. Not safe to call while queries run.
+  // query then fans out through it instead of starting its own threads. Not thread-safe against running
+  // queries: call it before queries start (the pointer itself is read atomically).
   void setExecutor(QueryExecutor* executor);
+  // Thread-safe.
   QueryExecutor* executor() const;
 
   struct Impl;
@@ -164,7 +168,8 @@ class QueryContext {
 
 // Shared-result variants (WP-33). Same queries and semantics, but the result is the cache's own immutable
 // copy: a hit costs a lookup and a reference count, not a copy. The by-value functions below return a copy of
-// it.
+// it. All three are thread-safe like their by-value forms; the returned object is immutable and may be held
+// and read from any thread for as long as the pointer lives (it survives eviction and clearCache()).
 Result<std::shared_ptr<const NodeAgg>> topDownTreeShared(const QueryContext& ctx, const Filter& filter,
                                                          Cancel cancel = {});
 Result<std::shared_ptr<const std::vector<FunctionRow>>> bottomUpFunctionsShared(const QueryContext& ctx,

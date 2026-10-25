@@ -65,6 +65,12 @@ class StackFlattener {
   // `kernelLeaf`: the samples carry kSampleFlagKernelLeaf (return-address rule exception). With
   // KernelFrames::Hide a stack that ends up empty (empty, or only kernel frames) becomes the single frame
   // kKernelKey, so every view counts it.
+  // Makes flatten() observe `cancel` while it walks a stack; it then returns false with aborted() set.
+  void setCancel(Cancel cancel) { m_cancel = cancel; }
+  bool aborted() const { return m_aborted; }
+  // Frames visited by the last flatten() (the cost the callers meter cancellation by).
+  size_t lastCost() const { return m_chain.size(); }
+
   bool flatten(CallstackIdx node, CallstackIdx subtree, bool kernelLeaf, std::vector<uint32_t>& out,
                uint32_t required = kUnset) {
     out.clear();
@@ -89,6 +95,11 @@ class StackFlattener {
       while (exactAt < m_chain.size() && isKernelNode(m_chain[exactAt])) ++exactAt;
     }
     for (size_t i = first; i-- > 0;) {
+      // A single very deep stack costs O(depth) with a symbol lookup per new frame: stay cancellable.
+      if ((first - i) % 2048 == 0 && m_cancel.requested()) {
+        m_aborted = true;
+        return false;
+      }
       const Entry& e = entryFor(m_model.nodes[m_chain[i]].frame, i != 0 && i != exactAt);
       for (uint32_t k = 0; k < e.count; ++k) {
         const uint32_t id = m_flat[e.offset + k];
@@ -157,6 +168,8 @@ class StackFlattener {
   const QueryContext& m_ctx;
   const model::TraceModel& m_model;
   KeyTable& m_table;
+  Cancel m_cancel;
+  bool m_aborted = false;
   std::vector<Entry> m_entries[2];  // [0] exact address, [1] return address (caller variant)
   std::vector<uint32_t> m_flat;
   std::vector<uint32_t> m_chain;
@@ -230,15 +243,16 @@ QueryKey resultKey(const ResolvedFilter& f, QueryKind kind, FunctionKey fk = {})
 }
 
 size_t treeBytes(const NodeAgg& root) {
-  size_t nodes = 0;
+  size_t bytes =
+      sizeof(NodeAgg) + 2 * kAllocOverhead + 32;  // the root block and its shared_ptr control block
   std::vector<const NodeAgg*> work{&root};
   while (!work.empty()) {
     const NodeAgg* n = work.back();
     work.pop_back();
-    ++nodes;
+    bytes += vectorBytes(n->children);  // the children blocks hold every other node
     for (const NodeAgg& c : n->children) work.push_back(&c);
   }
-  return nodes * sizeof(NodeAgg) + 64;
+  return bytes;
 }
 
 // Copies a tree without recursion (the defaulted NodeAgg copy is recursive).
@@ -277,7 +291,7 @@ Result<WeightsPtr> weightsFor(const QueryContext& ctx, const ResolvedFilter& f, 
   auto acc = accumulateNodeWeights(ctx.model(), f.t0, f.t1, f.threads, ctx.options().threads, cancel,
                                    ctx.executor());
   if (!acc) return acc.error();
-  const size_t bytes = acc->size() * sizeof(NodeWeight) + 64;
+  const size_t bytes = sizeof(std::vector<NodeWeight>) + 2 * kAllocOverhead + 32 + vectorBytes(*acc);
   auto value = std::make_shared<const std::vector<NodeWeight>>(std::move(*acc));
   cache.insert(key, value, bytes);
   return value;
@@ -298,8 +312,25 @@ bool sortRowsByInclusive(const FunctionRow& a, const FunctionRow& b) {
   return a.key < b.key;
 }
 
-// Node loops check for cancellation every kCancelStride nodes (sample scans check every 65536 samples).
-constexpr size_t kCancelStride = 1024;
+// Node loops meter cancellation by work, not by node count: a stack costs O(depth) to flatten, so a fixed
+// number of nodes can take arbitrarily long. Every node counts kNodeCost units plus its stack depth, and the
+// flag is read each time kCancelWork units have accumulated (a node-sized loop still checks every ~1024
+// nodes; sample scans check every 65536 samples).
+constexpr size_t kCancelStride = 1024;  // nodes, for the O(1)-per-node loops
+constexpr size_t kCancelWork = 4096;
+constexpr size_t kNodeCost = 4;
+
+struct CancelMeter {
+  Cancel cancel;
+  size_t work = 0;
+  // True when the flag is up; reads it only once enough work has accumulated since the last read.
+  bool due() {
+    if (work < kCancelWork) return false;
+    work = 0;
+    return cancel.requested();
+  }
+  void add(size_t frames) { work += kNodeCost + frames; }
+};
 
 Error cancelledError() {
   return makeError(ErrorCode::Cancelled, "query cancelled");
@@ -397,11 +428,11 @@ Result<std::shared_ptr<const T>> cachedOrCompute(const QueryContext& ctx, const 
 }
 
 size_t rowsBytes(const std::vector<FunctionRow>& rows) {
-  return rows.size() * sizeof(FunctionRow) + sizeof(rows) + 64;
+  return sizeof(rows) + 2 * kAllocOverhead + 32 + vectorBytes(rows);
 }
 
 size_t butterflyBytes(const Butterfly& b) {
-  return sizeof(Butterfly) + (b.callers.size() + b.callees.size()) * sizeof(FunctionRow) + 64;
+  return sizeof(Butterfly) + 2 * kAllocOverhead + 32 + vectorBytes(b.callers) + vectorBytes(b.callees);
 }
 
 }  // namespace
@@ -425,10 +456,14 @@ Result<std::shared_ptr<const std::vector<FunctionRow>>> bottomUpFunctionsShared(
         std::vector<uint32_t> stamp;
         std::vector<uint32_t> ids;
         uint32_t serial = 0;
-        size_t counter = 0;
+        CancelMeter meter{cancel};
+        flat.setCancel(cancel);
         for (const NodeWeight& nw : **w) {
-          if (++counter % kCancelStride == 0 && cancel.requested()) return cancelledError();
-          if (!flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required) || ids.empty()) continue;
+          if (meter.due()) return cancelledError();
+          const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required);
+          if (flat.aborted()) return cancelledError();
+          meter.add(flat.lastCost() + ids.size());
+          if (!kept || ids.empty()) continue;
           if (table.size() > incl.size()) {
             incl.resize(table.size(), 0);
             excl.resize(table.size(), 0);
@@ -484,10 +519,14 @@ Result<std::shared_ptr<const NodeAgg>> topDownTreeShared(const QueryContext& ctx
         std::vector<TNode> tn(1);
         std::unordered_map<uint64_t, uint32_t> children;
         std::vector<uint32_t> ids;
-        size_t counter = 0;
+        CancelMeter meter{cancel};
+        flat.setCancel(cancel);
         for (const NodeWeight& nw : **w) {
-          if (++counter % kCancelStride == 0 && cancel.requested()) return cancelledError();
-          if (!flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required)) continue;
+          if (meter.due()) return cancelledError();
+          const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required);
+          if (flat.aborted()) return cancelledError();
+          meter.add(flat.lastCost() + ids.size());
+          if (!kept) continue;
           uint32_t cur = 0;
           for (uint32_t id : ids) {
             const uint64_t ck = (uint64_t{cur} << 32) | id;
@@ -564,10 +603,14 @@ Result<std::shared_ptr<const Butterfly>> butterflyShared(const QueryContext& ctx
         bf.self.key = key;
         std::unordered_map<uint32_t, FunctionRow> callers, callees;
         std::vector<uint32_t> ids;
-        size_t counter = 0;
+        CancelMeter meter{cancel};
+        flat.setCancel(cancel);
         for (const NodeWeight& nw : **w) {
-          if (++counter % kCancelStride == 0 && cancel.requested()) return cancelledError();
-          if (!flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required)) continue;
+          if (meter.due()) return cancelledError();
+          const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required);
+          if (flat.aborted()) return cancelledError();
+          meter.add(flat.lastCost() + ids.size());
+          if (!kept) continue;
           const auto it = std::find(ids.begin(), ids.end(), target);  // outermost occurrence
           if (it == ids.end()) continue;
           const size_t pos = static_cast<size_t>(it - ids.begin());

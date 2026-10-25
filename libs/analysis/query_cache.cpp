@@ -72,6 +72,7 @@ bool QueryCache::insertErased(const QueryKey& key, std::shared_ptr<const void> v
   std::lock_guard lock(m_mutex);
   const auto existing = lookupLocked(key, hash);
   if (existing != m_lru.end()) eraseLocked(existing);
+  bytes += kEntryOverhead + (key.filter.threads ? vectorBytes(*key.filter.threads) : 0);
   if (bytes > m_budget) {
     ++m_counters[static_cast<size_t>(key.kind)].rejected;
     return false;

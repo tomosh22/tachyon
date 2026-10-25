@@ -44,6 +44,19 @@ uint64_t hashFilter(const Filter& filter);
 // Thread-safe: pure function. Hash of the whole key (kind, extra arguments, filter hash).
 uint64_t hashKey(const QueryKey& key);
 
+// Approximate heap accounting shared by the producers of cached values. Every heap block is charged
+// kAllocOverhead bytes of allocator header/rounding on top of its requested size.
+inline constexpr size_t kAllocOverhead = 16;
+// Fixed cost charged per entry on top of the value: list node, index node and bucket, shared_ptr control
+// block and the key (without the heap block of its thread list, which is added per entry).
+inline constexpr size_t kEntryOverhead = 384;
+
+// Thread-safe: pure function. Heap bytes of a vector: its capacity, not its size.
+template <typename V>
+size_t vectorBytes(const V& v) {
+  return v.capacity() * sizeof(typename V::value_type) + (v.capacity() != 0 ? kAllocOverhead : 0);
+}
+
 struct CacheCounters {
   uint64_t hits = 0, misses = 0, evictions = 0;
   uint64_t rejected = 0;  // results larger than the whole budget, not cached
@@ -65,7 +78,8 @@ class QueryCache {
     return std::static_pointer_cast<const T>(findErased(key));
   }
 
-  // Thread-safe. Stores `value` (approximate size `bytes`) as the most recently used entry, replacing an
+  // Thread-safe. Stores `value` (approximate heap size `bytes`; the entry's own overhead, kEntryOverhead plus
+  // the key's thread list, is added by the cache) as the most recently used entry, replacing an
   // entry with an equal key, then evicts least recently used entries until the total is within the budget.
   // A value larger than the whole budget is not stored (counted as rejected). Returns whether it was stored.
   template <typename T>

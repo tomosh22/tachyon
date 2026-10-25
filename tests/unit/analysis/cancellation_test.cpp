@@ -228,6 +228,54 @@ TEST(CancellationTest, ExecutorCancelReturnsWithinBudget) {
   EXPECT_GT(cancelled, 0);
 }
 
+// A 100 000-deep chain with a sample on every 10th node: flattening a stack costs O(depth), so a node-count
+// based cancellation stride would take seconds to notice the flag. Cancellation is metered by work instead.
+TEST(CancellationTest, DeepStacksReturnWithinBudget) {
+  HandModel h(1);
+  h.state(0, 0, 100000000, ThreadState::Running);
+  CallstackIdx cur(0);
+  for (uint64_t i = 0; i < 100000; ++i) {
+    cur = h.push(cur, 0x1000 + i * 16);
+    if (i % 10 == 9) h.sample(0, (i / 10) * 100, cur);
+  }
+  h.finish();
+  AggregationOptions opts;
+  opts.threads = 1;
+  QueryContext ctx(h.m, *h.svc, opts);
+  double worst = 0;
+  int cancelled = 0;
+  const std::chrono::microseconds delays[] = {0us, 2ms, 10ms, 40ms};
+  for (Q q : {Q::BottomUp, Q::TopDown, Q::Butterfly}) {
+    for (auto d : delays) {
+      ctx.clearCache();
+      const Outcome o = runCancelled(ctx, q, Filter{}, FunctionKey{ModuleIdx(0), 0x1000 + 500 * 16}, d);
+      if (!o.cancelled()) continue;
+      ++cancelled;
+      worst = std::max(worst, o.latencyMs);
+      EXPECT_LT(o.latencyMs, kBudgetMs) << "query " << static_cast<int>(q) << " delay " << d.count() << "us";
+    }
+  }
+  std::printf("[cancellation] 100k-deep stacks: %d cancelled runs, worst latency %.2f ms (budget %.0f ms)\n",
+              cancelled, worst, kBudgetMs);
+  EXPECT_GT(cancelled, 0);
+}
+
+// One single 150 000-deep stack: the flatten of that one stack must itself be interruptible.
+TEST(CancellationTest, SingleVeryDeepStackReturnsWithinBudget) {
+  HandModel h(1);
+  h.state(0, 0, 100000000, ThreadState::Running);
+  CallstackIdx cur(0);
+  for (uint64_t i = 0; i < 150000; ++i) cur = h.push(cur, 0x1000 + i * 16);
+  h.sample(0, 0, cur);
+  h.finish();
+  QueryContext ctx(h.m, *h.svc);
+  for (Q q : {Q::BottomUp, Q::TopDown}) {
+    ctx.clearCache();
+    const Outcome o = runCancelled(ctx, q, Filter{}, {}, 0us);
+    if (o.cancelled()) EXPECT_LT(o.latencyMs, kBudgetMs);
+  }
+}
+
 TEST(CancellationTest, CancelledScanLeavesTheContextUsable) {
   Synthetic& s = synthetic();
   QueryContext ctx(s.h.m, *s.h.svc);

@@ -2,12 +2,14 @@
 #include "analysis/query_cache.h"
 
 #include "aggregation_test_util.h"
+#include "alloc_counter.h"
 #include "analysis/function_registry.h"
 #include "analysis/query.h"
 
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <random>
 #include <thread>
 #include <vector>
 
@@ -80,35 +82,38 @@ TEST(QueryCacheTest, ReplacingAKeyKeepsOneEntry) {
   auto second = std::make_shared<const int>(2);
   cache.insert(keyOf(QueryKind::BottomUp, 1), second, 150);
   EXPECT_EQ(cache.entryCount(), 1u);
-  EXPECT_EQ(cache.bytesUsed(), 150u);
+  EXPECT_EQ(cache.bytesUsed(), 150u + kEntryOverhead);  // the cache adds its per-entry overhead
   EXPECT_EQ(cache.find<int>(keyOf(QueryKind::BottomUp, 1)), second);
 }
 
 TEST(QueryCacheTest, EvictsLeastRecentlyUsedWithinTheByteBudget) {
-  QueryCache cache(1000);
+  constexpr size_t kEntry = 100 + kEntryOverhead;  // what one entry is charged
+  QueryCache cache(3 * kEntry + 10);
   for (uint64_t i = 0; i < 4; ++i)
-    cache.insert(keyOf(QueryKind::BottomUp, i), std::make_shared<const int>(static_cast<int>(i)), 300);
-  // 4 x 300 > 1000: the oldest (0) was evicted.
+    cache.insert(keyOf(QueryKind::BottomUp, i), std::make_shared<const int>(static_cast<int>(i)), 100);
+  // 4 entries do not fit: the oldest (0) was evicted.
   EXPECT_EQ(cache.entryCount(), 3u);
-  EXPECT_LE(cache.bytesUsed(), 1000u);
+  EXPECT_LE(cache.bytesUsed(), 3 * kEntry + 10);
   EXPECT_EQ(cache.counters(QueryKind::BottomUp).evictions, 1u);
   EXPECT_EQ(cache.find<int>(keyOf(QueryKind::BottomUp, 0)), nullptr);
   // Touch 1, then add another: 2 is now the least recently used.
   ASSERT_NE(cache.find<int>(keyOf(QueryKind::BottomUp, 1)), nullptr);
-  cache.insert(keyOf(QueryKind::BottomUp, 9), std::make_shared<const int>(9), 300);
+  cache.insert(keyOf(QueryKind::BottomUp, 9), std::make_shared<const int>(9), 100);
   EXPECT_NE(cache.find<int>(keyOf(QueryKind::BottomUp, 1)), nullptr);
   EXPECT_EQ(cache.find<int>(keyOf(QueryKind::BottomUp, 2)), nullptr);
   EXPECT_NE(cache.find<int>(keyOf(QueryKind::BottomUp, 3)), nullptr);
 }
 
 TEST(QueryCacheTest, OversizedValuesAreRejectedAndShrinkingTheBudgetEvicts) {
-  QueryCache cache(1000);
-  EXPECT_FALSE(cache.insert(keyOf(QueryKind::TopDown, 1), std::make_shared<const int>(1), 1001));
+  constexpr size_t kEntry = 100 + kEntryOverhead;
+  QueryCache cache(3 * kEntry + 10);
+  EXPECT_FALSE(cache.insert(keyOf(QueryKind::TopDown, 1), std::make_shared<const int>(1), 3 * kEntry));
   EXPECT_EQ(cache.counters(QueryKind::TopDown).rejected, 1u);
   EXPECT_EQ(cache.entryCount(), 0u);
   for (uint64_t i = 0; i < 3; ++i)
-    cache.insert(keyOf(QueryKind::BottomUp, i), std::make_shared<const int>(0), 300);
-  cache.setBudget(400);
+    cache.insert(keyOf(QueryKind::BottomUp, i), std::make_shared<const int>(0), 100);
+  EXPECT_EQ(cache.entryCount(), 3u);
+  cache.setBudget(kEntry + 10);
   EXPECT_EQ(cache.entryCount(), 1u);
   EXPECT_EQ(cache.counters(QueryKind::BottomUp).evictions, 2u);
   cache.clear();
@@ -117,7 +122,7 @@ TEST(QueryCacheTest, OversizedValuesAreRejectedAndShrinkingTheBudgetEvicts) {
 }
 
 TEST(QueryCacheTest, HandedOutValuesSurviveEviction) {
-  QueryCache cache(100);
+  QueryCache cache(kEntryOverhead + 100);
   cache.insert(keyOf(QueryKind::BottomUp, 1), std::make_shared<const int>(5), 80);
   auto held = cache.find<int>(keyOf(QueryKind::BottomUp, 1));
   cache.insert(keyOf(QueryKind::BottomUp, 2), std::make_shared<const int>(6), 80);
@@ -332,6 +337,44 @@ TEST(QueryContextCacheTest, ConcurrentQueriesOnOneContextAgree) {
     });
   for (auto& th : ts) th.join();
   for (int t = 1; t < 8; ++t) EXPECT_EQ(totals[t], totals[0]);
+}
+
+// ---- byte accounting: the estimate must not undercount the real heap footprint ----
+
+// Many distinct functions and stacks so the results are not trivially small.
+struct Wide {
+  HandModel h{2};
+  Wide() {
+    std::mt19937 rng(11);
+    for (uint32_t t = 0; t < 2; ++t) h.state(t, 0, 10000000, ThreadState::Running);
+    uint64_t ts = 0;
+    for (int i = 0; i < 4000; ++i) {
+      CallstackIdx cur(0);
+      const int depth = 3 + static_cast<int>(rng() % 10);
+      for (int d = 0; d < depth; ++d) cur = h.push(cur, 0x1000 + (rng() % 600) * 16);
+      h.sample(static_cast<uint32_t>(i % 2), ts += 100, cur);
+    }
+    h.finish();
+  }
+};
+
+TEST(QueryCacheAccountingTest, EstimateCoversTheRealFootprintOfRowsAndTrees) {
+  Wide w;
+  for (const char* what : {"rows", "tree", "butterfly"}) {
+    QueryContext ctx(w.h.m, *w.h.svc);
+    const int64_t before = ::tachyon::testutil::liveHeapBytes();
+    std::shared_ptr<const void> held;  // keeps the result alive next to the cache entries
+    if (what[0] == 'r') held = *bottomUpFunctionsShared(ctx, {});
+    if (what[0] == 't') held = *topDownTreeShared(ctx, {});
+    if (what[0] == 'b') held = *butterflyShared(ctx, {}, fk(0x1000 + 5 * 16));
+    // Retained heap: the cached result, the cached weight table and the cache's own bookkeeping.
+    const int64_t real = ::tachyon::testutil::liveHeapBytes() - before;
+    const uint64_t estimate = ctx.cacheStats().bytes;
+    EXPECT_GE(static_cast<int64_t>(estimate), real) << what;
+    EXPECT_LE(static_cast<int64_t>(estimate), 3 * real) << what << ": estimate is wildly pessimistic";
+    std::printf("[cache accounting] %-9s estimate %llu B, real %lld B\n", what,
+                static_cast<unsigned long long>(estimate), static_cast<long long>(real));
+  }
 }
 
 }  // namespace

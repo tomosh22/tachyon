@@ -32,6 +32,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -77,6 +78,7 @@ struct TaskControl {
   std::function<void(Cancel)> fn;
   std::function<void(TaskState)> onFinished;
   std::atomic<bool> cancelFlag{false};
+  std::atomic<unsigned> failure{0};  // ErrorCode of an exception that escaped the task (0 = none)
   mutable std::mutex mutex;
   std::condition_variable cv;
   TaskState state = TaskState::Queued;  // guarded by mutex
@@ -95,6 +97,11 @@ class TaskHandle {
   // Whether cancel() was called (or the executor is shutting down).
   bool cancelRequested() const { return m_ctl && m_ctl->cancelFlag.load(std::memory_order_relaxed); }
   uint64_t generation() const { return m_ctl ? m_ctl->generation : 0; }
+  // ErrorCode::OutOfMemory if the task threw std::bad_alloc, Internal if it threw anything else, else Ok.
+  // Valid once finished. (QueryFuture reports it as the error of get().)
+  ErrorCode failure() const {
+    return m_ctl ? static_cast<ErrorCode>(m_ctl->failure.load(std::memory_order_relaxed)) : ErrorCode::Ok;
+  }
   // False when the task's guard has moved on to a newer generation (the result is stale). True without guard.
   bool isCurrent() const { return m_ctl && (!m_ctl->guard || m_ctl->guard->isCurrent(m_ctl->generation)); }
   // Blocks until the task has finished.
@@ -120,6 +127,8 @@ class QueryFuture {
     m_handle.wait();
     return m_slot->value;
   }
+  // (If the task threw, get() holds OutOfMemory for std::bad_alloc and Internal for anything else; if it
+  // never ran, Cancelled.)
 
  private:
   friend class QueryExecutor;
@@ -155,7 +164,17 @@ class QueryExecutor {
   QueryFuture<T> submitQuery(const SubmitOptions& options, std::function<Result<T>(Cancel)> fn) {
     QueryFuture<T> f;
     f.m_slot = std::make_shared<typename QueryFuture<T>::Slot>();
-    f.m_handle = submit(options, [slot = f.m_slot, fn = std::move(fn)](Cancel c) { slot->value = fn(c); });
+    f.m_handle = submit(options, [slot = f.m_slot, fn = std::move(fn)](Cancel c) {
+      try {
+        slot->value = fn(c);
+      } catch (const std::bad_alloc&) {
+        slot->value = makeError(ErrorCode::OutOfMemory, "task threw std::bad_alloc");
+        throw;
+      } catch (...) {
+        slot->value = makeError(ErrorCode::Internal, "task threw an exception");
+        throw;
+      }
+    });
     return f;
   }
 
