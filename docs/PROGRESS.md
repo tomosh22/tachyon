@@ -27,7 +27,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | merged | wp/32b-return-address | 2026-10-25 |
 | WP-33 | Filters, cancellation, query cache | C | merged | wp/33-query-cache | 2026-10-25 |
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
-| WP-35 | Function and scope statistics, frames | C | in progress | wp/35-stats-frames | 2026-10-25 |
+| WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
@@ -149,6 +149,18 @@ The first verifier pass FAILed on agent robustness: a crash when thread creation
 
 Verifier PASS. The panel tree equals topDownTree node by node on tiny and medium in all 6 inline × kernel modes. It is ASan-clean under document close/reopen and App destruction with queries in flight, and a 100k-deep chain is safe everywhere. Flattening 100k expanded rows takes 2.1 ms (budget 20 ms), and a panel frame with 5000 rows 0.06 ms (budget 4 ms). The viewer keeps one QueryContext per (inline, kernel) option set per symbol generation (accepted deviation from "one per document"). `Document::analysis()`, `snapshot()` and `submit<T>()` are the reuse API for WP-44, WP-45 and WP-47. Orchestrator fix: lod.h's `Cancel` alias was renamed `LodCancel`, so lod.h and query.h can share a TU.
 Known gap: "Filter to subtree" resolves a merged top-down node to ONE callstack node. A function reached from two call sites keeps only about half its time, and more generally about 1/N. WP-33b fixes this by adding `Filter::subtreePath` to the analysis API.
+
+## WP-35 notes
+
+The verifier passed everything except the quartile definition. That is now fixed: Stats uses lower order statistics, `d[floor(q(n-1))]`, so the median equals tracegen's `median_ticks` exactly. Frames match the `frames` fixture field by field (174 frames, 696 per-thread entries), and the slowest frame equals `hitch_frames`. Brute-force probes for scope pairing, the sampled-instance rule and topFunctions show 0 mismatches.
+
+| Query | Measured | Budget |
+|---|---|---|
+| functionStats, medium | 59 ms | 200 ms |
+| frames(), 100k frames | 46–62 ms | 100 ms |
+| scopeStats, 1 M scopes (incl. pairing) | 73–76 ms | 200 ms |
+
+Shared helpers moved to libs/analysis/detail/query_support.h (pure move). `libs/analysis/scope_pairing.h` is the base for WP-53's fiber-aware pairing.
 
 ## Queued follow-ups
 
