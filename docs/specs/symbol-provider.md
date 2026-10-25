@@ -14,3 +14,10 @@ class SymbolLocator { public: Result<std::filesystem::path> locate(const Module&
 class SymbolService { public: SymbolService(std::vector<std::string> servers, std::filesystem::path cacheDir); void resolveAllAsync(TraceModel&, std::function<void(ModuleIdx,SymbolState)> onModule); const ResolvedAddress& lookup(FrameIdx) const; /* memoized */ };
 ```
 Symbol server HTTP layout: `<server>/<pdbfile>/<GUID as 32 upper hex><age hex>/<pdbfile>` (also `file.ptr` redirection and `index2.txt` two-tier). Local cache uses the same two-tier layout under `cacheDir`.
+
+## Orchestrator clarifications (binding; merged with WP-20, 2026-10-25)
+Headers `libs/symbols/symbol_provider.h` and `libs/symbols/function_key.h` (`tachyon::symbols`) are now orchestrator-owned.
+- `ModuleId` comes from `libs/model/model.h`. `LineRange { rva, size, file, line }`, `FunctionBounds { startRva, size, name }`.
+- **Strings:** StringIdx values in `ResolvedAddress`, `InlineFrame`, `LineRange` and `FunctionBounds` index `SymbolService::symbolStrings()` (a `symbols::SymbolStringTable`: append-only, lock-free `get`, views stable for the service's lifetime). They do NOT index `TraceModel::strings`. Scope FunctionKeys (`kScopeModule`) carry trace-string-table indices.
+- `FunctionKey { ModuleIdx module; uint64_t value; }`. Resolved: `{module, functionStartRva}`. Unresolved but mapped: `{module, rva}`. Unmapped: `{kInvalidIdx, absolute address}`. Scope: `{kScopeModule = 0xFFFFFFFE, StringIdx}`. Inline (with expandInline): `{module, (1<<63) | symbol StringIdx of the innermost inlined function}`; `isInline()` requires a valid, non-scope module.
+- `SymbolService`: the 3.6 constructor plus `setLocate`, `setProviderFactory`, `stringSink()` and `addSymbolFileOverride`. `resolveAllAsync` runs on a worker pool, and onModule fires from worker threads. `lookup` is lock-free, never blocks, and returns a static unresolved value until the module is published. `moduleState()` is valid during the run; `Module.state` is written only by `waitAll()`. Keys change when a module resolves, so build aggregation trees after `waitAll()`.

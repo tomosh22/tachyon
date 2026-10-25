@@ -34,7 +34,7 @@ struct FunctionKey {
   constexpr auto operator<=>(const FunctionKey&) const = default;
   bool isScope() const { return module == kScopeModule; }
   bool isUnmapped() const { return !module.valid(); }
-  bool isInline() const { return module != kScopeModule && (value & kInlineKeyBit) != 0; }
+  bool isInline() const { return module.valid() && module != kScopeModule && (value & kInlineKeyBit) != 0; }
 
   // Thread-safe: pure function.
   static constexpr FunctionKey scope(StringIdx id) { return FunctionKey{kScopeModule, id.get()}; }
