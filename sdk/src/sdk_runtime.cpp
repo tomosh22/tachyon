@@ -483,13 +483,27 @@ bool Runtime::beginStream(Channel& channel) {
 }
 
 bool Runtime::trySidecar() {
+  if (m_config.sidecarPath.empty()) return false;
+  // The first open uses the configured path; every later open (agent lost after a sidecar phase) goes to
+  // <stem>.<n>.<ext> so earlier phases are never truncated.
+  std::string path = m_config.sidecarPath;
+  if (m_sidecarOpens > 0) {
+    const size_t sep = path.find_last_of("/\\");
+    const size_t dot = path.find_last_of('.');
+    const std::string tag = "." + std::to_string(m_sidecarOpens);
+    if (dot != std::string::npos && (sep == std::string::npos || dot > sep)) {
+      path.insert(dot, tag);
+    } else {
+      path += tag;
+    }
+  }
   Channel file;
-  if (m_config.sidecarPath.empty() || !file.openFile(m_config.sidecarPath)) return false;
-  if (!beginStream(file)) return false;
+  if (!file.openFile(path) || !beginStream(file)) return false;
+  ++m_sidecarOpens;
   m_sink = std::move(file);
   {
     std::lock_guard<std::mutex> lock(m_pathMutex);
-    m_activeSidecarPath = m_config.sidecarPath;
+    m_activeSidecarPath = path;
   }
   setReady(SinkKind::Sidecar);
   return true;

@@ -136,6 +136,7 @@ class Runtime {
   std::atomic<int> m_ready{0};  // 0 undecided, 1 agent, 2 sidecar, 3 none
   std::mutex m_pathMutex;
   std::string m_activeSidecarPath;
+  uint32_t m_sidecarOpens = 0;  // flush thread only
 
   // Control channel (shared with Tachyon_RequestFlush).
   std::mutex m_controlMutex;
