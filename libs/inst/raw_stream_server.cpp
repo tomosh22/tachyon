@@ -208,7 +208,9 @@ void RawStreamServer::Impl::wakeAccept() {
 }
 
 void RawStreamServer::Impl::acceptLoop() {
-  while (!stopping.load()) {
+  // Runs until a wait for the next client is cancelled by shutdown(); a client that is already connected when
+  // shutdown() is requested is still taken first (ConnectNamedPipe then completes at once).
+  for (;;) {
     HANDLE instance = pending;
     OVERLAPPED ov{};
     ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -217,13 +219,16 @@ void RawStreamServer::Impl::acceptLoop() {
       connected = true;
     } else {
       const DWORD err = GetLastError();
-      if (err == ERROR_PIPE_CONNECTED) {
+      // ERROR_NO_DATA: the client connected, wrote and closed before we got here; its data is still in the
+      // pipe.
+      if (err == ERROR_PIPE_CONNECTED || err == ERROR_NO_DATA) {
         connected = true;
       } else if (err == ERROR_IO_PENDING) {
         const HANDLE handles[2] = {ov.hEvent, stopEvent};
         if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0) {
           DWORD ignored = 0;
-          connected = GetOverlappedResult(instance, &ov, &ignored, TRUE) != 0;
+          connected =
+              GetOverlappedResult(instance, &ov, &ignored, TRUE) != 0 || GetLastError() == ERROR_NO_DATA;
         } else {
           CancelIoEx(instance, &ov);
           DWORD ignored = 0;
