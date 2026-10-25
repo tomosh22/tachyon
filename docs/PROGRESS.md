@@ -10,9 +10,9 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-01 | ETW spike tool `etlstat` | A | needs Windows verification (code merged; CI windows job ran a real elevated record+consume round trip) | wp/01-etlstat | 2026-10-25 |
 | WP-02 | Profiler testbed | — | merged (CI green incl. windows-release; Windows timing splits to confirm, see queue) | wp/02-testbed | 2026-10-25 |
 | WP-03 | Trace format library | — | merged (CI green incl. windows; interning-time target split to WP-03b) | wp/03-trace | 2026-10-25 |
-| WP-03b | Callstack interning throughput (10 s target) | — | not started (split from WP-03) | wp/03b-intern-speed | |
-| WP-04 | Synthetic trace generator `tracegen` | C | not started | wp/04-tracegen | |
-| WP-10 | Agent skeleton and control protocol | A | not started | wp/10-agent | |
+| WP-03b | Callstack interning throughput (10 s target) | — | in progress | wp/03b-intern-speed | 2026-10-25 |
+| WP-04 | Synthetic trace generator `tracegen` | C | in progress | wp/04-tracegen | 2026-10-25 |
+| WP-10 | Agent skeleton and control protocol | A | in progress | wp/10-agent | 2026-10-25 |
 | WP-11 | ETW session controller | A | not started | wp/11-etw-session | |
 | WP-12 | ETL to `.tachyon` converter | A | not started | wp/12-etlconvert | |
 | WP-13 | Launch, attach, process tree, CLI | A | not started | wp/13-launch-cli | |
@@ -116,6 +116,8 @@ Pass: ≥ 7,500 samples/s per busy core and > 95% SampledProfile with matched st
   - Measured in WP-03: as-grown 22.4 bytes/node, worst after resize 22.9 (std::vector slack adds to the hash overhead). Orchestrator decision: the ≤ 16 bytes/node budget is measured after `CallstackInterner::compact()` (13.7 bytes/node), because the interner only lives during conversion. Awaiting user confirmation.
 
 ## Environment notes
+
+- Git LFS push is blocked by this environment's network policy (`lfs.github.com` returns 403 at the verify step). WP-04 therefore commits scenario JSON + SHA256 manifests and generates binary fixtures at build time (`tachyon_fixtures` target into `build/<preset>/fixtures`). To commit binaries via LFS instead, allow `lfs.github.com` in the environment's network settings.
 
 - Linux dev container: Clang 18.1.3, CMake 3.28, Ninja; libdw/libelf, libcurl, SDL2 2.30.0, libGL, libclang-rt-18 installed via apt.
 - Network: GitHub release assets and git clones work; `github.com/<o>/<r>/archive/...` source tarballs are blocked by the proxy, so dependencies use release archives (with SHA256) or pinned git commits.
