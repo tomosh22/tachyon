@@ -2,6 +2,8 @@
 
 #include "analysis/thread_states.h"
 #include "core/log.h"
+#include "core/platform.h"
+#include "symbols/dia/dia_provider.h"
 #include "viewer/builtin_panels.h"
 #include "viewer/paths.h"
 #include "viewer/theme.h"
@@ -174,6 +176,9 @@ void App::startSymbolResolution(Document& document) {
   std::filesystem::path cacheDir = pathFromUtf8(m_settings.cacheDir);
   if (cacheDir.empty()) cacheDir = defaultSymbolCacheDir();
   auto service = std::make_shared<symbols::SymbolService>(m_settings.symbolServers, cacheDir);
+#if TACHYON_PLATFORM_WINDOWS && TACHYON_HAVE_DIA
+  symbols::registerDiaProvider(*service);  // PDBs through DIA; .symbols.json sidecars keep working
+#endif
   // Developer convenience (and the test fixtures): a "<trace>.symbols.json" next to the trace is registered
   // as the symbol file of the modules it describes, ahead of the locator.
   std::filesystem::path sidecar = document.path();
