@@ -7,8 +7,7 @@
 // THREADING POLICY: one session per provider, serialized by a mutex. A provider serves one module and
 // SymbolService loads modules in parallel, so there is no contention across modules; resolve() calls on one
 // module run one at a time. (A session per thread was rejected: each would re-read the whole PDB, and a
-// system DLL PDB is tens of MB.) Resolved function extents are cached, so most resolve() calls need a single
-// line lookup in DIA.
+// system DLL PDB is tens of MB.)
 #pragma once
 
 #include "symbols/dia/dia_session.h"
@@ -18,7 +17,6 @@
 
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -51,20 +49,18 @@ class DiaSymbolProvider final : public ISymbolProvider {
   // Thread-safe after load() (mutex-serialized).
   Result<FunctionBounds> functionBounds(uint64_t rva) override;
 
-  // Thread-safe. Number of calls that had to ask the session for a function (cache misses); for tests.
+  // Thread-safe. Number of distinct functions whose name was interned (for tests).
   uint64_t functionLookups() const;
 
  private:
-  struct CachedFunction {
-    uint64_t startRva = 0;
-    uint64_t size = 0;  // > 0 always: zero-sized public symbols are not cached
+  struct FunctionInfo {
+    DiaRawFunction raw;
     StringIdx name;
-    bool isPublicSymbol = false;
   };
 
   // All private helpers require m_mutex.
-  // Cache hit, or one session query. The pointer is valid until the next call that holds the lock.
-  const CachedFunction* functionFor(uint64_t rva);
+  // One session query (cheap: the session answers from in-memory tables), plus the interned name.
+  std::optional<FunctionInfo> functionFor(uint64_t rva);
   StringIdx internName(std::string_view raw);
   StringIdx internFile(const std::string& file);
 
@@ -74,8 +70,9 @@ class DiaSymbolProvider final : public ISymbolProvider {
 
   mutable std::mutex m_mutex;
   std::unique_ptr<IDiaSymbolSession> m_session;
-  std::map<uint64_t, CachedFunction> m_functions;  // by startRva, non-overlapping
-  CachedFunction m_scratch;  // answer for uncacheable lookups (zero-sized public symbols)
+  // Interned display name per function start (+ public flag). This is NOT an address-range cache: extents are
+  // never cached (a cached public extent could shadow a private function), every address goes to the session.
+  std::unordered_map<uint64_t, StringIdx> m_names;
   std::unordered_map<std::string, StringIdx> m_fileIdx;
   uint64_t m_functionLookups = 0;
 };

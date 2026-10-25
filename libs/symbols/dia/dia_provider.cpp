@@ -22,7 +22,7 @@ Result<void> DiaSymbolProvider::load(const Module& module, const std::filesystem
   if (!opened.ok()) return opened.error();
   std::lock_guard<std::mutex> lock(m_mutex);
   m_session = std::move(opened).value();
-  m_functions.clear();
+  m_names.clear();
   m_fileIdx.clear();
   return Result<void>();
 }
@@ -40,53 +40,55 @@ StringIdx DiaSymbolProvider::internFile(const std::string& file) {
   return idx;
 }
 
-const DiaSymbolProvider::CachedFunction* DiaSymbolProvider::functionFor(uint64_t rva) {
-  auto it = m_functions.upper_bound(rva);
-  if (it != m_functions.begin()) {
-    --it;
-    if (rva - it->second.startRva < it->second.size) return &it->second;
+std::optional<DiaSymbolProvider::FunctionInfo> DiaSymbolProvider::functionFor(uint64_t rva) {
+  std::optional<DiaRawFunction> raw = m_session->findFunction(rva);
+  if (!raw) return std::nullopt;
+  // Defensive: a bounded answer must contain the address.
+  if (raw->size > 0 && (rva < raw->startRva || rva - raw->startRva >= raw->size)) return std::nullopt;
+  const uint64_t key = raw->startRva | (raw->isPublicSymbol ? (1ull << 63) : 0ull);
+  auto it = m_names.find(key);
+  if (it == m_names.end()) {
+    ++m_functionLookups;
+    it = m_names.emplace(key, internName(raw->name)).first;
   }
-  ++m_functionLookups;
-  const std::optional<DiaRawFunction> raw = m_session->findFunction(rva);
-  if (!raw) return nullptr;
-  if (raw->size > 0 && (rva < raw->startRva || rva - raw->startRva >= raw->size)) return nullptr;
-  CachedFunction cf;
-  cf.startRva = raw->startRva;
-  cf.size = raw->size;
-  cf.name = internName(raw->name);
-  cf.isPublicSymbol = raw->isPublicSymbol;
-  if (cf.size == 0) {
-    // Extent unknown: never cached as a range, only remembered for the duration of this call.
-    m_scratch = cf;
-    return &m_scratch;
-  }
-  auto [pos, inserted] = m_functions.emplace(cf.startRva, cf);
-  if (!inserted) {
-    m_scratch = cf;  // overlapping duplicate start (e.g. a hot/cold split); answer without caching
-    return &m_scratch;
-  }
-  return &pos->second;
+  FunctionInfo info;
+  info.name = it->second;
+  info.raw = std::move(*raw);
+  return info;
 }
 
 ResolvedAddress DiaSymbolProvider::resolve(uint64_t rva) {
   ResolvedAddress out;
   std::lock_guard<std::mutex> lock(m_mutex);
   if (!m_session) return out;
-  const CachedFunction* cf = functionFor(rva);
-  if (cf == nullptr) return out;
+  const std::optional<FunctionInfo> fn = functionFor(rva);
+  if (!fn) return out;
   out.resolved = true;
-  out.function = cf->name;
-  out.functionStartRva = cf->startRva;
-  if (cf->isPublicSymbol) return out;  // public symbols carry neither lines nor inline sites
+  out.function = fn->name;
+  out.functionStartRva = fn->raw.startRva;
+  if (fn->raw.isPublicSymbol) return out;  // public symbols carry neither lines nor inline sites
 
-  if (const std::optional<DiaRawLine> line = m_session->findLine(rva)) {
+  const std::optional<DiaRawLine> line = m_session->findLine(rva);
+  if (line) {
     out.file = internFile(line->file);
     out.line = line->line;
   }
-  DiaRawFunction raw;
-  raw.startRva = cf->startRva;
-  raw.size = cf->size;
-  for (DiaRawInline& in : m_session->findInlines(raw, rva)) {
+  std::vector<DiaRawInline> inlines = m_session->findInlines(fn->raw, rva);
+  // A frame without a position of its own takes the next outer frame's (the call site is inside it), and the
+  // outermost one the physical function's line-table position.
+  for (size_t i = inlines.size(); i > 0; --i) {
+    DiaRawInline& frame = inlines[i - 1];
+    if (frame.line != 0 && !frame.file.empty()) continue;
+    if (i < inlines.size()) {
+      const DiaRawInline& outer = inlines[i];
+      if (frame.line == 0) frame.line = outer.line;
+      if (frame.file.empty()) frame.file = outer.file;
+    } else if (line) {
+      if (frame.line == 0) frame.line = line->line;
+      if (frame.file.empty()) frame.file = line->file;
+    }
+  }
+  for (const DiaRawInline& in : inlines) {
     InlineFrame frame;
     frame.function = internName(in.name);
     frame.file = internFile(in.file);
@@ -99,15 +101,15 @@ ResolvedAddress DiaSymbolProvider::resolve(uint64_t rva) {
 Result<std::vector<LineRange>> DiaSymbolProvider::linesForFunction(uint64_t functionStartRva) {
   std::lock_guard<std::mutex> lock(m_mutex);
   if (!m_session) return makeError(ErrorCode::InvalidArgument, "provider not loaded");
-  const CachedFunction* cf = functionFor(functionStartRva);
-  if (cf == nullptr || cf->startRva != functionStartRva) {
+  const std::optional<FunctionInfo> fn = functionFor(functionStartRva);
+  if (!fn || fn->raw.startRva != functionStartRva) {
     return makeError(ErrorCode::NotFound, "no function starts at the given rva");
   }
   std::vector<LineRange> out;
-  if (cf->size == 0) return out;
-  const uint64_t start = cf->startRva;
-  const uint64_t end = start + cf->size;
-  auto lines = m_session->findLines(start, cf->size);
+  if (fn->raw.size == 0) return out;  // public symbol / unbounded: no line information
+  const uint64_t start = fn->raw.startRva;
+  const uint64_t end = start + fn->raw.size;
+  auto lines = m_session->findLines(start, fn->raw.size);
   if (!lines.ok()) return lines.error();
   out.reserve(lines.value().size());
   for (const DiaRawLine& l : lines.value()) {
@@ -127,12 +129,12 @@ Result<std::vector<LineRange>> DiaSymbolProvider::linesForFunction(uint64_t func
 Result<FunctionBounds> DiaSymbolProvider::functionBounds(uint64_t rva) {
   std::lock_guard<std::mutex> lock(m_mutex);
   if (!m_session) return makeError(ErrorCode::InvalidArgument, "provider not loaded");
-  const CachedFunction* cf = functionFor(rva);
-  if (cf == nullptr) return makeError(ErrorCode::NotFound, "no function covers the given rva");
+  const std::optional<FunctionInfo> fn = functionFor(rva);
+  if (!fn) return makeError(ErrorCode::NotFound, "no function covers the given rva");
   FunctionBounds b;
-  b.startRva = cf->startRva;
-  b.size = cf->size;
-  b.name = cf->name;
+  b.startRva = fn->raw.startRva;
+  b.size = fn->raw.size;  // 0 = unbounded public symbol (no known end)
+  b.name = fn->name;
   return b;
 }
 

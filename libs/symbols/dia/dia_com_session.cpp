@@ -8,6 +8,7 @@
 
 #include "symbols/dia/dia_errors.h"
 #include "symbols/dia/dia_session.h"
+#include "symbols/dia/dia_symbol_table.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -34,8 +35,6 @@
 
 namespace tachyon::symbols {
 namespace {
-
-constexpr uint64_t kMaxPublicDisplacement = 1u << 20;  // reject public symbols further away than this
 
 template <typename T>
 class ComPtr {
@@ -119,10 +118,10 @@ class DiaLibrary {
 #ifdef TACHYON_DIA_DLL_PATH
     candidates.push_back(std::filesystem::path(TACHYON_DIA_DLL_PATH).wstring());
 #endif
-    candidates.push_back(L"msdia140.dll");
     std::string tried;
     for (const std::wstring& c : candidates) {
-      HMODULE h = LoadLibraryExW(c.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+      HMODULE h =
+          LoadLibraryExW(c.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
       if (h == nullptr) {
         tried += " " + wideToUtf8(c.c_str(), c.size()) + " (error " + std::to_string(GetLastError()) + ");";
         continue;
@@ -183,31 +182,26 @@ class ComSession final : public IDiaSymbolSession {
   ComSession(std::shared_ptr<DiaLibrary> lib, ComPtr<IDiaDataSource> source, ComPtr<IDiaSession> session)
       : m_lib(std::move(lib)), m_source(std::move(source)), m_session(std::move(session)) {}
 
-  // Enumerates the global function and public symbols once into sorted tables, so address lookups are binary
-  // searches in this process instead of a DIA query per address (a failing findSymbolByRVA costs ~190 us).
+  // Enumerates the global function and public symbols and the code section contributions once into a
+  // DiaSymbolTable, so address lookups are binary searches in this process instead of a DIA query per address
+  // (a failing findSymbolByRVA costs ~190 us). Fails (instead of yielding empty tables) when DIA refuses.
   HRESULT buildTables() {
     ensureComInitialized();
     ComPtr<IDiaSymbol> global;
     HRESULT hr = m_session->get_globalScope(global.put());
     if (FAILED(hr) || !global) return FAILED(hr) ? hr : E_FAIL;
-    enumerate(global.get(), SymTagFunction, /*isPublic=*/false, m_functions);
-    enumerate(global.get(), SymTagPublicSymbol, /*isPublic=*/true, m_publics);
+    std::vector<DiaTableEntry> privates;
+    std::vector<DiaTableEntry> publics;
+    hr = enumerate(global.get(), SymTagFunction, /*isPublic=*/false, privates);
+    if (FAILED(hr)) return hr;
+    hr = enumerate(global.get(), SymTagPublicSymbol, /*isPublic=*/true, publics);
+    if (FAILED(hr)) return hr;
+    std::vector<DiaCodeRange> code = codeContributions();
+    m_table.build(std::move(privates), std::move(publics), std::move(code));
     return S_OK;
   }
 
-  std::optional<DiaRawFunction> findFunction(uint64_t rva) override {
-    // Private function symbols first (the last one starting at or before rva), then public symbols, whose
-    // extent runs to the next public symbol (capped), since public symbols carry no length.
-    if (const Entry* f = containing(m_functions, rva)) return toRaw(*f, f->size, false);
-    auto it = std::upper_bound(m_publics.begin(), m_publics.end(), rva,
-                               [](uint64_t v, const Entry& e) { return v < e.rva; });
-    if (it == m_publics.begin()) return std::nullopt;
-    const Entry& pub = *(it - 1);
-    uint64_t extent = kMaxPublicDisplacement;
-    if (it != m_publics.end()) extent = std::min<uint64_t>(extent, it->rva - pub.rva);
-    if (rva - pub.rva >= extent) return std::nullopt;
-    return toRaw(pub, extent, true);
-  }
+  std::optional<DiaRawFunction> findFunction(uint64_t rva) override { return m_table.find(rva); }
 
   std::optional<DiaRawLine> findLine(uint64_t rva) override {
     if (rva > std::numeric_limits<DWORD>::max()) return std::nullopt;
@@ -273,44 +267,62 @@ class ComSession final : public IDiaSymbolSession {
   }
 
  private:
-  struct Entry {
-    uint32_t rva = 0;
-    uint32_t size = 0;
-    std::string name;
-  };
-
-  static DiaRawFunction toRaw(const Entry& e, uint64_t size, bool isPublic) {
-    DiaRawFunction out;
-    out.startRva = e.rva;
-    out.size = size;
-    out.name = e.name;
-    out.isPublicSymbol = isPublic;
+  // Code section contributions (per object file); public symbol extents are clipped to them.
+  std::vector<DiaCodeRange> codeContributions() {
+    std::vector<DiaCodeRange> out;
+    ComPtr<IDiaEnumTables> tables;
+    if (FAILED(m_session->getEnumTables(tables.put())) || !tables) return out;
+    for (;;) {
+      ComPtr<IDiaTable> table;
+      ULONG fetched = 0;
+      if (tables->Next(1, table.put(), &fetched) != S_OK || fetched != 1) break;
+      ComPtr<IDiaEnumSectionContribs> contribs;
+      if (FAILED(table->QueryInterface(__uuidof(IDiaEnumSectionContribs),
+                                       reinterpret_cast<void**>(contribs.put()))) ||
+          !contribs) {
+        continue;
+      }
+      for (;;) {
+        ComPtr<IDiaSectionContrib> c;
+        ULONG got = 0;
+        if (contribs->Next(1, c.put(), &got) != S_OK || got != 1) break;
+        BOOL isCode = FALSE;
+        DWORD rva = 0;
+        DWORD length = 0;
+        if (FAILED(c->get_code(&isCode)) || !isCode) continue;
+        if (FAILED(c->get_relativeVirtualAddress(&rva)) || FAILED(c->get_length(&length)) || length == 0)
+          continue;
+        out.push_back({rva, length});
+      }
+      break;
+    }
     return out;
   }
 
-  // The entry with the greatest start <= rva that also covers rva, or nullptr.
-  static const Entry* containing(const std::vector<Entry>& table, uint64_t rva) {
-    auto it = std::upper_bound(table.begin(), table.end(), rva,
-                               [](uint64_t v, const Entry& e) { return v < e.rva; });
-    if (it == table.begin()) return nullptr;
-    --it;
-    return (it->size != 0 && rva - it->rva < it->size) ? &*it : nullptr;
-  }
-
-  void enumerate(IDiaSymbol* global, enum SymTagEnum tag, bool isPublic, std::vector<Entry>& out) {
+  // Appends the global children with `tag`. Public symbols that are not code (data) are skipped.
+  HRESULT enumerate(IDiaSymbol* global, enum SymTagEnum tag, bool isPublic, std::vector<DiaTableEntry>& out) {
     ComPtr<IDiaEnumSymbols> en;
-    if (FAILED(global->findChildren(tag, nullptr, nsNone, en.put())) || !en) return;
+    const HRESULT hr = global->findChildren(tag, nullptr, nsNone, en.put());
+    if (FAILED(hr)) return hr;
+    if (!en) return E_FAIL;
     for (;;) {
       ComPtr<IDiaSymbol> sym;
       ULONG fetched = 0;
-      const HRESULT hr = en->Next(1, sym.put(), &fetched);
-      if (hr != S_OK || fetched != 1) break;
+      if (en->Next(1, sym.put(), &fetched) != S_OK || fetched != 1) break;
       DWORD rva = 0;
       if (FAILED(sym->get_relativeVirtualAddress(&rva)) || rva == 0) continue;
       ULONGLONG length = 0;
-      if (!isPublic) sym->get_length(&length);
-      if (!isPublic && length == 0) continue;
-      Entry e;
+      if (isPublic) {
+        BOOL isFunction = FALSE;
+        BOOL isCode = FALSE;
+        sym->get_function(&isFunction);
+        sym->get_code(&isCode);
+        if (!isFunction && !isCode) continue;
+      } else {
+        sym->get_length(&length);
+        if (length == 0) continue;
+      }
+      DiaTableEntry e;
       e.rva = rva;
       e.size = static_cast<uint32_t>(std::min<ULONGLONG>(length, 0xFFFFFFFFull));
       BSTR name = nullptr;
@@ -318,7 +330,7 @@ class ComSession final : public IDiaSymbolSession {
       if (SUCCEEDED(sym->get_name(&name))) e.name = takeBstr(name);
       out.push_back(std::move(e));
     }
-    std::stable_sort(out.begin(), out.end(), [](const Entry& a, const Entry& b) { return a.rva < b.rva; });
+    return S_OK;
   }
 
   // The function symbol starting at `start` (needed as the parent of inline queries), cached per function.
@@ -338,8 +350,7 @@ class ComSession final : public IDiaSymbolSession {
   std::shared_ptr<DiaLibrary> m_lib;  // declared first: destroyed last, after the COM objects below
   ComPtr<IDiaDataSource> m_source;
   ComPtr<IDiaSession> m_session;
-  std::vector<Entry> m_functions;  // private function symbols, sorted by rva
-  std::vector<Entry> m_publics;    // public symbols, sorted by rva
+  DiaSymbolTable m_table;
   std::unordered_map<uint64_t, ComPtr<IDiaSymbol>> m_symbols;
 };
 

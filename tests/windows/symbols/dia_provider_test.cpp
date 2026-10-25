@@ -212,6 +212,14 @@ TEST_F(DiaWindows, InlineScenarioYieldsInlineChains) {
       for (size_t i = 0; i < a.inlines.size(); ++i) {
         const std::string name(m_strings.get(a.inlines[i].function));
         EXPECT_FALSE(name.empty());
+        // Every frame, outer ones included, carries a source position (own, or the call-site fallback).
+        EXPECT_GT(a.inlines[i].line, 0u) << name;
+        EXPECT_FALSE(m_strings.get(a.inlines[i].file).empty()) << name;
+        if (name.find("inline_") != std::string::npos) {
+          EXPECT_NE(lower(std::string(m_strings.get(a.inlines[i].file))).find("scenarios.cpp"),
+                    std::string::npos)
+              << name;
+        }
         allNames.insert(name);
         chain += name + ":" + std::to_string(a.inlines[i].line) + " < ";
         if (name.find("::burn") != std::string::npos) burnAt = static_cast<int>(i);

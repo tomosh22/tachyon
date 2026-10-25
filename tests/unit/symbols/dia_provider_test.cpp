@@ -42,12 +42,22 @@ class FakeSession final : public IDiaSymbolSession {
   std::optional<DiaRawFunction> findFunction(uint64_t rva) override {
     Guard g(*m_s);
     ++m_s->findFunctionCalls;
+    // Private functions first, then public symbols (greatest start <= rva; bounded ones must contain rva).
     const FakeFunction* best = nullptr;
     for (const FakeFunction& f : m_s->functions) {
-      if (f.fn.startRva <= rva && (best == nullptr || f.fn.startRva > best->fn.startRva)) best = &f;
+      if (f.fn.isPublicSymbol) continue;
+      if (f.fn.startRva <= rva && rva - f.fn.startRva < f.fn.size &&
+          (best == nullptr || f.fn.startRva > best->fn.startRva)) {
+        best = &f;
+      }
+    }
+    if (best != nullptr) return best->fn;
+    for (const FakeFunction& f : m_s->functions) {
+      if (!f.fn.isPublicSymbol || f.fn.startRva > rva) continue;
+      if (f.fn.size != 0 && rva - f.fn.startRva >= f.fn.size) continue;
+      if (best == nullptr || f.fn.startRva > best->fn.startRva) best = &f;
     }
     if (best == nullptr) return std::nullopt;
-    if (!best->fn.isPublicSymbol && rva - best->fn.startRva >= best->fn.size) return std::nullopt;
     return best->fn;
   }
   std::optional<DiaRawLine> findLine(uint64_t rva) override {
@@ -124,7 +134,17 @@ std::shared_ptr<FakeState> makeState() {
   b.lines = {{0x2000, 0x20, "C:\\src\\a.cpp", 40}};
   FakeFunction pub;
   pub.fn = {0x3000, 0, "pub_only", true};
-  s->functions = {a, b, pub};
+  FakeFunction
+      boundedPub;  // a public symbol with a real extent that covers a private function with no public
+  boundedPub.fn = {0x4000, 0x100, "pub_bounded", true};
+  FakeFunction inner;
+  inner.fn = {0x4040, 0x20, "priv_inside", false};
+  inner.lines = {{0x4040, 0x20, "C:\\src\\inner.cpp", 3}};
+  FakeFunction c;
+  c.fn = {0x5000, 0x40, "with_blank_inlines", false};
+  c.lines = {{0x5000, 0x40, "C:\\src\\c.cpp", 77}};
+  c.inlines = {{0x5010, 8, {{"in1", "", 0}, {"in2", "C:\\src\\d.h", 9}}}, {0x5020, 8, {{"in3", "", 0}}}};
+  s->functions = {a, b, pub, boundedPub, inner, c};
   return s;
 }
 
@@ -228,14 +248,58 @@ TEST(DiaProvider, GapsAndOutOfRangeAreUnresolved) {
   EXPECT_EQ(f.provider.functionBounds(0x1080).error().code, ErrorCode::NotFound);
 }
 
-TEST(DiaProvider, FunctionExtentsAreCached) {
+TEST(DiaProvider, NamesAreCachedButExtentsAreNot) {
   Fixture f;
   ASSERT_TRUE(f.provider.load(pdbModule(), "x.pdb").ok());
   for (uint64_t rva = 0x1000; rva < 0x1080; ++rva) ASSERT_TRUE(f.provider.resolve(rva).resolved);
-  EXPECT_EQ(f.provider.functionLookups(), 1u);
-  EXPECT_EQ(f.state->findFunctionCalls, 1);
+  EXPECT_EQ(f.provider.functionLookups(), 1u);  // one distinct function interned
+  EXPECT_EQ(f.state->findFunctionCalls, 0x80);  // every address still asks the session
   ASSERT_TRUE(f.provider.resolve(0x2000).resolved);
   EXPECT_EQ(f.provider.functionLookups(), 2u);
+}
+
+// D1: a public symbol with a real extent must never shadow a private function inside it, in either order.
+TEST(DiaProvider, PublicExtentNeverShadowsPrivateFunctions) {
+  for (const bool publicFirst : {true, false}) {
+    Fixture f;
+    ASSERT_TRUE(f.provider.load(pdbModule(), "x.pdb").ok());
+    ResolvedAddress pubHit;
+    ResolvedAddress privHit;
+    if (publicFirst) {
+      pubHit = f.provider.resolve(0x4010);
+      privHit = f.provider.resolve(0x4050);
+    } else {
+      privHit = f.provider.resolve(0x4050);
+      pubHit = f.provider.resolve(0x4010);
+    }
+    ASSERT_TRUE(pubHit.resolved);
+    EXPECT_EQ(f.strings.get(pubHit.function), "pub_bounded") << publicFirst;
+    ASSERT_TRUE(privHit.resolved);
+    EXPECT_EQ(f.strings.get(privHit.function), "priv_inside") << publicFirst;
+    EXPECT_EQ(privHit.functionStartRva, 0x4040u);
+    EXPECT_EQ(f.strings.get(privHit.file), "C:\\src\\inner.cpp");
+    // After the private function the public extent applies again; past its end it does not.
+    EXPECT_EQ(f.strings.get(f.provider.resolve(0x4070).function), "pub_bounded");
+    EXPECT_NE(f.strings.get(f.provider.resolve(0x4100).function), "pub_bounded");  // past its end
+    auto bounds = f.provider.functionBounds(0x4050);
+    ASSERT_TRUE(bounds.ok());
+    EXPECT_EQ(bounds.value().startRva, 0x4040u);
+    EXPECT_EQ(bounds.value().size, 0x20u);
+  }
+}
+
+TEST(DiaProvider, InlineFramesWithoutALineTakeTheNextOuterPosition) {
+  Fixture f;
+  ASSERT_TRUE(f.provider.load(pdbModule(), "x.pdb").ok());
+  ResolvedAddress r = f.provider.resolve(0x5012);
+  ASSERT_EQ(r.inlines.size(), 2u);
+  EXPECT_EQ(r.inlines[1].line, 9u);
+  EXPECT_EQ(r.inlines[0].line, 9u);  // inherited from in2
+  EXPECT_EQ(f.strings.get(r.inlines[0].file), "C:\\src\\d.h");
+  r = f.provider.resolve(0x5022);
+  ASSERT_EQ(r.inlines.size(), 1u);
+  EXPECT_EQ(r.inlines[0].line, 77u);  // outermost: the physical function's line-table position
+  EXPECT_EQ(f.strings.get(r.inlines[0].file), "C:\\src\\c.cpp");
 }
 
 TEST(DiaProvider, FunctionBoundsAndLines) {
