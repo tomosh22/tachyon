@@ -208,6 +208,7 @@ bool TimelineWidget::applySelectionAsFilter(SelectionBus& bus) {
 
 void TimelineWidget::clearSelection(SelectionBus* bus) {
   m_selection.reset();
+  if (bus) bus->setSelectedWait(std::nullopt);  // WP-46: the persistent wake-up arrow goes too
   const std::optional<TickRange> applied = m_appliedRange;
   m_appliedRange.reset();
   if (!bus || !bus->state().timeFilter) return;
@@ -244,6 +245,9 @@ void TimelineWidget::resetDocument() {
   m_publishedFunction.reset();
   m_drag = {};
   m_hoverPublished = false;
+  m_pendingNav.reset();
+  m_scrollToThread = ThreadIdx();
+  m_arrows.clear();
 }
 
 void TimelineWidget::startDocument(const PanelContext& context) {
@@ -286,6 +290,12 @@ void TimelineWidget::onSelectionChanged(const PanelContext& context, const Selec
                                         SelectionField field) {
   if (field == SelectionField::All) {
     m_selection.reset();  // a new document or an explicit reset
+    m_pendingNav.reset();
+  }
+  if (field == SelectionField::Navigation && state.navigation.serial != 0 &&
+      state.navigation.serial != m_lastNavSerial) {
+    m_lastNavSerial = state.navigation.serial;
+    m_pendingNav = state.navigation;
   }
   if ((field == SelectionField::SelectedFunction || field == SelectionField::All) &&
       state.selectedFunction != m_publishedFunction) {
@@ -294,6 +304,29 @@ void TimelineWidget::onSelectionChanged(const PanelContext& context, const Selec
     m_publishedFunction.reset();
   }
   if (field != SelectionField::Hovered) context.requestRedraw();
+}
+
+void TimelineWidget::applyNavigation() {
+  if (!m_pendingNav || !m_doc) return;
+  DocState& d = *m_doc;
+  const NavigationRequest nav = *m_pendingNav;
+  m_pendingNav.reset();
+  if (nav.thread.valid() && nav.thread.get() < d.flags.size() && d.flags[nav.thread.get()].hidden) {
+    d.flags[nav.thread.get()].hidden = false;  // a hidden row cannot be navigated to
+    d.orderDirty = true;
+  }
+  if (nav.t1 > nav.t0) d.view = viewFromRange(d.limits, {nav.t0, nav.t1}, 0.1);
+  m_scrollToThread = nav.thread;
+}
+
+std::optional<float> TimelineWidget::bandCenterY(ThreadIdx thread) const {
+  if (!m_doc) return std::nullopt;
+  for (const RowLayout& r : m_doc->layout) {
+    if (r.thread == thread) {
+      return m_geometry.rowsContentY0 + r.y0 + bandTop(m_rowGeometry) + m_rowGeometry.bandHeight * 0.5f;
+    }
+  }
+  return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -437,6 +470,7 @@ void TimelineWidget::draw(const PanelContext& context) {
     }
   }
   if (!m_doc->buildStarted && !m_options.deferLodBuild) startBuild(context);
+  applyNavigation();
   updateOrder();
   updateFlameDepths();
   m_anyHovered = false;
@@ -730,6 +764,20 @@ void TimelineWidget::drawRows(const PanelContext& context) {
   }
   d.layout = layoutRows(d.order, d.flags, depths, geom);
   d.contentHeight = contentHeight(d.layout, geom);
+  if (m_scrollToThread.valid()) {
+    for (const RowLayout& r : d.layout) {
+      if (r.thread != m_scrollToThread) continue;
+      // The top of the row (state band and strip) must be visible; a row taller than the view is top-aligned.
+      const float shown = std::min(r.height, d.rowsViewHeight);
+      if (r.y0 < d.rowsScrollY) {
+        m_pendingScrollY = r.y0;
+      } else if (r.y0 + shown > d.rowsScrollY + d.rowsViewHeight) {
+        m_pendingScrollY = std::max(r.y0 + shown - d.rowsViewHeight, 0.0f);
+      }
+      break;
+    }
+    m_scrollToThread = ThreadIdx();
+  }
 
   ImGui::BeginChild("##rows", ImVec2(0, 0), ImGuiChildFlags_None,
                     ImGuiWindowFlags_AlwaysVerticalScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
@@ -814,6 +862,7 @@ void TimelineWidget::drawRows(const PanelContext& context) {
   }
   const Hit hit = canvasHovered ? hitTest(context, io.MousePos.x, io.MousePos.y) : Hit{};
   if (canvasHovered) m_anyHovered = true;
+  drawWakeArrows(dl, context, hit);
   if (canvasHovered && m_drag.mode == Drag::Mode::None && !ImGui::IsPopupOpen("##rowmenu"))
     drawTooltip(context, hit);
   publishHover(context, hit);
@@ -1038,6 +1087,7 @@ void TimelineWidget::drawTooltip(const PanelContext& context, const Hit& hit) {
   in.nsPerPixel = d.view.span / std::max(1.0f, m_geometry.plotWidth) * 1e9 / d.clockHz;
   in.clockHz = d.clockHz;
   in.pending = hit.pending;
+  in.showInteraction = ImGui::GetIO().KeyCtrl;
   in.stack = hit.stack;
   in.share = hit.share;
   if (hit.span) {
@@ -1079,6 +1129,13 @@ void TimelineWidget::applyClick(const PanelContext& context, const Hit& hit) {
     // Recorded before publishing: the bus callback (onSelectionChanged) must recognise this key as ours.
     m_publishedFunction = functionKeyForNode(*m_doc->model, context.symbols, hit.stack, hit.stackPosition);
     context.selection->setSelectedFunction(m_publishedFunction);
+  }
+  // WP-46: a click on a Waiting / Ready interval inspects that wait in the Thread Interaction panel.
+  if (hit.inPlot && (hit.section == RowSection::Band || hit.section == RowSection::Strip)) {
+    if (const auto episode = interaction::episodeAt(*m_doc->model, hit.thread, hit.ts)) {
+      context.selection->setSelectedWait(WaitSelection{hit.thread, episode->switchOutTs});
+      context.selection->requestPanel(interaction::kThreadInteractionPanelName);
+    }
   }
 }
 
@@ -1212,6 +1269,105 @@ void TimelineWidget::handleKeys(const PanelContext& context) {
     }
     if (sel.valid() && ImGui::IsKeyPressed(ImGuiKey_E, false)) setExpanded(sel, !flagsOf(sel).expanded);
     if (sel.valid() && ImGui::IsKeyPressed(ImGuiKey_P, false)) setPinned(sel, !flagsOf(sel).pinned);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Wake-up arrows (WP-46)
+
+void TimelineWidget::drawWakeArrows(ImDrawList* dl, const PanelContext& context, const Hit& hit) {
+  m_arrows.clear();
+  if (!m_doc || !context.selection) return;
+  const model::TraceModel& model = *m_doc->model;
+  std::optional<interaction::WaitEpisode> selected;
+  if (const auto& sel = context.selection->state().selectedWait) {
+    selected = interaction::episodeStartingAt(model, sel->thread, sel->switchOutTs);
+  }
+  std::optional<interaction::WaitEpisode> hovered;
+  if (hit.inPlot && hit.thread.valid() && m_drag.mode == Drag::Mode::None &&
+      (hit.section == RowSection::Band || hit.section == RowSection::Strip)) {
+    hovered = interaction::episodeAt(model, hit.thread, hit.ts);
+  }
+  dl->PushClipRect(ImVec2(m_geometry.gutterX0, m_geometry.rowsY0),
+                   ImVec2(m_geometry.plotX0 + m_geometry.plotWidth, m_geometry.rowsY1), true);
+  if (selected) drawWakeArrow(dl, context, *selected, true);
+  if (hovered &&
+      !(selected && selected->thread == hovered->thread && selected->switchOutTs == hovered->switchOutTs)) {
+    drawWakeArrow(dl, context, *hovered, false);
+  }
+  dl->PopClipRect();
+}
+
+void TimelineWidget::drawWakeArrow(ImDrawList* dl, const PanelContext& context,
+                                   const interaction::WaitEpisode& e, bool selected) {
+  (void)context;
+  if (!e.hasWaker || !e.hasReadyRec) return;  // nobody is known to have woken the thread
+  const DocState& d = *m_doc;
+  const std::optional<float> wokenY = bandCenterY(e.thread);
+  if (!wokenY) return;  // the woken row is not shown
+  const std::optional<float> wakerY = e.wakerThread.valid() ? bandCenterY(e.wakerThread) : std::nullopt;
+  const float x0 = m_geometry.plotX0, w = m_geometry.plotWidth;
+  const auto xOf = [&](uint64_t ts) {
+    return static_cast<float>(relTickToX(d.view, toRelative(d.limits, ts), x0, w));
+  };
+  interaction::ArrowInput in;
+  in.waker = {xOf(e.readyTs), wakerY.value_or(m_geometry.rowsY0)};
+  in.woken = {xOf(e.switchInTs), *wokenY};
+  in.wakerRowKnown = wakerY.has_value();
+  in.clip = {x0, m_geometry.rowsY0, x0 + w, m_geometry.rowsY1};
+  const interaction::ArrowGeometry g = interaction::computeArrow(in);
+
+  WakeArrowInfo info;
+  info.episode = e;
+  info.geometry = g;
+  info.selected = selected;
+  info.wakerLabel = interaction::threadLabel(*d.model, e.wakerThread, e.wakerTid);
+  if (g.wakerHidden && e.wakerThread.valid()) info.wakerLabel += " (hidden)";
+  m_arrows.push_back(info);
+
+  const ImU32 color = selected ? IM_COL32(255, 235, 120, 255) : IM_COL32(255, 255, 255, 230);
+  const float thickness = selected ? 2.5f : 1.75f;
+  const float head = 7.0f * std::max(0.5f, ImGui::GetFontSize() / kBaseUi);
+  if (g.visible) {
+    dl->AddLine(ImVec2(g.from.x, g.from.y), ImVec2(g.to.x, g.to.y), IM_COL32(0, 0, 0, 200), thickness + 2.0f);
+    dl->AddLine(ImVec2(g.from.x, g.from.y), ImVec2(g.to.x, g.to.y), color, thickness);
+    if (!g.fromClipped) dl->AddCircleFilled(ImVec2(g.from.x, g.from.y), 3.0f, color);
+    if (!g.toClipped) {
+      const interaction::ArrowHead h = interaction::arrowHead(g.from, g.to, head);
+      dl->AddTriangleFilled(ImVec2(h.tip.x, h.tip.y), ImVec2(h.left.x, h.left.y),
+                            ImVec2(h.right.x, h.right.y), color);
+    }
+  }
+  if (g.markerSide != interaction::EdgeSide::None) {
+    const float m = head;
+    const ImVec2 p(g.markerPos.x, g.markerPos.y);
+    ImVec2 a = p, b, c, text = p;
+    switch (g.markerSide) {
+      case interaction::EdgeSide::Top:
+        b = ImVec2(p.x - m, p.y + m);
+        c = ImVec2(p.x + m, p.y + m);
+        text = ImVec2(p.x + m + 2.0f, p.y);
+        break;
+      case interaction::EdgeSide::Bottom:
+        b = ImVec2(p.x - m, p.y - m);
+        c = ImVec2(p.x + m, p.y - m);
+        text = ImVec2(p.x + m + 2.0f, p.y - ImGui::GetFontSize());
+        break;
+      case interaction::EdgeSide::Left:
+        b = ImVec2(p.x + m, p.y - m);
+        c = ImVec2(p.x + m, p.y + m);
+        text = ImVec2(p.x + m + 2.0f, p.y - ImGui::GetFontSize() * 0.5f);
+        break;
+      default:  // Right
+        b = ImVec2(p.x - m, p.y - m);
+        c = ImVec2(p.x - m, p.y + m);
+        text = ImVec2(p.x - m - 2.0f - ImGui::CalcTextSize(info.wakerLabel.c_str()).x,
+                      p.y - ImGui::GetFontSize() * 0.5f);
+        break;
+    }
+    dl->AddTriangleFilled(a, b, c, color);
+    dl->AddText(ImVec2(text.x + 1.0f, text.y + 1.0f), IM_COL32(0, 0, 0, 255), info.wakerLabel.c_str());
+    dl->AddText(text, color, info.wakerLabel.c_str());
   }
 }
 

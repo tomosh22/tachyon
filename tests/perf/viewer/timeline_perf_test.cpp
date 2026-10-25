@@ -21,6 +21,7 @@
 #include "analysis/lod.h"
 #include "analysis/thread_states.h"
 #include "viewer/document.h"
+#include "viewer/interaction/interaction_model.h"
 #include "viewer/timeline/timeline_widget.h"
 
 #include <gtest/gtest.h>
@@ -197,7 +198,9 @@ void replicateThreads(model::TraceModel& m, size_t rows) {
   }
 }
 
-void runScenario(const char* name, std::shared_ptr<const model::TraceModel> model) {
+// withArrow: a wait with a known waker is selected on the bus, so every frame also draws its persistent
+// wake-up arrow (WP-46) on top of the normal timeline cost; the same budgets apply.
+void runScenario(const char* name, std::shared_ptr<const model::TraceModel> model, bool withArrow = false) {
   ImGuiHeadless imgui;
   Document doc("perf.tachyon", model);
   SelectionBus bus;
@@ -205,6 +208,20 @@ void runScenario(const char* name, std::shared_ptr<const model::TraceModel> mode
   context.document = &doc;
   context.selection = &bus;
   context.documentGeneration = 1;
+  if (withArrow) {
+    interaction::WaitQuery q;
+    q.t0 = model->header.start_ts;
+    q.maxResults = 100000;
+    bool found = false;
+    for (const interaction::WaitEpisode& e : interaction::longestWaits(*model, q, nullptr).rows) {
+      if (e.hasWaker && e.hasReadyRec && e.wakerThread.valid()) {
+        bus.setSelectedWait(WaitSelection{e.thread, e.switchOutTs});
+        found = true;
+        break;
+      }
+    }
+    ASSERT_TRUE(found);
+  }
 
   TimelineWidget widget;
   widget.options().buildInline = true;
@@ -263,6 +280,7 @@ void runScenario(const char* name, std::shared_ptr<const model::TraceModel> mode
       expanded.medianWorstLabel.c_str(), kRegressionBudgetMs, kRegressionBudgetMs * 2);
 
   EXPECT_EQ(collapsed.minRowsDrawn, 64u) << "all 64 rows must be on screen for the budget to mean anything";
+  if (withArrow) std::printf("[timeline perf] %s: wake-up arrow selected during the sweeps\n", name);
   EXPECT_LT(collapsed.medianWorstMs, kRegressionBudgetMs * 2);
   EXPECT_LT(expanded.medianWorstMs, kRegressionBudgetMs * 2);
   EXPECT_LT(steady, kFrameBudgetMs);
@@ -279,6 +297,16 @@ TEST(TimelinePerf, MediumReplicatedTo64Rows) {
   replicateThreads(m, 64);
   ASSERT_EQ(m.threads.size(), 64u);
   runScenario("medium x4", std::make_shared<const model::TraceModel>(std::move(m)));
+}
+
+TEST(TimelinePerf, MediumReplicatedTo64RowsWithAWakeUpArrow) {
+  auto loaded =
+      model::TraceModel::load(std::filesystem::path(TACHYON_GENERATED_FIXTURE_DIR) / "medium.tachyon");
+  ASSERT_TRUE(loaded.ok()) << loaded.error().toString();
+  model::TraceModel m = std::move(*loaded);
+  ASSERT_TRUE(analysis::buildThreadStates(m).ok());
+  replicateThreads(m, 64);
+  runScenario("medium x4 + arrow", std::make_shared<const model::TraceModel>(std::move(m)), true);
 }
 
 TEST(TimelinePerf, Large64Threads10Minutes) {
