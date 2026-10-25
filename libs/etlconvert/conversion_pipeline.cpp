@@ -15,6 +15,7 @@
 #include <mutex>
 #include <numeric>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace tachyon::etlconvert {
@@ -283,7 +284,10 @@ struct ConversionPipeline::Impl final : ParentListener {
   bool prescanned = false;
   bool finished = false;
   bool keepAll = false;
-  std::vector<uint32_t> targets;  // sorted
+  std::vector<uint32_t> targets;  // sorted, unique: every pid that is a target at some time
+  // pid -> accepted intervals (WP-13b). A pid with an entry is a target only inside them; a pid without one
+  // (plain targetPids) is a target for the whole trace.
+  std::unordered_map<uint32_t, std::vector<TargetInterval>> intervals;
 
   TraceMetadata meta;
   std::unique_ptr<ModuleTable> modules;
@@ -334,13 +338,33 @@ struct ConversionPipeline::Impl final : ParentListener {
   }
 
   // ---- classification ----------------------------------------------------------------------------------
-  bool isTargetPid(uint32_t pid) const { return std::binary_search(targets.begin(), targets.end(), pid); }
+  bool isTargetEver(uint32_t pid) const { return std::binary_search(targets.begin(), targets.end(), pid); }
+
+  // pid is a target at time ts.
+  bool isTargetPid(uint32_t pid, uint64_t ts) const {
+    if (!isTargetEver(pid)) return false;
+    const auto it = intervals.find(pid);
+    if (it == intervals.end()) return true;
+    for (const TargetInterval& iv : it->second)
+      if (ts >= iv.start && ts <= iv.end) return true;
+    return false;
+  }
+
+  // pid is a target at some time in [t0, t1].
+  bool isTargetDuring(uint32_t pid, uint64_t t0, uint64_t t1) const {
+    if (!isTargetEver(pid)) return false;
+    const auto it = intervals.find(pid);
+    if (it == intervals.end()) return true;
+    for (const TargetInterval& iv : it->second)
+      if (t0 <= iv.end && t1 >= iv.start) return true;
+    return false;
+  }
 
   // Thread tid belongs to a target process at time ts. `headerPid` is a fallback for threads whose lifetime
   // was never seen.
   bool isTargetThread(uint32_t tid, uint64_t ts, uint32_t headerPid) const {
-    if (const ThreadLife* life = meta.lifeOf(tid, ts)) return isTargetPid(life->pid);
-    if (tid != 0 && headerPid != 0 && headerPid != kInvalidPid) return isTargetPid(headerPid);
+    if (const ThreadLife* life = meta.lifeOf(tid, ts)) return isTargetPid(life->pid, ts);
+    if (tid != 0 && headerPid != 0 && headerPid != kInvalidPid) return isTargetPid(headerPid, ts);
     return false;
   }
 
@@ -646,7 +670,12 @@ Result<std::unique_ptr<ConversionPipeline>> ConversionPipeline::create(const std
   impl->opt = std::move(options);
   impl->info = info;
   impl->targets = impl->opt.targetPids;
+  for (const TargetInterval& iv : impl->opt.targetIntervals) {
+    impl->targets.push_back(iv.pid);
+    impl->intervals[iv.pid].push_back(iv);
+  }
   std::sort(impl->targets.begin(), impl->targets.end());
+  impl->targets.erase(std::unique(impl->targets.begin(), impl->targets.end()), impl->targets.end());
   impl->keepAll = impl->targets.empty() || impl->opt.mode == CaptureMode::System;
   const DevicePathMapper mapper =
       impl->opt.deviceMapper != nullptr ? *impl->opt.deviceMapper : DevicePathMapper::fromSystem();
@@ -733,7 +762,7 @@ Result<ConvertStats> ConversionPipeline::finish() {
   std::unordered_set<uint32_t> seenTid;
   std::unordered_set<uint32_t> pids;
   for (const ThreadLife& life : lives) {
-    const bool target = s.isTargetPid(life.pid);
+    const bool target = s.isTargetDuring(life.pid, life.start, life.end);
     if (!target && !s.usedTids.contains(life.tid)) continue;
     trace::ThreadRec rec{};
     rec.tid = life.tid;

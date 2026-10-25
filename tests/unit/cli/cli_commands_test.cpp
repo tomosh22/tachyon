@@ -201,7 +201,11 @@ TEST(CliResume, NoStartParksThenResumeRecords) {
 
 TEST(CliResume, ResumeWithoutAParkedLaunchIsAnError) {
   Rig rig;
-  // Idle: resume is just a start of exe "-"; the fake accepts anything, so assert via the busy path instead.
+  const CliResult idle = rig.cli({"resume"});
+  EXPECT_EQ(idle.code, kExitProtocolError);
+  EXPECT_NE(idle.err.find("ENOTFOUND"), std::string::npos) << idle.err;
+  EXPECT_NE(idle.err.find("no parked launch"), std::string::npos) << idle.err;
+  EXPECT_EQ(rig.backend->startCalls(), 0) << "\"-\" must never reach the backend as a program";
   ASSERT_EQ(rig.cli({"start", "--launch", "game.exe", "--out", rig.out()}).code, kExitOk);
   EXPECT_EQ(rig.cli({"resume"}).code, kExitProtocolError) << "already capturing";
   EXPECT_EQ(rig.cli({"cancel"}).code, kExitOk);
@@ -326,6 +330,76 @@ TEST(CliJson, StatusAndErrorsAreJson) {
   const auto e = nlohmann::json::parse(stop.out);
   EXPECT_FALSE(e["ok"].get<bool>());
   EXPECT_EQ(e["code"], "ENOTFOUND");
+}
+
+// WP-13b: with --json every outcome leaves valid JSON on stdout, including failures that never reached the
+// agent.
+std::vector<nlohmann::json> jsonLines(const std::string& text) {
+  std::vector<nlohmann::json> lines;
+  std::istringstream in(text);
+  std::string line;
+  while (std::getline(in, line)) {
+    EXPECT_FALSE(line.empty());
+    auto j = nlohmann::json::parse(line, nullptr, false);
+    EXPECT_FALSE(j.is_discarded()) << "not JSON: " << line;
+    lines.push_back(std::move(j));
+  }
+  return lines;
+}
+
+void expectFailureJson(const CliResult& r, int exitCode, const std::string& code) {
+  EXPECT_EQ(r.code, exitCode) << r.err;
+  const auto lines = jsonLines(r.out);
+  ASSERT_FALSE(lines.empty()) << "nothing on stdout";
+  const auto& j = lines.back();
+  EXPECT_FALSE(j["ok"].get<bool>());
+  EXPECT_EQ(j["error"]["code"], code) << r.out;
+  EXPECT_FALSE(j["error"]["message"].get<std::string>().empty());
+}
+
+TEST(CliJsonFailures, UsageErrorsPrintJsonAndExitThree) {
+  expectFailureJson(runCli({"--json", "bogus"}), kExitUsage, "EUSAGE");
+  expectFailureJson(runCli({"bogus", "--json"}), kExitUsage, "EUSAGE");
+  expectFailureJson(runCli({"--json"}), kExitUsage, "EUSAGE");
+  expectFailureJson(runCli({"--json", "capture"}), kExitUsage, "EUSAGE");
+  expectFailureJson(runCli({"--json", "capture", "--system"}), kExitUsage, "EUSAGE");
+  expectFailureJson(runCli({"--json", "status", "--nonsense"}), kExitUsage, "EUSAGE");
+  expectFailureJson(runCli({"--json", "start", "--launch", "a.exe", "--hz", "abc"}), kExitUsage, "EUSAGE");
+}
+
+TEST(CliJsonFailures, UsageErrorsWithoutJsonStillPrintNothingOnStdout) {
+  const CliResult r = runCli({"bogus"});
+  EXPECT_EQ(r.code, kExitUsage);
+  EXPECT_TRUE(r.out.empty());
+  EXPECT_NE(r.err.find("unknown command"), std::string::npos);
+}
+
+TEST(CliJsonFailures, ConnectionFailureIsJsonAndExitTwo) {
+  expectFailureJson(runCli({"--json", "--socket", "/nonexistent/agent.sock", "status"}),
+                    kExitConnectionFailure, "ECONNECT");
+  expectFailureJson(runCli({"--json", "--socket", "/nonexistent/agent.sock", "capture", "--launch", "a.exe"}),
+                    kExitConnectionFailure, "ECONNECT");
+}
+
+TEST(CliJsonFailures, CaptureTimeoutIsJsonAfterTheCaptureDone) {
+  Rig rig;
+  const CliResult r =
+      rig.cli({"--json", "--timeout", "1", "capture", "--launch", "game.exe", "--out", rig.out()});
+  EXPECT_EQ(r.code, kExitConnectionFailure) << r.err;
+  const auto lines = jsonLines(r.out);
+  ASSERT_GE(lines.size(), 3u) << r.out;  // start response, capture_done, the timeout failure
+  EXPECT_EQ(lines[1]["event"], "capture_done");
+  EXPECT_EQ(lines.back()["error"]["code"], "ETIMEOUT");
+}
+
+TEST(CliJsonFailures, AgentErrorsKeepTheProtocolShapeAndEveryLineIsJson) {
+  Rig rig;
+  const CliResult r = rig.cli({"--json", "resume"});
+  EXPECT_EQ(r.code, kExitProtocolError);
+  const auto lines = jsonLines(r.out);
+  ASSERT_EQ(lines.size(), 1u);
+  EXPECT_FALSE(lines[0]["ok"].get<bool>());
+  EXPECT_EQ(lines[0]["code"], "ENOTFOUND");
 }
 
 TEST(CliFlush, StillRoutesToTheAgent) {

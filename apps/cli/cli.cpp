@@ -5,8 +5,10 @@
 #include "control/protocol.h"
 #include "control/transport.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <charconv>
+#include <cstdio>
 #include <cstdlib>
 #include <iomanip>
 #include <ostream>
@@ -270,6 +272,45 @@ void printEvent(const Event& e, bool json, std::ostream& out) {
   }
 }
 
+std::string jsonEscape(const std::string& in) {
+  std::string out;
+  for (const char ch : in) {
+    const auto c = static_cast<unsigned char>(ch);
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (c < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof buf, "\\u%04x", c);
+          out += buf;
+        } else {
+          out.push_back(ch);
+        }
+    }
+  }
+  return out;
+}
+
+// Reports a failure that did not come from the agent: a human line on stderr and, with --json, one
+// `{"ok":false,"error":{"code":...,"message":...}}` line on stdout, so scripts always get valid JSON.
+// Codes: EUSAGE (exit 3), ECONNECT (exit 2, cannot reach or lost the agent), ETIMEOUT (exit 2, a wait ran
+// out).
+void reportFailure(bool json, std::ostream& out, std::ostream& err, const char* code,
+                   const std::string& message) {
+  err << "tachyon-cli: " << message << "\n";
+  if (json)
+    out << "{\"ok\":false,\"error\":{\"code\":\"" << code << "\",\"message\":\"" << jsonEscape(message)
+        << "\"}}\n";
+}
+
+const char* codeFor(const Error& e) {
+  return e.code == ErrorCode::Timeout ? "ETIMEOUT" : "ECONNECT";
+}
+
 bool isFinal(const Event& e) {
   return std::holds_alternative<CaptureDoneEvent>(e) || std::holds_alternative<ErrorEvent>(e);
 }
@@ -304,13 +345,14 @@ int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream&
   bool timedOut = false;
   if (!event.ok()) {
     if (event.error().code != ErrorCode::Timeout) {
-      err << "tachyon-cli: waiting for the capture: " << event.error().message << "\n";
+      reportFailure(p.json, out, err, codeFor(event.error()),
+                    "waiting for the capture: " + event.error().message);
       return kExitConnectionFailure;
     }
     timedOut = !timed;  // no --duration: --timeout ran out before the target exited
     auto stop = client.call(StopRequest{});
     if (!stop.ok()) {
-      err << "tachyon-cli: " << stop.error().message << "\n";
+      reportFailure(p.json, out, err, codeFor(stop.error()), stop.error().message);
       return kExitConnectionFailure;
     }
     // NotFound / Busy: the capture just ended on its own; its capture_done is already on the way.
@@ -320,14 +362,16 @@ int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream&
     }
     event = client.waitForEvent(isFinal, timeoutMs);
     if (!event.ok()) {
-      err << "tachyon-cli: waiting for capture_done: " << event.error().message << "\n";
+      reportFailure(p.json, out, err, codeFor(event.error()),
+                    "waiting for capture_done: " + event.error().message);
       return kExitConnectionFailure;
     }
   }
   const int code = finish(*event, p.json, out, err);
   if (timedOut && code == kExitOk) {
-    err << "tachyon-cli: the target did not exit within --timeout " << p.timeoutS
-        << " s; the capture was stopped and the trace written\n";
+    reportFailure(p.json, out, err, "ETIMEOUT",
+                  "the target did not exit within --timeout " + std::to_string(p.timeoutS) +
+                      " s; the capture was stopped and the trace written");
     return kExitConnectionFailure;
   }
   return code;
@@ -338,7 +382,9 @@ int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream&
 int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
   Parsed p;
   if (const std::string e = parse(args, p); !e.empty()) {
-    err << "tachyon-cli: " << e << "\n";
+    // parse() may have stopped before it saw --json, so look for it directly.
+    const bool json = std::find(args.begin(), args.end(), "--json") != args.end();
+    reportFailure(json, out, err, "EUSAGE", e);
     printUsage(err);
     return kExitUsage;
   }
@@ -346,13 +392,14 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
 
   auto client = Client::connectWithRetry(p.address, p.connectTimeoutMs);
   if (!client.ok()) {
-    err << "tachyon-cli: cannot connect to agent at " << p.address << ": " << client.error().message << "\n";
+    reportFailure(p.json, out, err, "ECONNECT",
+                  "cannot connect to agent at " + p.address + ": " + client.error().message);
     return kExitConnectionFailure;
   }
 
   auto resp = client->call(p.request);
   if (!resp.ok()) {
-    err << "tachyon-cli: " << resp.error().message << "\n";
+    reportFailure(p.json, out, err, codeFor(resp.error()), resp.error().message);
     return kExitConnectionFailure;
   }
   const bool capturing = p.command == "capture";
@@ -367,7 +414,8 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
 
   auto event = client->waitForEvent(isFinal, p.timeoutS * 1000);
   if (!event.ok()) {
-    err << "tachyon-cli: waiting for capture_done: " << event.error().message << "\n";
+    reportFailure(p.json, out, err, codeFor(event.error()),
+                  "waiting for capture_done: " + event.error().message);
     return kExitConnectionFailure;
   }
   return finish(*event, p.json, out, err);

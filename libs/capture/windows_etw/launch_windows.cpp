@@ -146,7 +146,9 @@ Result<TargetProcess> TargetProcess::open(uint32_t pid) {
   HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (h == nullptr) {
     const DWORD e = GetLastError();
-    return winError(launchErrorCode(e), "OpenProcess(" + std::to_string(pid) + ")", e);
+    // ERROR_INVALID_PARAMETER is what OpenProcess reports for a pid that no longer exists.
+    return winError(e == ERROR_INVALID_PARAMETER ? ErrorCode::NotFound : launchErrorCode(e),
+                    "OpenProcess(" + std::to_string(pid) + ")", e);
   }
   auto impl = std::make_unique<Impl>();
   impl->process = h;

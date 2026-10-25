@@ -13,6 +13,9 @@ using namespace control;
 
 namespace {
 
+// The exe of the start request that triggers a parked launch (see agent.h).
+constexpr const char* kResumeExe = "-";
+
 CaptureSummary toSummary(const capture::CaptureResult& r) {
   CaptureSummary s;
   s.path = r.tracePath.string();
@@ -117,6 +120,12 @@ Response Agent::handleStart(const StartRequest& req) {
   bool resuming = false;
   {
     std::lock_guard lock(m_mutex);
+    // exe "-" is the CLI's `resume`: a trigger for a parked launch, never a program to start.
+    if (opts.mode == capture::CaptureMode::Launch && opts.exe == kResumeExe &&
+        !(armedLocked() && !m_resuming))
+      return makeErrorResponse(
+          std::nullopt, makeError(ErrorCode::NotFound,
+                                  "no parked launch to resume (start one with --launch ... --no-start)"));
     if (armedLocked() && !m_resuming) {
       // The trigger of a deferred launch (see the class comment).
       if (!req.start_immediately)
