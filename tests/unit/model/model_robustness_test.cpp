@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <span>
 
 namespace tachyon::model {
 namespace {
@@ -214,6 +215,52 @@ TEST(ModelHandBuilt, DanglingCallstackIsErrorInFinalizedFileAndDroppedInPartial)
   EXPECT_TRUE(p->isPartial);
   ASSERT_EQ(p->samplesByThread.size(), 1u);
   EXPECT_FALSE(p->samplesByThread[0].callstack[0].valid());
+}
+
+TEST(ModelHandBuilt, SchedOnlyThreadsAreSynthesisedAndTidZeroIsNot) {
+  TempDir dir;
+  const auto path = dir.path() / "sched_only.tachyon";
+  {
+    auto w = trace::TraceWriter::open(path, makeHeader());
+    ASSERT_TRUE(w.ok());
+    // tid 30 and 10 appear only in context switches, tid 20 only as a waker / readied thread; tid 0 is idle.
+    trace::ContextSwitchRec in{};
+    in.ts = 100;
+    in.old_tid = 0;
+    in.new_tid = 30;
+    in.old_thread_stack = CallstackIdx::invalid();
+    trace::ContextSwitchRec out{};
+    out.ts = 200;
+    out.old_tid = 10;
+    out.new_tid = 0;
+    out.old_state = 5;
+    out.old_thread_stack = CallstackIdx::invalid();
+    const trace::ContextSwitchRec cs[] = {in, out};
+    w->append(std::span<const trace::ContextSwitchRec>(cs));
+    trace::ReadyRec rr{};
+    rr.ts = 250;
+    rr.readied_tid = 10;
+    rr.readying_tid = 20;
+    rr.readying_stack = CallstackIdx::invalid();
+    w->append(std::span<const trace::ReadyRec>(&rr, 1));
+    trace::SampleBatch s;  // a sample with tid 0 must not create a thread and is dropped
+    s.push(50, 0, CallstackIdx(0), 0);
+    s.push(60, 30, CallstackIdx(0), 0);
+    w->append(s);
+    ASSERT_TRUE(w->finish().ok());
+  }
+  auto r = TraceModel::load(path);
+  ASSERT_TRUE(r.ok()) << r.error().toString();
+  const TraceModel& m = *r;
+  ASSERT_EQ(m.threads.size(), 3u);
+  EXPECT_EQ(m.threads[0].tid, 10u);
+  EXPECT_EQ(m.threads[1].tid, 20u);
+  EXPECT_EQ(m.threads[2].tid, 30u);
+  EXPECT_EQ(m.tidToThread.count(0), 0u);
+  EXPECT_EQ(m.samplesByThread.size(), 3u);
+  EXPECT_EQ(m.statesByThread.size(), 3u);
+  EXPECT_EQ(m.samplesByThread[2].ts, (std::vector<uint64_t>{60}));
+  EXPECT_TRUE(m.samplesByThread[0].ts.empty());
 }
 
 }  // namespace

@@ -525,12 +525,23 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
   // Threads seen in events but missing from ThreadRecs get a synthesised Thread (ascending tid order).
   {
     std::vector<uint32_t> seen;
-    for (const auto& counts : chunkCounts)
-      for (const TidCount& tc : counts) seen.push_back(tc.tid);
-    // tid 0 on an event means "no thread" (e.g. a global marker) and does not create a Thread.
+    // tid 0 on an event means "no thread" (idle, or a global marker) and does not create a Thread.
     auto addTid = [&](uint32_t tid) {
       if (tid != 0) seen.push_back(tid);
     };
+    for (const auto& counts : chunkCounts)
+      for (const TidCount& tc : counts) addTid(tc.tid);
+    // Threads that appear only in context-switch / ready records (no ThreadRec, samples or other events).
+    for (const trace::ContextSwitchRec& e : m.contextSwitches) {
+      Local<trace::ContextSwitchRec> r(e);
+      addTid(r.v.old_tid);
+      addTid(r.v.new_tid);
+    }
+    for (const trace::ReadyRec& e : m.readyEvents) {
+      Local<trace::ReadyRec> r(e);
+      addTid(r.v.readied_tid);
+      addTid(r.v.readying_tid);
+    }
     for (const trace::ScopeEventRec& e : m.scopeEvents) addTid(Local<trace::ScopeEventRec>(e).v.tid);
     for (const trace::FiberEventRec& e : fiberRecs) addTid(Local<trace::FiberEventRec>(e).v.tid);
     for (const trace::FrameMarkRec& e : frameMarkRecs) addTid(Local<trace::FrameMarkRec>(e).v.tid);
@@ -564,6 +575,7 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
   for (size_t k = 0; k < sampleIdx.size(); ++k) {
     placements[k].reserve(chunkCounts[k].size());
     for (const TidCount& tc : chunkCounts[k]) {
+      if (tc.tid == 0) continue;  // samples with tid 0 (idle / no thread) are dropped
       const uint32_t t = m.tidToThread.at(tc.tid).get();
       placements[k].push_back(Placement{t, tc.count, totals[t]});
       totals[t] += tc.count;
@@ -618,7 +630,10 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
     uint32_t maxStack = 0;
     for (size_t i = 0; i < n; ++i) {
       const uint32_t j = index.get(loadAt<uint32_t>(tidCol, i));
-      if (j == kInvalidIdx) return makeError(ErrorCode::Internal, "sample thread changed between passes");
+      if (j == kInvalidIdx) {
+        if (loadAt<uint32_t>(tidCol, i) == 0) continue;  // tid 0 samples are dropped
+        return makeError(ErrorCode::Internal, "sample thread changed between passes");
+      }
       Cursor& cur = cursors[j];
       if (cur.pos >= cur.end) return makeError(ErrorCode::Internal, "sample count changed between passes");
       const uint32_t stack = loadAt<uint32_t>(stackCol, i);
