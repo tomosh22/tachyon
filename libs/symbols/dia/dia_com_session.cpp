@@ -307,28 +307,26 @@ class ComSession final : public IDiaSymbolSession {
   void enumerate(IDiaSymbol* global, enum SymTagEnum tag, bool isPublic, std::vector<Entry>& out) {
     ComPtr<IDiaEnumSymbols> en;
     if (FAILED(global->findChildren(tag, nullptr, nsNone, en.put())) || !en) return;
+    size_t seen = 0;
     for (;;) {
-      IDiaSymbol* batch[64] = {};
+      ComPtr<IDiaSymbol> sym;
       ULONG fetched = 0;
-      const HRESULT hr = en->Next(64, batch, &fetched);
-      if (FAILED(hr) || fetched == 0) break;
-      for (ULONG i = 0; i < fetched; ++i) {
-        ComPtr<IDiaSymbol> sym;
-        *sym.put() = batch[i];
-        DWORD rva = 0;
-        if (FAILED(sym->get_relativeVirtualAddress(&rva)) || rva == 0) continue;
-        ULONGLONG length = 0;
-        if (!isPublic) sym->get_length(&length);
-        if (!isPublic && length == 0) continue;
-        Entry e;
-        e.rva = rva;
-        e.size = static_cast<uint32_t>(std::min<ULONGLONG>(length, 0xFFFFFFFFull));
-        BSTR name = nullptr;
-        // Public names stay decorated here; DiaSymbolProvider undecorates each distinct function once.
-        if (SUCCEEDED(sym->get_name(&name))) e.name = takeBstr(name);
-        out.push_back(std::move(e));
-      }
-      if (hr == S_FALSE) break;
+      const HRESULT hr = en->Next(1, sym.put(), &fetched);
+      if (hr != S_OK || fetched != 1) break;
+      if (++seen % 1000 == 0)
+        std::fprintf(stderr, "[dia-trace] ... %zu symbols (tag %d)\n", seen, static_cast<int>(tag));
+      DWORD rva = 0;
+      if (FAILED(sym->get_relativeVirtualAddress(&rva)) || rva == 0) continue;
+      ULONGLONG length = 0;
+      if (!isPublic) sym->get_length(&length);
+      if (!isPublic && length == 0) continue;
+      Entry e;
+      e.rva = rva;
+      e.size = static_cast<uint32_t>(std::min<ULONGLONG>(length, 0xFFFFFFFFull));
+      BSTR name = nullptr;
+      // Public names stay decorated here; DiaSymbolProvider undecorates each distinct function once.
+      if (SUCCEEDED(sym->get_name(&name))) e.name = takeBstr(name);
+      out.push_back(std::move(e));
     }
     std::stable_sort(out.begin(), out.end(), [](const Entry& a, const Entry& b) { return a.rva < b.rva; });
   }
