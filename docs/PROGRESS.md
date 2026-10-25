@@ -113,7 +113,7 @@ Pass: ≥ 7,500 samples/s per busy core and > 95% SampledProfile with matched st
 ## Plan concerns raised
 
 - WP-03 bytes/node budget: with 8-byte nodes and 4-byte hash slots at load factor ≤ 0.7 and doubling growth, worst case right after a resize is ≈ 8 + 4/0.35 ≈ 19.4 bytes/node. Proposed: assert ≤ 20 bytes/node at worst-case table size, or allow a non-doubling growth factor. Proceeding with the plan as written; the WP-03 report must state the measured worst case.
-  - Measured in WP-03: as-grown 22.4 bytes/node, worst after resize 22.9 (std::vector slack adds to the hash overhead). Orchestrator decision: the ≤ 16 bytes/node budget is measured after `CallstackInterner::compact()` (13.7 bytes/node), because the interner only lives during conversion. Awaiting user confirmation.
+  - Measured in WP-03: as-grown 22.4 bytes/node, worst after resize 22.9 (std::vector slack adds to the hash overhead). Orchestrator decision: the ≤ 16 bytes/node budget is measured after `CallstackInterner::compact()` (13.7 bytes/node), because the interner only lives during conversion. Confirmed by user 2026-10-25.
 
 ## Environment notes
 

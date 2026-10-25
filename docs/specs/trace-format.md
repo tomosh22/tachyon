@@ -76,4 +76,4 @@ Header: `libs/trace/trace_format.h` (namespace `tachyon::trace`), now orchestrat
 - Packed sizes: FileHeader 64, ChunkHeader 32, ProcessRec 32, ThreadRec 32, ModuleRec 78, FrameRec 12, CallstackNodeRec 8, ContextSwitchRec 32, ReadyRec 28, ScopeEventRec 36, FiberEventRec 32, FrameMarkRec 24, MarkerRec 24, PlotSampleRec 20, ClockCalibrationRec 20, ThreadNameRec 16, FooterRec 24.
 - Readers must reject (not throw on) `record_count > 1,048,576`, `record_count` inconsistent with payload size, payloads over 1 GiB, and zstd frames whose content size differs from `uncompressed_size`.
 - Writers must split every chunk type, including Strings/Frames/CallstackNodes, at 1,048,576 records.
-- `CallstackInterner` memory budget (WP-03): ≤ 16 bytes/node measured after `compact()`; growth policy is doubling at load ≤ 0.7, so the as-grown peak is ~22–23 bytes/node.
+- `CallstackInterner` memory budget (WP-03): ≤ 16 bytes/node measured after `compact()`; growth policy is doubling at load ≤ 0.7, so the as-grown peak is ~22–23 bytes/node (reported, not budgeted). Confirmed by user 2026-10-25.
