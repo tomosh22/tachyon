@@ -1,8 +1,7 @@
 // Analysis query API (spec 3.7). WP-32 implements topDownTree, bottomUpFunctions and butterfly; the remaining
 // 3.7 queries are added by their own work packages and are intentionally not declared here yet:
 //   WP-33: linesForFunction, instructionsForFunction (LineAgg, InstructionAgg)
-//   WP-34: functionStats, scopeStats (Stats)
-//   WP-35: threadStateTotals, frames (ThreadStateTotals, FrameSummary)
+//   WP-35 (declared below): functionStats, scopeStats, threadStateTotals, frames, slowestFrames
 //
 // Deviation from 3.7 (see the WP-32 report): the queries need symbols to turn frames into FunctionKeys, so
 // the first parameter is a QueryContext (TraceModel + SymbolService + options + a per-filter memo) instead of
@@ -24,6 +23,7 @@
 #include "symbols/symbol_service.h"
 
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -194,6 +194,155 @@ Result<std::vector<FunctionRow>> bottomUpFunctions(const QueryContext& ctx, cons
 // descending, then key. Callee exclusive time is the part where the callee itself is the stack leaf.
 Result<Butterfly> butterfly(const QueryContext& ctx, const Filter& filter, FunctionKey key,
                             Cancel cancel = {});
+
+// ---------------------------------------------------------------------------------------------------------
+// WP-35: per-instance statistics, thread state totals and frames.
+//
+// Stats histogram scheme (log2 buckets of the duration in ticks). bucket(d) = 0 for d == 0, else
+// floor(log2(d)) + 1: bucket 1 holds {1}, bucket 2 holds [2, 4), bucket 3 [4, 8), ... bucket b >= 1 holds
+// [2^(b-1), 2^b), up to bucket 64 = [2^63, 2^64). `Stats::histogram[b]` is the number of instances in bucket
+// b; the vector runs from bucket 0 to the highest non-empty bucket (empty when count == 0). The edges are
+// derivable with the helpers below; ticks convert to time with TraceHeader.clock_frequency_hz at the UI edge.
+struct Stats {
+  uint32_t count = 0;  // number of instances
+  // All in ticks. Quartiles use linear interpolation between order statistics (the "type 7" definition: the
+  // q quantile sits at position q * (count - 1) of the sorted durations), so the median of an even count is
+  // the mean of the two middle values. mean = totalTicks / count. All zero when count == 0.
+  double min = 0, p25 = 0, median = 0, p75 = 0, max = 0, mean = 0;
+  std::vector<uint32_t> histogram;
+  // WP-35 additions to 3.7:
+  uint64_t totalTicks = 0;    // sum of all durations
+  uint32_t unterminated = 0;  // scopeStats: instances counted in `count` whose Begin has no End (they end at
+                              // the trace end); 0 for functionStats
+  uint32_t orphanEnds = 0;    // scopeStats: End events with no open Begin on the selected threads (ignored,
+                              // not counted in `count`), with ts in [t0, t1)
+};
+
+inline constexpr uint32_t kStatsMaxBuckets = 65;
+// Thread-safe: pure functions. Histogram bucket of a duration, and the half-open tick range [lower, upper)
+// of a bucket (the upper edge of bucket 64 saturates at UINT64_MAX and is inclusive there).
+constexpr uint32_t statsBucketOf(uint64_t ticks) {
+  return ticks == 0 ? 0u : 64u - static_cast<uint32_t>(std::countl_zero(ticks));
+}
+constexpr uint64_t statsBucketLower(uint32_t bucket) {
+  return bucket == 0 ? 0 : uint64_t{1} << (bucket - 1);
+}
+constexpr uint64_t statsBucketUpper(uint32_t bucket) {
+  return bucket >= 64 ? UINT64_MAX : uint64_t{1} << bucket;
+}
+
+// Time in each thread state over the filter's [t0, t1) (intervals clipped to the range; the range is also
+// clipped to the thread's coverage, so t1 = UINT64_MAX is fine).
+struct ThreadStateTotals {
+  uint64_t runningTicks = 0, readyTicks = 0, waitingTicks = 0, unknownTicks = 0;
+  uint32_t runningIntervals = 0, readyIntervals = 0, waitingIntervals = 0;  // non-empty clipped intervals
+};
+
+// A series of frame marks: the marks of one thread (invalid for global marks) with one name. Frames are
+// consecutive marks of a series: frame i = [mark_i, mark_{i+1}); the last mark opens no frame.
+struct FrameSeries {
+  ThreadIdx thread;
+  StringIdx name;
+  uint32_t markCount = 0;  // ignored when a FrameSeries selects a series in FrameOptions
+
+  // Thread-safe (value type).
+  bool sameSeries(const FrameSeries& o) const { return thread == o.thread && name == o.name; }
+};
+
+struct FrameOptions {
+  // nullopt = the default series: the one with the most marks (ties: earliest first mark, then lowest
+  // thread, then lowest name). An explicit series that has no marks gives InvalidArgument.
+  std::optional<FrameSeries> series;
+  uint32_t topFunctions = 5;  // exclusive functions reported per frame
+};
+
+// Running time of one thread within a frame.
+struct FrameThreadTime {
+  ThreadIdx thread;
+  uint64_t runningTicks =
+      0;                     // Running state time clipped to the frame (not affected by subtreeRoot/function)
+  uint64_t sampleTicks = 0;  // weight (rule 1) of the samples inside the frame that pass the filter
+};
+
+// Exclusive time of one function within a frame (leaf of the stack as the query sees it).
+struct FrameFunctionTime {
+  FunctionKey key;
+  uint64_t exclusiveTicks = 0;
+  uint32_t samples = 0;  // samples with this leaf, zero-weight samples included (like FunctionRow::instances)
+};
+
+struct FrameSummary {
+  uint64_t index = 0;                         // ordinal within the series, 0 = first frame of the series
+  uint64_t number = 0;                        // FrameMark::frame_number of the mark that opens the frame
+  uint64_t start = 0, end = 0, duration = 0;  // [start, end) in ticks, duration = end - start
+  ThreadIdx markThread;
+  StringIdx seriesName;
+  // Sorted by thread. Threads with no Running time and no samples in the frame are omitted. Only the threads
+  // selected by Filter::threads are reported.
+  std::vector<FrameThreadTime> threads;
+  // Top FrameOptions::topFunctions by exclusiveTicks (then samples, then key), over the selected threads.
+  std::vector<FrameFunctionTime> topFunctions;
+};
+
+// Shared-result variants (same contract as the WP-33 ones above).
+Result<std::shared_ptr<const Stats>> functionStatsShared(const QueryContext& ctx, const Filter& filter,
+                                                         FunctionKey key, Cancel cancel = {});
+Result<std::shared_ptr<const Stats>> scopeStatsShared(const QueryContext& ctx, const Filter& filter,
+                                                      StringIdx scopeId, Cancel cancel = {});
+Result<std::shared_ptr<const ThreadStateTotals>> threadStateTotalsShared(const QueryContext& ctx,
+                                                                         const Filter& filter,
+                                                                         ThreadIdx thread,
+                                                                         Cancel cancel = {});
+Result<std::shared_ptr<const std::vector<FrameSummary>>> framesShared(const QueryContext& ctx,
+                                                                      const Filter& filter,
+                                                                      FrameOptions options = {},
+                                                                      Cancel cancel = {});
+Result<std::shared_ptr<const std::vector<FrameSummary>>> slowestFramesShared(const QueryContext& ctx,
+                                                                             const Filter& filter, uint32_t n,
+                                                                             FrameOptions options = {},
+                                                                             Cancel cancel = {});
+
+// Thread-safe. Per-instance duration statistics of a sampled function. An instance is APPROXIMATED from
+// samples: per thread, a maximal run of consecutive samples (in time order, among the samples the filter
+// selects) whose stack contains the function at the same depth, with no gap greater than 2 sample intervals
+// between consecutive samples of the run. Depth is the position of the outermost occurrence of the function
+// counted from the root, after the context's inline expansion and kernel options and Filter::subtreeRoot
+// (recursion at a different depth therefore starts a new instance). The duration of an instance is
+// (last sample ts - first sample ts) + the weight (rule 1) of its last sample. Samples with weight 0 (the
+// thread was not Running) are skipped before runs are formed: they neither extend, break nor lengthen a run.
+// A key with module kScopeModule is answered as scopeStats of that scope id. Zero instances give count = 0.
+Result<Stats> functionStats(const QueryContext& ctx, const Filter& filter, FunctionKey key,
+                            Cancel cancel = {});
+
+// Thread-safe. Exact per-instance durations of an instrumentation scope id (StringIdx of the trace string
+// table). Begin/End events are paired per thread in timestamp order with stack discipline (see
+// scope_pairing.h); an unterminated Begin ends at header.end_ts and is counted in Stats::unterminated; an
+// orphan End is ignored and counted in Stats::orphanEnds. Filter: an instance is selected when its Begin lies
+// in [t0, t1) and its thread is selected; subtreeRoot and function do not apply to scopes and are ignored.
+Result<Stats> scopeStats(const QueryContext& ctx, const Filter& filter, StringIdx scopeId,
+                         Cancel cancel = {});
+
+// Thread-safe. State totals of one thread over [t0, t1). Filter::threads, subtreeRoot and function are
+// ignored (the thread is the argument).
+Result<ThreadStateTotals> threadStateTotals(const QueryContext& ctx, const Filter& filter, ThreadIdx thread,
+                                            Cancel cancel = {});
+
+// Thread-safe. Series of frame marks in the trace, sorted by markCount descending (the first is the default
+// series of frames()), then earliest first mark, thread, name.
+std::vector<FrameSeries> frameSeries(const QueryContext& ctx);
+
+// Thread-safe. The frames of one series (rule 6) that overlap the filter's [t0, t1) (frame.start < t1 and
+// frame.end > t0), in time order, each reported whole (not clipped to the filter). Per frame: per-thread
+// Running time (state intervals clipped to the frame) and weighted sample time, and the top-N exclusive
+// functions of the samples in [start, end). Filter::threads selects the threads reported; subtreeRoot and
+// function restrict the samples used for sampleTicks and topFunctions (they never change runningTicks).
+// A trace without frame marks gives an empty list.
+Result<std::vector<FrameSummary>> frames(const QueryContext& ctx, const Filter& filter,
+                                         FrameOptions options = {}, Cancel cancel = {});
+
+// Thread-safe. The n longest of those frames, sorted by duration descending, then start ascending.
+Result<std::vector<FrameSummary>> slowestFrames(const QueryContext& ctx, const Filter& filter, uint32_t n,
+                                                FrameOptions options = {}, Cancel cancel = {});
 
 // Thread-safe. Display name: "module!function", "module!0x<rva>" for unresolved frames,
 // "<unmapped>!0x<addr>",
