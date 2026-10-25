@@ -8,6 +8,15 @@
 // into place, so a failed merge never damages the input and an interrupted one never leaves a half-written
 // trace under the real name.
 //
+// ThreadNames are not events of a time window: when the window is known (clipping, or the range after
+// extension) each thread keeps the last name given at or before its start, stamped with the window start,
+// names after the end are moved to the end, and names never widen the header range.
+//
+// CaptureInfo gets an "instrumentation" object with a "merges" list that grows by one entry per merge (inputs
+// with a content hash, stream facts, counts, warnings). Merging an input whose hash is already listed fails
+// unless MergeOptions::force is set. If the input trace was partial the output keeps the partial flag (it is
+// a finalized file with a valid footer, but the capture behind it was cut short).
+//
 // Timestamps outside the trace's [start_ts, end_ts]: by the format (trace-format.md) nothing forbids them,
 // so by default they are kept and the header range is extended to cover them. A circular (flight-recorder)
 // capture covers only a recent window, so for those the caller sets `clipToTraceRange` and records outside
@@ -34,6 +43,9 @@ struct MergeOptions {
   // Destination. Empty: replace the input trace in place (temporary file + atomic rename).
   std::filesystem::path outPath;
   bool clipToTraceRange = false;
+  // Merge even when a sidecar with the same content was merged into this trace before (it would duplicate
+  // every record); without it that is an error.
+  bool force = false;
   // Overrides the clock mapping of the decoder (tests); see DecoderConfig.
   std::function<std::unique_ptr<IClockMapper>(const StreamInfo&)> clockMapperFactory;
 };

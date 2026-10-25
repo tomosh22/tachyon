@@ -10,10 +10,21 @@
 
 #include <cstring>
 
+#include "core/platform.h"
+
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <mutex>
 #include <thread>
+
+#if !TACHYON_PLATFORM_WINDOWS
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace tachyon::inst {
 namespace {
@@ -165,6 +176,203 @@ TEST(RawStreamServer, AddressIsFreeAgainAfterShutdown) {
   EXPECT_TRUE(second.ok());
 }
 
+RawServerOptions limits(uint32_t maxConnections, uint32_t expectedPeer = 0) {
+  RawServerOptions o;
+  o.maxConnections = maxConnections;
+  o.expectedPeerPid = expectedPeer;
+  return o;
+}
+
+TEST(RawStreamServer, ConnectionsOverTheCapAreClosedAndCounted) {
+  Collector c;
+  const std::string address = testAddress("cap");
+  auto server = RawStreamServer::listen(address, c.factory(), limits(2));
+  ASSERT_TRUE(server.ok());
+  std::vector<std::unique_ptr<RawClient>> clients;
+  for (int i = 0; i < 5; ++i) {
+    clients.push_back(std::make_unique<RawClient>());
+    ASSERT_TRUE(clients.back()->connect(address));
+    (void)clients.back()->send("x", 1);
+    // Let the server decide about this one before the next arrives.
+    ASSERT_TRUE(waitUntil([&] { return (*server)->acceptedCount() == static_cast<uint32_t>(i + 1); }));
+  }
+  EXPECT_EQ((*server)->rejectedCount(), 3u);
+  EXPECT_EQ((*server)->openCount(), 2u);
+  clients.clear();
+  ASSERT_TRUE(waitUntil([&] { return (*server)->openCount() == 0; }));
+  // Room again once the open ones are gone.
+  RawClient again;
+  ASSERT_TRUE(again.connect(address));
+  ASSERT_TRUE(again.send("y", 1));
+  ASSERT_TRUE(waitUntil([&] { return c.size() >= 3; }));
+  EXPECT_EQ((*server)->rejectedCount(), 3u);
+}
+
+TEST(RawStreamServer, FinishedReaderThreadsAreReapedSoManyShortConnectionsStayCheap) {
+  Collector c;
+  const std::string address = testAddress("many");
+  auto server = RawStreamServer::listen(address, c.factory(), limits(8));
+  ASSERT_TRUE(server.ok());
+  constexpr int kConnections = 400;
+  for (int i = 0; i < kConnections; ++i) {
+    RawClient client;
+    ASSERT_TRUE(client.connect(address));
+    ASSERT_TRUE(client.send("z", 1));
+    client.close();
+    ASSERT_TRUE(waitUntil([&] { return (*server)->acceptedCount() == static_cast<uint32_t>(i + 1); })) << i;
+    ASSERT_TRUE(waitUntil([&] { return (*server)->openCount() == 0; })) << i;
+  }
+  ASSERT_TRUE(waitUntil([&] { return c.size() == static_cast<size_t>(kConnections); }));
+  EXPECT_EQ((*server)->rejectedCount(), 0u);
+#if TACHYON_PLATFORM_LINUX
+  // Without reaping this would be ~400 finished-but-unjoined threads.
+  std::ifstream status("/proc/self/status");
+  std::string line;
+  int threads = -1;
+  while (std::getline(status, line))
+    if (line.rfind("Threads:", 0) == 0) threads = std::stoi(line.substr(8));
+  EXPECT_LT(threads, 40);
+#endif
+}
+
+TEST(RawStreamServer, OnlyTheExpectedPeerProcessIsServed) {
+  using control::testing_util::currentPid;
+  Collector c;
+  const std::string mine = testAddress("peer-ok"), other = testAddress("peer-bad");
+  auto ok = RawStreamServer::listen(mine, c.factory(), limits(4, static_cast<uint32_t>(currentPid())));
+  auto bad = RawStreamServer::listen(other, c.factory(), limits(4, static_cast<uint32_t>(currentPid()) + 1));
+  ASSERT_TRUE(ok.ok());
+  ASSERT_TRUE(bad.ok());
+  RawClient a, b;
+  ASSERT_TRUE(a.connect(mine));
+  ASSERT_TRUE(a.send("ok", 2));
+  ASSERT_TRUE(b.connect(other));
+  (void)b.send("no", 2);
+  ASSERT_TRUE(waitUntil([&] { return (*bad)->rejectedCount() == 1; }));
+  ASSERT_TRUE(waitUntil([&] { return c.size() == 2; }));
+  EXPECT_EQ(c.bytes, "ok");
+  EXPECT_EQ((*ok)->rejectedCount(), 0u);
+}
+
+#if !TACHYON_PLATFORM_WINDOWS
+TEST(RawStreamServer, TheSocketIsOwnerOnlyAndLeavesNoTemporaryDirectoryBehind) {
+  TempDir dir;
+  const std::string address = (dir.path() / "tachyon-inst-1.sock").string();
+  Collector c;
+  auto server = RawStreamServer::listen(address, c.factory());
+  ASSERT_TRUE(server.ok()) << server.error().toString();
+  struct stat st {};
+  ASSERT_EQ(::stat(address.c_str(), &st), 0);
+  EXPECT_TRUE(S_ISSOCK(st.st_mode));
+  EXPECT_EQ(st.st_mode & 0777, 0600u);
+  size_t entries = 0;
+  for (const auto& e : fs::directory_iterator(dir.path())) {
+    (void)e;
+    ++entries;
+  }
+  EXPECT_EQ(entries, 1u);
+  RawClient client;
+  EXPECT_TRUE(client.connect(address));  // still reachable under its final name
+}
+
+// Runs `body` in a forked child and returns its exit code (-1 when it crashed), so resource limits and a
+// crash stay out of the test process.
+template <typename Body>
+int inChild(Body body) {
+  const pid_t child = ::fork();
+  if (child == 0) ::_exit(body());
+  int status = 0;
+  ::waitpid(child, &status, 0);
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+bool underSanitizer() {
+#if defined(__SANITIZE_ADDRESS__)
+  return true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+  return true;
+#else
+  return false;
+#endif
+#else
+  return false;
+#endif
+}
+
+TEST(RawStreamServer, NoThreadsAvailableRejectsConnectionsInsteadOfTerminating) {
+  if (underSanitizer()) GTEST_SKIP() << "address-space limits do not work with the sanitizer runtime";
+  const std::string address = testAddress("nothreads");
+  const int code = inChild([&]() -> int {
+    Collector c;
+    auto server = RawStreamServer::listen(address, c.factory(), limits(100));
+    if (!server.ok()) return 10;
+    // Leave room for about a thread or two: every further 8 MiB stack mapping fails.
+    long pages = 0;
+    if (FILE* f = std::fopen("/proc/self/statm", "r")) {
+      if (std::fscanf(f, "%ld", &pages) != 1) pages = 0;
+      std::fclose(f);
+    }
+    rlimit lim{};
+    lim.rlim_cur = lim.rlim_max =
+        static_cast<rlim_t>(pages) * static_cast<rlim_t>(::sysconf(_SC_PAGESIZE)) + (24ull << 20);
+    if (::setrlimit(RLIMIT_AS, &lim) != 0) return 11;
+    std::vector<std::unique_ptr<RawClient>> clients;
+    for (int i = 0; i < 45; ++i) {
+      clients.push_back(std::make_unique<RawClient>());
+      if (!clients.back()->connect(address, 2000)) return 12;
+      (void)clients.back()->send("x", 1);
+    }
+    const auto deadline = Clock::now() + std::chrono::seconds(10);
+    while ((*server)->acceptedCount() < 45 && Clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    if ((*server)->acceptedCount() != 45) return 13;
+    if ((*server)->rejectedCount() == 0) return 14;  // some had to be refused for lack of threads
+    clients.clear();
+    (*server)->shutdown(50, 500);
+    return 0;
+  });
+  EXPECT_EQ(code, 0);
+}
+
+TEST(RawStreamServer, OutOfDescriptorsTheAcceptLoopBacksOffAndRecovers) {
+  if (underSanitizer()) GTEST_SKIP() << "the sanitizer runtime needs descriptors of its own";
+  const std::string address = testAddress("nofd");
+  const int code = inChild([&]() -> int {
+    Collector c;
+    auto server = RawStreamServer::listen(address, c.factory(), limits(100));
+    if (!server.ok()) return 10;
+    // A handful of descriptors above what is open now.
+    int open = 0;
+    for (int fd = 0; fd < 1024; ++fd)
+      if (::fcntl(fd, F_GETFD) != -1) ++open;
+    rlimit lim{};
+    lim.rlim_cur = lim.rlim_max = static_cast<rlim_t>(open + 8);
+    if (::setrlimit(RLIMIT_NOFILE, &lim) != 0) return 11;
+    {
+      std::vector<std::unique_ptr<RawClient>> clients;
+      for (int i = 0; i < 12; ++i) {
+        auto client = std::make_unique<RawClient>();
+        if (!client->connect(address, 500)) break;  // our own client descriptors run out too
+        (void)client->send("x", 1);
+        clients.push_back(std::move(client));
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(300));  // the accept loop meets EMFILE here
+    }
+    // Everything closed again: a new client must still be served.
+    const size_t before = c.size();
+    RawClient later;
+    if (!later.connect(address, 2000)) return 12;
+    if (!later.send("again", 5)) return 13;
+    const auto deadline = Clock::now() + std::chrono::seconds(10);
+    while (c.size() < before + 5 && Clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    return c.size() >= before + 5 ? 0 : 14;
+  });
+  EXPECT_EQ(code, 0);
+}
+#endif
+
 // ---------------------------------------------------------------------------------------------------------
 // Ingest
 // ---------------------------------------------------------------------------------------------------------
@@ -175,6 +383,7 @@ IngestConfig configIn(const TempDir& dir, uint64_t cap = kDefaultMaxSpoolBytes) 
   c.maxSpoolBytes = cap;
   c.drainIdleMs = 100;
   c.drainMaxMs = 3000;
+  c.verifyPeerPid = false;  // the test clients live in this process, the pids are made up
   return c;
 }
 
@@ -370,6 +579,97 @@ TEST(Ingest, CorruptStreamIsCutOffAndCounted) {
   ASSERT_EQ(infos.size(), 1u);
   EXPECT_EQ(infos[0].stats.framesWritten, s.frames());
   EXPECT_GT(infos[0].stats.corruptBytes, 0u);
+}
+
+TEST(Ingest, ProcessCapGivesBusyForTheOneBeyondIt) {
+  TempDir dir;
+  IngestConfig cfg = configIn(dir);
+  cfg.maxProcesses = 2;
+  Ingest ingest(cfg);
+  ASSERT_TRUE(ingest.attach(1, testAddress("pc1")).ok());
+  ASSERT_TRUE(ingest.attach(2, testAddress("pc2")).ok());
+  ASSERT_TRUE(ingest.attach(2, testAddress("pc2")).ok());  // the same pid again is not a new process
+  const auto third = ingest.attach(3, testAddress("pc3"));
+  ASSERT_FALSE(third.ok());
+  EXPECT_EQ(third.error().code, ErrorCode::Busy);
+  EXPECT_EQ(ingest.processCount(), 2u);
+}
+
+TEST(Ingest, ConnectionsPerProcessAreCappedAndCounted) {
+  TempDir dir;
+  IngestConfig cfg = configIn(dir);
+  cfg.maxConnectionsPerProcess = 1;
+  Ingest ingest(cfg);
+  const std::string address = testAddress("cpp");
+  ASSERT_TRUE(ingest.attach(4, address).ok());
+  RawClient first, second;
+  ASSERT_TRUE(first.connect(address));
+  const StreamBuilder s = processStream(4, 100);
+  ASSERT_TRUE(first.send(s.bytes().data(), s.bytes().size()));
+  ASSERT_TRUE(waitUntil([&] { return !ingest.snapshot().empty(); }));
+  ASSERT_TRUE(second.connect(address));
+  (void)second.send(s.bytes().data(), s.bytes().size());
+  ASSERT_TRUE(waitUntil([&] { return ingest.rejectedConnections() == 1; }));
+  first.close();
+  const auto infos = ingest.finish();
+  ASSERT_EQ(infos.size(), 1u);
+  EXPECT_EQ(infos[0].stats.framesWritten, s.frames());  // only the first connection was spooled
+  EXPECT_EQ(infos[0].stats.connections, 1u);
+}
+
+TEST(Ingest, TotalSpoolBudgetIsSharedByAllProcesses) {
+  TempDir dir;
+  const StreamBuilder s1 = processStream(1, 100), s2 = processStream(2, 100);
+  IngestConfig cfg = configIn(dir);  // per process: 1 GiB
+  cfg.maxTotalSpoolBytes = s1.bytes().size() + s2.bytes().size() / 2;
+  Ingest ingest(cfg);
+  const std::string a1 = testAddress("tb1"), a2 = testAddress("tb2");
+  ASSERT_TRUE(ingest.attach(1, a1).ok());
+  ASSERT_TRUE(ingest.attach(2, a2).ok());
+  {
+    RawClient c1;
+    ASSERT_TRUE(c1.connect(a1));
+    ASSERT_TRUE(c1.send(s1.bytes().data(), s1.bytes().size()));
+    ASSERT_TRUE(waitUntil([&] {
+      const auto snap = ingest.snapshot();
+      return snap.size() == 1 && snap[0].stats.framesWritten == s1.frames();
+    }));
+    RawClient c2;
+    ASSERT_TRUE(c2.connect(a2));
+    ASSERT_TRUE(c2.send(s2.bytes().data(), s2.bytes().size()));
+  }
+  const auto infos = ingest.finish();
+  ASSERT_EQ(infos.size(), 2u);
+  EXPECT_FALSE(infos[0].stats.overflowed);
+  EXPECT_TRUE(infos[1].stats.overflowed);
+  EXPECT_GT(infos[1].stats.recordsDropped, 0u);
+  EXPECT_LE(infos[0].stats.bytesWritten + infos[1].stats.bytesWritten,
+            cfg.maxTotalSpoolBytes + sizeof(FrameHeader) + sizeof(DroppedPayload));
+}
+
+TEST(Ingest, PeerPidVerificationTiesTheConnectionToTheHelloPid) {
+  using control::testing_util::currentPid;
+  TempDir dir;
+  IngestConfig cfg = configIn(dir);
+  cfg.verifyPeerPid = true;
+  Ingest ingest(cfg);
+  const uint32_t me = static_cast<uint32_t>(currentPid());
+  const std::string good = testAddress("pv-good"), bad = testAddress("pv-bad");
+  ASSERT_TRUE(ingest.attach(me, good).ok());
+  ASSERT_TRUE(ingest.attach(me + 1, bad).ok());  // a hello that lied about its pid
+  {
+    RawClient c1, c2;
+    ASSERT_TRUE(c1.connect(good));
+    ASSERT_TRUE(c1.send("", 0));
+    const StreamBuilder s = processStream(me, 100);
+    ASSERT_TRUE(c1.send(s.bytes().data(), s.bytes().size()));
+    ASSERT_TRUE(c2.connect(bad));
+    (void)c2.send(s.bytes().data(), s.bytes().size());
+    ASSERT_TRUE(waitUntil([&] { return ingest.rejectedConnections() == 1; }));
+  }
+  const auto infos = ingest.finish();
+  ASSERT_EQ(infos.size(), 1u);  // the liar's spool never received a byte and was removed
+  EXPECT_EQ(infos[0].pid, me);
 }
 
 TEST(Ingest, AttachAfterFinishFailsAndDiscardRemovesTheDirectory) {

@@ -163,6 +163,7 @@ json summaryToJson(const CaptureSummary& s) {
   j["path"] = s.path;
   j["events_lost"] = s.events_lost;
   j["duration_s"] = s.duration_s;
+  if (!s.warnings.empty()) j["warnings"] = s.warnings;
   return j;
 }
 
@@ -171,6 +172,11 @@ Result<CaptureSummary> summaryFromJson(const json& j) {
   TACHYON_TRY(getString(j, "path", s.path, true));
   TACHYON_TRY(getU64(j, "events_lost", s.events_lost, false));
   TACHYON_TRY(getDouble(j, "duration_s", s.duration_s, false));
+  if (const auto it = j.find("warnings"); it != j.end() && it->is_array()) {
+    for (const json& w : *it)
+      if (w.is_string()) s.warnings.push_back(w.get<std::string>());
+    s.warnings = capSummaryWarnings(std::move(s.warnings));
+  }
   return s;
 }
 
@@ -183,6 +189,20 @@ Result<CaptureState> stateFromJson(const json& j) {
 }
 
 }  // namespace
+
+std::vector<std::string> capSummaryWarnings(std::vector<std::string> warnings) {
+  const size_t total = warnings.size();
+  if (warnings.size() > kMaxSummaryWarnings) {
+    warnings.resize(kMaxSummaryWarnings);
+    warnings.back() = "... and " + std::to_string(total - kMaxSummaryWarnings + 1) + " more warnings";
+  }
+  for (std::string& w : warnings)
+    if (w.size() > kMaxSummaryWarningChars) {
+      w.resize(kMaxSummaryWarningChars - 3);
+      w += "...";
+    }
+  return warnings;
+}
 
 Cmd cmdOf(const RequestBody& body) {
   return static_cast<Cmd>(body.index());  // variant order matches enum order

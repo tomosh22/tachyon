@@ -8,12 +8,13 @@
 //   resume                          starts the recording of a launch parked with `start --no-start`
 //   flush   --name N --seconds S
 //   cancel
-//   merge   TRACE.tachyon INST.tachyon-inst [--out PATH] [--clip] [--no-siblings]
+//   merge   TRACE.tachyon INST.tachyon-inst [--out PATH] [--clip] [--no-siblings] [--force]
 //             offline (no agent): merges the instrumentation stream of an SDK sidecar file, plus its numbered
 //             siblings <stem>.<n><ext> in numeric order, into the trace. Without --out the trace is replaced
 //             through a temporary file and an atomic rename; with --out the input is never touched. --clip
 //             drops records outside the trace window (default: keep them and extend the window). Unbalanced
 //             scopes, dropped records and similar are printed as warnings on stderr (the exit code stays 0).
+//             A sidecar whose content was merged into the trace before is refused unless --force is given.
 //   capture <target> [start options] [--duration S]
 //             start + wait for --duration seconds or for the target to exit + stop + wait for capture_done
 //

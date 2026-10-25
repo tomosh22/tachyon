@@ -140,8 +140,16 @@ struct RawStreamServer::Impl {
   std::atomic<uint32_t> accepted{0};
   std::atomic<uint32_t> open{0};
 
+  RawServerOptions options;
+  std::atomic<uint32_t> rejected{0};
+
+  // A connection's reader thread; `done` is set when the thread is about to end, so it can be joined.
+  struct Reader {
+    std::thread thread;
+    std::atomic<bool> done{false};
+  };
   std::mutex mutex;  // guards readers and shutDown
-  std::vector<std::thread> readers;
+  std::vector<std::unique_ptr<Reader>> readers;
   bool shutDown = false;
   std::thread acceptThread;
 
@@ -164,6 +172,8 @@ struct RawStreamServer::Impl {
 
   // ---- common ----
   void addConnection(ConnHandle conn);
+  uint32_t peerPid(ConnHandle conn) const;  // 0 when unknown
+  void reapFinishedLocked();
   void readLoop(ConnHandle conn);
 };
 
@@ -201,6 +211,11 @@ ReadStatus RawStreamServer::Impl::readSome(ConnHandle conn, uint8_t* buffer, siz
 void RawStreamServer::Impl::closeConn(ConnHandle conn) {
   DisconnectNamedPipe(conn);
   CloseHandle(conn);
+}
+
+uint32_t RawStreamServer::Impl::peerPid(ConnHandle conn) const {
+  ULONG pid = 0;
+  return GetNamedPipeClientProcessId(conn, &pid) ? static_cast<uint32_t>(pid) : 0;
 }
 
 void RawStreamServer::Impl::wakeAccept() {
@@ -241,7 +256,11 @@ void RawStreamServer::Impl::acceptLoop() {
     // Keep an unconnected instance available so later clients never see "file not found".
     pending = createInstance(address, false, *security);
     addConnection(instance);
-    if (pending == INVALID_HANDLE_VALUE) return;
+    // Out of resources: keep trying to make a listening instance, unless we are asked to stop.
+    while (pending == INVALID_HANDLE_VALUE) {
+      if (WaitForSingleObject(stopEvent, 50) == WAIT_OBJECT_0) return;
+      pending = createInstance(address, false, *security);
+    }
   }
 }
 
@@ -279,6 +298,13 @@ void RawStreamServer::Impl::closeConn(ConnHandle conn) {
   ::close(conn);
 }
 
+uint32_t RawStreamServer::Impl::peerPid(ConnHandle conn) const {
+  ucred cred{};
+  socklen_t len = sizeof(cred);
+  if (::getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0 || cred.pid <= 0) return 0;
+  return static_cast<uint32_t>(cred.pid);
+}
+
 void RawStreamServer::Impl::wakeAccept() {
   const char b = 1;
   if (::write(wakeWrite, &b, 1) < 0) {
@@ -304,6 +330,14 @@ void RawStreamServer::Impl::acceptLoop() {
         continue;
       }
       if (errno == EINTR || errno == EAGAIN || errno == ECONNABORTED) continue;
+      if (errno == EMFILE || errno == ENFILE || errno == ENOMEM || errno == ENOBUFS) {
+        // Out of descriptors or memory: the pending client stays queued. Back off (waking up for shutdown)
+        // instead of spinning or giving up.
+        pollfd wake{wakeRead, POLLIN, 0};
+        (void)::poll(&wake, 1, 50);
+        if (stopping.load()) return;
+        continue;
+      }
       return;
     }
     if (stop || (pfds[1].revents & POLLIN) != 0) return;
@@ -321,11 +355,48 @@ void RawStreamServer::Impl::releaseListener() {
 
 #endif
 
+void RawStreamServer::Impl::reapFinishedLocked() {
+  for (size_t i = 0; i < readers.size();) {
+    if (readers[i]->done.load(std::memory_order_acquire)) {
+      readers[i]->thread.join();
+      readers.erase(readers.begin() + static_cast<std::ptrdiff_t>(i));
+    } else {
+      ++i;
+    }
+  }
+}
+
 void RawStreamServer::Impl::addConnection(ConnHandle conn) {
   ++accepted;
-  ++open;
+  if (options.expectedPeerPid != 0) {
+    const uint32_t peer = peerPid(conn);
+    if (peer != 0 && peer != options.expectedPeerPid) {
+      ++rejected;
+      closeConn(conn);
+      return;
+    }
+  }
   std::lock_guard lock(mutex);
-  readers.emplace_back([this, conn] { readLoop(conn); });
+  reapFinishedLocked();
+  if (open.load() >= options.maxConnections) {
+    ++rejected;
+    closeConn(conn);
+    return;
+  }
+  ++open;
+  try {
+    auto reader = std::make_unique<Reader>();
+    Reader* raw = reader.get();
+    reader->thread = std::thread([this, conn, raw] {
+      readLoop(conn);
+      raw->done.store(true, std::memory_order_release);
+    });
+    readers.push_back(std::move(reader));
+  } catch (const std::exception&) {  // std::system_error (no thread) or bad_alloc
+    --open;
+    ++rejected;
+    closeConn(conn);
+  }
 }
 
 void RawStreamServer::Impl::readLoop(ConnHandle conn) {
@@ -354,10 +425,12 @@ void RawStreamServer::Impl::readLoop(ConnHandle conn) {
 RawStreamServer::RawStreamServer(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {}
 
 Result<std::unique_ptr<RawStreamServer>> RawStreamServer::listen(const std::string& address,
-                                                                 SinkFactory factory) {
+                                                                 SinkFactory factory,
+                                                                 RawServerOptions options) {
   auto impl = std::make_unique<Impl>();
   impl->address = address;
   impl->factory = std::move(factory);
+  impl->options = options;
 #if TACHYON_PLATFORM_WINDOWS
   impl->security = std::make_unique<PipeSecurity>();
   if (!impl->security->init()) return winError(ErrorCode::IoError, "building the pipe security descriptor");
@@ -389,16 +462,45 @@ Result<std::unique_ptr<RawStreamServer>> RawStreamServer::listen(const std::stri
   }
   impl->listenFd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (impl->listenFd < 0) return sysError(ErrorCode::IoError, "socket");
-  ::unlink(address.c_str());
-  const mode_t oldMask = ::umask(0177);
-  const int br = ::bind(impl->listenFd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
-  ::umask(oldMask);
-  if (br < 0) {
-    Error e = sysError(ErrorCode::IoError, "bind " + address);
+  // Race-free permissions without touching the process-wide umask: bind inside a private (0700) directory
+  // made next to the final path, restrict the socket to its owner, then rename it into place. Nobody else can
+  // reach the socket through the directory while it is still being set up.
+  namespace stdfs = std::filesystem;
+  stdfs::path parent = stdfs::path(address).parent_path();
+  if (parent.empty()) parent = ".";
+  std::string dirTemplate = (parent / ".tachyon-sock-XXXXXX").string();
+  if (::mkdtemp(dirTemplate.data()) == nullptr) {
+    Error e = sysError(ErrorCode::IoError, "mkdtemp in " + parent.string());
     ::close(impl->listenFd);
     impl->listenFd = -1;
     return e;
   }
+  const std::string tempSocket = dirTemplate + "/s";
+  auto removeTemp = [&] {
+    std::error_code ignored;
+    stdfs::remove(tempSocket, ignored);
+    stdfs::remove(dirTemplate, ignored);
+  };
+  sockaddr_un tempAddr;
+  std::memset(&tempAddr, 0, sizeof(tempAddr));
+  tempAddr.sun_family = AF_UNIX;
+  if (tempSocket.size() >= sizeof(tempAddr.sun_path)) {
+    removeTemp();
+    ::close(impl->listenFd);
+    impl->listenFd = -1;
+    return makeError(ErrorCode::InvalidArgument, "socket path too long: " + address);
+  }
+  std::memcpy(tempAddr.sun_path, tempSocket.c_str(), tempSocket.size() + 1);
+  bool placed = ::bind(impl->listenFd, reinterpret_cast<const sockaddr*>(&tempAddr), sizeof(tempAddr)) == 0 &&
+                ::chmod(tempSocket.c_str(), 0600) == 0 && ::rename(tempSocket.c_str(), address.c_str()) == 0;
+  if (!placed) {
+    Error e = sysError(ErrorCode::IoError, "bind " + address);
+    removeTemp();
+    ::close(impl->listenFd);
+    impl->listenFd = -1;
+    return e;
+  }
+  removeTemp();  // the directory only
   if (::listen(impl->listenFd, 16) < 0) {
     Error e = sysError(ErrorCode::IoError, "listen");
     impl->releaseListener();
@@ -414,7 +516,13 @@ Result<std::unique_ptr<RawStreamServer>> RawStreamServer::listen(const std::stri
   impl->wakeWrite = wake[1];
 #endif
   Impl* raw = impl.get();
-  impl->acceptThread = std::thread([raw] { raw->acceptLoop(); });
+  try {
+    impl->acceptThread = std::thread([raw] { raw->acceptLoop(); });
+  } catch (const std::exception& e) {
+    impl->stopping = true;
+    impl->releaseListener();
+    return makeError(ErrorCode::OutOfMemory, std::string("cannot start the accept thread: ") + e.what());
+  }
   return std::unique_ptr<RawStreamServer>(new RawStreamServer(std::move(impl)));
 }
 
@@ -437,12 +545,12 @@ void RawStreamServer::shutdown(int drainIdleMs, int drainMaxMs) {
   d.stopping.store(true);
   d.wakeAccept();
   if (d.acceptThread.joinable()) d.acceptThread.join();
-  std::vector<std::thread> readers;
+  std::vector<std::unique_ptr<Impl::Reader>> readers;
   {
     std::lock_guard lock(d.mutex);
     readers.swap(d.readers);
   }
-  for (std::thread& t : readers) t.join();
+  for (auto& r : readers) r->thread.join();
   d.releaseListener();
 }
 
@@ -456,6 +564,10 @@ uint32_t RawStreamServer::acceptedCount() const {
 
 uint32_t RawStreamServer::openCount() const {
   return m_impl->open.load();
+}
+
+uint32_t RawStreamServer::rejectedCount() const {
+  return m_impl->rejected.load();
 }
 
 }  // namespace tachyon::inst

@@ -12,10 +12,11 @@
 
 namespace tachyon::inst {
 
-// Largest frame payload the agent accepts. Real frames are at most kMaxFrameBytes; unknown future frame
-// types may be larger, anything beyond this is treated as a corrupt stream (a length cannot be
-// resynchronised).
+// Largest frame payload the agent keeps. Real frames are at most kMaxFrameBytes. A frame announcing a larger
+// payload that is still below kMaxSkippablePayloadBytes is skipped by its length (it is probably a frame of a
+// future version); a larger length cannot be resynchronised and makes the stream corrupt.
 constexpr uint32_t kMaxAcceptedPayloadBytes = 1u << 20;
+constexpr uint32_t kMaxSkippablePayloadBytes = 64u << 20;
 
 // Not thread-safe. Feed arbitrary chunks; the callback receives each complete frame (header followed by its
 // payload, contiguous) in order. Frames that lie entirely inside the fed chunk are passed without copying.
@@ -30,19 +31,33 @@ class FrameAssembler {
       return false;
     }
     while (size > 0) {
+      if (m_skip > 0) {  // inside an oversized frame
+        const size_t n = static_cast<size_t>(std::min<uint64_t>(m_skip, size));
+        m_skip -= n;
+        data += n;
+        size -= n;
+        continue;
+      }
       if (!m_pending.empty()) {
-        // Finish the frame started in an earlier chunk: its header first, then its payload.
-        size_t total = frameSize(m_pending.data(), m_pending.size());
-        const size_t want = total != 0 ? total : sizeof(FrameHeader);
-        const size_t take = std::min(want - m_pending.size(), size);
+        if (m_pending.size() < sizeof(FrameHeader)) {
+          const size_t take = std::min(sizeof(FrameHeader) - m_pending.size(), size);
+          m_pending.insert(m_pending.end(), data, data + take);
+          data += take;
+          size -= take;
+          if (m_pending.size() < sizeof(FrameHeader)) continue;
+        }
+        FrameHeader fh;
+        std::memcpy(&fh, m_pending.data(), sizeof(fh));
+        if (fh.byte_len > kMaxAcceptedPayloadBytes) {
+          if (!startSkip(fh.byte_len)) return fail(size);
+          m_pending.clear();
+          continue;
+        }
+        const size_t total = sizeof(FrameHeader) + fh.byte_len;
+        const size_t take = std::min(total - m_pending.size(), size);
         m_pending.insert(m_pending.end(), data, data + take);
         data += take;
         size -= take;
-        if (total == 0) {
-          if (m_pending.size() < sizeof(FrameHeader)) continue;  // still inside the header
-          total = frameSize(m_pending.data(), m_pending.size());
-          if (total == kCorrupt) return fail(size);
-        }
         if (m_pending.size() == total) {
           fn(m_pending.data(), m_pending.size());
           m_pending.clear();
@@ -53,8 +68,15 @@ class FrameAssembler {
         m_pending.assign(data, data + size);
         return true;
       }
-      const size_t total = frameSize(data, size);
-      if (total == kCorrupt) return fail(size);
+      FrameHeader fh;
+      std::memcpy(&fh, data, sizeof(fh));
+      if (fh.byte_len > kMaxAcceptedPayloadBytes) {
+        if (!startSkip(fh.byte_len)) return fail(size);
+        data += sizeof(FrameHeader);
+        size -= sizeof(FrameHeader);
+        continue;
+      }
+      const size_t total = sizeof(FrameHeader) + fh.byte_len;
       if (size < total) {
         m_pending.assign(data, data + size);
         return true;
@@ -71,18 +93,18 @@ class FrameAssembler {
   bool corrupt() const { return m_corrupt; }
   // Bytes dropped because the stream was corrupt.
   uint64_t discardedBytes() const { return m_discarded; }
+  // Frames larger than kMaxAcceptedPayloadBytes that were skipped by their length.
+  uint64_t skippedFrames() const { return m_skippedFrames; }
+  // Bytes of a skipped frame still to come (non-zero when the stream ended inside one).
+  uint64_t skipRemaining() const { return m_skip; }
 
  private:
-  static constexpr size_t kCorrupt = static_cast<size_t>(-1);
-
-  // Total frame size from a buffer holding at least a header; 0 when fewer bytes than a header are present,
-  // kCorrupt for an implausible length.
-  static size_t frameSize(const uint8_t* data, size_t have) {
-    if (have < sizeof(FrameHeader)) return 0;
-    FrameHeader fh;
-    std::memcpy(&fh, data, sizeof(fh));
-    if (fh.byte_len > kMaxAcceptedPayloadBytes) return kCorrupt;
-    return sizeof(FrameHeader) + fh.byte_len;
+  // Starts skipping the payload of an oversized frame; false when the length is not plausible.
+  bool startSkip(uint32_t byteLen) {
+    if (byteLen > kMaxSkippablePayloadBytes) return false;
+    m_skip = byteLen;
+    ++m_skippedFrames;
+    return true;
   }
   bool fail(size_t remaining) {
     m_corrupt = true;
@@ -94,6 +116,8 @@ class FrameAssembler {
   std::vector<uint8_t> m_pending;
   bool m_corrupt = false;
   uint64_t m_discarded = 0;
+  uint64_t m_skip = 0;
+  uint64_t m_skippedFrames = 0;
 };
 
 // What a record frame says about when and on which thread it happened (without decoding it).

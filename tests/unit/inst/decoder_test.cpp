@@ -332,6 +332,21 @@ TEST(Decoder, UnknownFramesAreSkippedByLength) {
   EXPECT_TRUE(hasWarning(d, "unknown type"));
 }
 
+TEST(Decoder, AnOversizedFrameIsSkippedAndTheStreamGoesOn) {
+  StreamBuilder b;
+  b.header();
+  const uint64_t k = b.string("s");
+  b.scopeBegin(10, 1, k);
+  const std::vector<uint8_t> big(3u << 20, 7);
+  b.frameRaw(99, big.data(), big.size());
+  b.scopeEnd(20, 1);
+  const DecodedInstrumentation d = decodeBytes(b);
+  EXPECT_EQ(d.scopes.size(), 2u);
+  EXPECT_EQ(d.stats.unknownFrames, 1u);
+  EXPECT_EQ(d.stats.corruptBytes, 0u);
+  EXPECT_EQ(d.stats.unclosedScopes, 0u);
+}
+
 TEST(Decoder, MalformedFramesAreSkipped) {
   StreamBuilder b;
   b.header();

@@ -20,7 +20,12 @@ namespace tachyon::inst {
 struct IngestConfig {
   // Directory for the spool files; created at the first attach().
   std::filesystem::path spoolDir;
-  uint64_t maxSpoolBytes = kDefaultMaxSpoolBytes;  // per process
+  uint64_t maxSpoolBytes = kDefaultMaxSpoolBytes;            // per process
+  uint64_t maxTotalSpoolBytes = kDefaultMaxTotalSpoolBytes;  // all processes of the capture together
+  uint32_t maxProcesses = 256;                               // attach() fails with Busy beyond this
+  uint32_t maxConnectionsPerProcess = 16;                    // further connections are closed at once
+  // Close connections whose peer process id (when the OS can tell) is not the pid given to attach().
+  bool verifyPeerPid = true;
   // At finish(): each connection is read until it was silent for drainIdleMs or drainMaxMs elapsed.
   int drainIdleMs = 200;
   int drainMaxMs = 2000;
@@ -64,6 +69,8 @@ class Ingest {
   const std::filesystem::path& spoolDir() const { return m_config.spoolDir; }
   // Thread-safe. Processes attached so far.
   size_t processCount() const;
+  // Thread-safe. Connections refused so far: over the per-process cap, wrong peer pid, no thread available.
+  uint32_t rejectedConnections() const;
 
  private:
   struct Process {
@@ -71,6 +78,7 @@ class Ingest {
     std::unique_ptr<Spool> spool;
     std::unique_ptr<RawStreamServer> server;
   };
+  std::shared_ptr<SpoolBudget> m_budget;
 
   IngestConfig m_config;
   mutable std::mutex m_mutex;
@@ -78,6 +86,7 @@ class Ingest {
   bool m_finished = false;
   bool m_dirCreated = false;
   std::vector<SpoolInfo> m_final;
+  uint32_t m_rejected = 0;  // connections refused (caps, peer check); guarded by m_mutex after finish()
 };
 
 }  // namespace tachyon::inst

@@ -80,7 +80,18 @@ struct CaptureSummary {
   std::string path;
   uint64_t events_lost = 0;
   double duration_s = 0.0;
+  // Optional (WP-52): problems that did not fail the capture, e.g. unbalanced instrumentation scopes or a
+  // failed instrumentation merge. Encoded as a "warnings" array only when non-empty. At most
+  // kMaxSummaryWarnings entries of kMaxSummaryWarningChars characters (see capSummaryWarnings).
+  std::vector<std::string> warnings = {};
 };
+
+constexpr size_t kMaxSummaryWarnings = 32;
+constexpr size_t kMaxSummaryWarningChars = 256;
+
+// Thread-safe: pure function. Truncates each warning to kMaxSummaryWarningChars and keeps the first
+// kMaxSummaryWarnings (the last kept entry says how many were left out).
+std::vector<std::string> capSummaryWarnings(std::vector<std::string> warnings);
 
 struct InstHelloBody {
   std::string pipe;

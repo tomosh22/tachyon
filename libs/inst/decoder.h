@@ -70,6 +70,14 @@ struct DecodeStats {
   uint64_t unclosedScopes = 0;  // valid after finish()
 };
 
+// One decoded input (file or byte range): what was read and a hash of it, used to detect merging the same
+// sidecar twice.
+struct SourceInfo {
+  std::string name;
+  uint64_t bytes = 0;
+  uint64_t hash = 0;  // XXH3-64 over the bytes read (0 for an empty source)
+};
+
 struct DecodedInstrumentation {
   trace::StringTable strings;  // local string table; index 0 is ""
   std::vector<trace::ScopeEventRec> scopes;
@@ -79,6 +87,7 @@ struct DecodedInstrumentation {
   std::vector<trace::PlotSampleRec> plots;
   std::vector<trace::ThreadNameRec> threadNames;
   std::vector<StreamInfo> streams;
+  std::vector<SourceInfo> sources;
   DecodeStats stats;
   std::vector<std::string> warnings;
   uint64_t minTs = 0;  // over all records; both 0 when there are none

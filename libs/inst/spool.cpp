@@ -9,15 +9,17 @@ namespace {
 constexpr size_t kBufferBytes = 256 * 1024;
 }
 
-Spool::Spool(std::filesystem::path path, std::ofstream file, uint64_t maxBytes)
-    : m_path(std::move(path)), m_maxBytes(maxBytes), m_file(std::move(file)) {
+Spool::Spool(std::filesystem::path path, std::ofstream file, uint64_t maxBytes,
+             std::shared_ptr<SpoolBudget> budget)
+    : m_path(std::move(path)), m_maxBytes(maxBytes), m_budget(std::move(budget)), m_file(std::move(file)) {
   m_buffer.reserve(kBufferBytes);
 }
 
-Result<std::unique_ptr<Spool>> Spool::create(const std::filesystem::path& file, uint64_t maxBytes) {
+Result<std::unique_ptr<Spool>> Spool::create(const std::filesystem::path& file, uint64_t maxBytes,
+                                             std::shared_ptr<SpoolBudget> budget) {
   std::ofstream out(file, std::ios::binary | std::ios::trunc);
   if (!out) return makeError(ErrorCode::IoError, "cannot create spool file " + file.string());
-  return std::unique_ptr<Spool>(new Spool(file, std::move(out), maxBytes));
+  return std::unique_ptr<Spool>(new Spool(file, std::move(out), maxBytes, std::move(budget)));
 }
 
 Spool::~Spool() {
@@ -42,7 +44,8 @@ void Spool::appendFrame(const uint8_t* frame, size_t bytes) {
   const FramePeek peek = peekFrame(frame, bytes);
   std::lock_guard lock(m_mutex);
   if (m_closed) return;
-  if (!m_stats.overflowed && !m_ioError && m_stats.bytesWritten + bytes <= m_maxBytes) {
+  if (!m_stats.overflowed && !m_ioError && m_stats.bytesWritten + bytes <= m_maxBytes &&
+      (m_budget == nullptr || m_budget->reserve(bytes))) {
     m_buffer.insert(m_buffer.end(), frame, frame + bytes);
     m_stats.bytesWritten += bytes;
     ++m_stats.framesWritten;
@@ -71,6 +74,11 @@ void Spool::noteTruncatedTail(size_t tailBytes) {
 void Spool::noteCorrupt(uint64_t discarded) {
   std::lock_guard lock(m_mutex);
   m_stats.corruptBytes += discarded;
+}
+
+void Spool::noteSkipped(uint64_t frames) {
+  std::lock_guard lock(m_mutex);
+  m_stats.skippedFrames += frames;
 }
 
 void Spool::noteConnection() {

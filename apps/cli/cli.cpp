@@ -235,7 +235,7 @@ void printUsage(std::ostream& err) {
          "  resume                       begin recording a launch parked with 'start --no-start'\n"
          "  flush   --name N --seconds S\n"
          "  cancel\n"
-         "  merge   TRACE.tachyon INST.tachyon-inst [--out PATH] [--clip] [--no-siblings]\n"
+         "  merge   TRACE.tachyon INST.tachyon-inst [--out PATH] [--clip] [--no-siblings] [--force]\n"
          "                               adds an instrumentation sidecar (and its numbered siblings) to a "
          "trace;\n"
          "                               needs no agent\n"
@@ -263,6 +263,7 @@ void printResponse(const Response& r, bool json, std::ostream& out, std::ostream
         << "\nelevated: " << (s->elevated ? "yes" : "no") << "\n";
   } else if (const auto* c = std::get_if<CaptureSummary>(&r.body)) {
     out << "flushed: " << c->path << " (events_lost " << c->events_lost << ")\n";
+    for (const std::string& w : c->warnings) err << "tachyon-cli: warning: " << w << "\n";
   } else {
     out << "ok\n";
   }
@@ -333,6 +334,8 @@ int finish(const Event& event, bool json, std::ostream& out, std::ostream& err) 
     return kExitProtocolError;
   }
   printEvent(event, json, out);
+  if (const auto* d = std::get_if<CaptureDoneEvent>(&event); d != nullptr && !json)
+    for (const std::string& w : d->summary.warnings) err << "tachyon-cli: warning: " << w << "\n";
   if (const auto* d = std::get_if<CaptureDoneEvent>(&event); d != nullptr && d->summary.events_lost > 0) {
     err << "tachyon-cli: warning: the session lost " << d->summary.events_lost
         << " events; the trace is incomplete\n";
@@ -389,7 +392,7 @@ int runMerge(const std::vector<std::string>& args, bool json, std::ostream& out,
   namespace fs = std::filesystem;
   std::vector<std::string> positional;
   std::string outPath;
-  bool clip = false, siblings = true;
+  bool clip = false, siblings = true, force = false;
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string& a = args[i];
     if (a == "--out") {
@@ -402,6 +405,8 @@ int runMerge(const std::vector<std::string>& args, bool json, std::ostream& out,
       clip = true;
     } else if (a == "--no-siblings") {
       siblings = false;
+    } else if (a == "--force") {
+      force = true;
     } else if (a == "--json") {
       // already handled
     } else if (a.rfind("--", 0) == 0) {
@@ -433,6 +438,7 @@ int runMerge(const std::vector<std::string>& args, bool json, std::ostream& out,
   inst::MergeOptions options;
   options.outPath = outPath;
   options.clipToTraceRange = clip;
+  options.force = force;
   auto merged = inst::mergeInstrumentation(tracePath, inputs, options);
   if (!merged.ok()) {
     reportFailure(json, out, err, "EINTERNAL", "merge failed: " + merged.error().toString());

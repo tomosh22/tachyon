@@ -4,6 +4,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include <cstring>
 
 namespace tachyon::inst {
@@ -80,7 +82,7 @@ TEST(FrameAssembler, ZeroLengthPayloadFrame) {
 }
 
 TEST(FrameAssembler, ImplausibleLengthMakesTheStreamCorrupt) {
-  FrameHeader bad{3, kMaxAcceptedPayloadBytes + 1};
+  FrameHeader bad{3, kMaxSkippablePayloadBytes + 1};
   std::vector<uint8_t> bytes(sizeof(bad) + 100, 0xAA);
   std::memcpy(bytes.data(), &bad, sizeof(bad));
   FrameAssembler a;
@@ -92,6 +94,39 @@ TEST(FrameAssembler, ImplausibleLengthMakesTheStreamCorrupt) {
   // Later input is discarded too.
   EXPECT_FALSE(a.feed(bytes.data(), 10, [&](const uint8_t*, size_t) { ++frames; }));
   EXPECT_EQ(a.discardedBytes(), bytes.size() + 10);
+}
+
+TEST(FrameAssembler, OversizedButPlausibleFrameIsSkippedByItsLength) {
+  StreamBuilder b;
+  b.header();
+  b.scopeEnd(1, 1);
+  const std::vector<uint8_t> big(2u << 20, 0x5A);  // 2 MiB: above what is kept, below what is believable
+  b.frameRaw(77, big.data(), big.size());
+  b.scopeEnd(2, 1);
+  for (size_t chunk : {size_t{1}, size_t{7}, size_t{8}, size_t{4096}, size_t{1} << 30}) {
+    FrameAssembler a;
+    size_t frames = 0;
+    const auto& bytes = b.bytes();
+    for (size_t off = 0; off < bytes.size(); off += chunk) {
+      const size_t n = std::min(chunk, bytes.size() - off);
+      EXPECT_TRUE(a.feed(bytes.data() + off, n, [&](const uint8_t*, size_t) { ++frames; }))
+          << "chunk " << chunk;
+    }
+    EXPECT_EQ(frames, 3u) << "chunk " << chunk;  // header + the two ScopeEnds
+    EXPECT_EQ(a.skippedFrames(), 1u);
+    EXPECT_FALSE(a.corrupt());
+    EXPECT_EQ(a.pendingBytes(), 0u);
+    EXPECT_EQ(a.skipRemaining(), 0u);
+  }
+}
+
+TEST(FrameAssembler, StreamEndingInsideAnOversizedFrameReportsTheMissingBytes) {
+  StreamBuilder b;
+  const std::vector<uint8_t> big(2u << 20, 0);
+  b.frameRaw(77, big.data(), big.size());
+  FrameAssembler a;
+  EXPECT_TRUE(a.feed(b.bytes().data(), 1000, [](const uint8_t*, size_t) {}));
+  EXPECT_EQ(a.skipRemaining(), big.size() - (1000 - sizeof(FrameHeader)));
 }
 
 TEST(FrameAssembler, CorruptLengthSplitAcrossChunks) {

@@ -8,7 +8,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <fstream>
 #include <optional>
+#include <set>
 #include <system_error>
 #include <unordered_map>
 
@@ -114,6 +117,29 @@ std::vector<Rec> unionSorted(std::vector<Rec> existing, std::vector<Rec> added) 
   return existing;
 }
 
+// Hashes (as hex strings) of every input listed in the CaptureInfo of earlier merges.
+std::set<std::string> previousHashes(const std::string& captureInfo) {
+  std::set<std::string> hashes;
+  const nlohmann::json info = nlohmann::json::parse(captureInfo, nullptr, false);
+  if (!info.is_object() || !info.contains("instrumentation") || !info["instrumentation"].is_object())
+    return hashes;
+  const auto& inst = info["instrumentation"];
+  if (!inst.contains("merges") || !inst["merges"].is_array()) return hashes;
+  for (const auto& merge : inst["merges"]) {
+    if (!merge.is_object() || !merge.contains("sources") || !merge["sources"].is_array()) continue;
+    for (const auto& source : merge["sources"])
+      if (source.is_object() && source.contains("hash") && source["hash"].is_string())
+        hashes.insert(source["hash"].get<std::string>());
+  }
+  return hashes;
+}
+
+std::string hashText(uint64_t hash) {
+  char buf[17];
+  std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(hash));
+  return buf;
+}
+
 std::string buildCaptureInfo(const std::string* previous, const MergeReport& report,
                              const DecodedInstrumentation& data) {
   using nlohmann::json;
@@ -126,11 +152,14 @@ std::string buildCaptureInfo(const std::string* previous, const MergeReport& rep
       info["original_capture_info"] = *previous;  // not a JSON object: keep it verbatim
     }
   }
-  uint64_t merges = 1;
+  json merges = json::array();
   if (info.contains("instrumentation") && info["instrumentation"].is_object()) {
     const json& old = info["instrumentation"];
-    if (old.contains("merge_count") && old["merge_count"].is_number_unsigned())
-      merges = old["merge_count"].get<uint64_t>() + 1;
+    if (old.contains("merges") && old["merges"].is_array()) {
+      merges = old["merges"];
+    } else {
+      merges.push_back({{"legacy", old}});  // an instrumentation object of another writer: keep it
+    }
   }
   json streams = json::array();
   for (const StreamInfo& s : data.streams) {
@@ -142,22 +171,54 @@ std::string buildCaptureInfo(const std::string* previous, const MergeReport& rep
                        {"clock_mapper", s.clockMapper},
                        {"source", s.source}});
   }
+  json sources = json::array();
+  for (const SourceInfo& src : data.sources)
+    sources.push_back({{"name", src.name}, {"bytes", src.bytes}, {"hash", hashText(src.hash)}});
   json warnings = json::array();
   for (const std::string& w : report.warnings) warnings.push_back(w);
-  info["instrumentation"] = {{"merge_count", merges},
-                             {"streams", streams},
-                             {"scope_events", report.scopeEvents},
-                             {"fiber_events", report.fiberEvents},
-                             {"frame_marks", report.frameMarks},
-                             {"markers", report.markers},
-                             {"plot_samples", report.plots},
-                             {"thread_names", report.threadNames},
-                             {"dropped_records", data.stats.droppedRecords},
-                             {"clipped_records", report.clippedRecords},
-                             {"unmatched_scope_ends", data.stats.unmatchedScopeEnds},
-                             {"unclosed_scopes", data.stats.unclosedScopes},
-                             {"warnings", warnings}};
+  merges.push_back({{"sources", sources},
+                    {"streams", streams},
+                    {"scope_events", report.scopeEvents},
+                    {"fiber_events", report.fiberEvents},
+                    {"frame_marks", report.frameMarks},
+                    {"markers", report.markers},
+                    {"plot_samples", report.plots},
+                    {"thread_names", report.threadNames},
+                    {"dropped_records", data.stats.droppedRecords},
+                    {"clipped_records", report.clippedRecords},
+                    {"unmatched_scope_ends", data.stats.unmatchedScopeEnds},
+                    {"unclosed_scopes", data.stats.unclosedScopes},
+                    {"warnings", warnings}});
+  info["instrumentation"] = {{"merge_count", merges.size()}, {"merges", merges}};
   return info.dump();
+}
+
+// Thread names are not time-windowed events: inside [start, end] they stay, the last one before the window is
+// the name the thread has when the window opens (stamped with the start), later ones are moved to the end.
+void normalizeThreadNames(std::vector<ThreadNameRec>& names, uint64_t startTs, uint64_t endTs) {
+  std::unordered_map<uint32_t, size_t> lastBefore;  // tid -> index of its last name with ts < start
+  for (size_t i = 0; i < names.size(); ++i) {
+    const ThreadNameRec r = names[i];
+    if (r.ts < startTs) lastBefore[r.tid] = i;
+  }
+  std::vector<ThreadNameRec> out;
+  out.reserve(names.size());
+  for (size_t i = 0; i < names.size(); ++i) {
+    ThreadNameRec r = names[i];
+    if (r.ts < startTs) {
+      const auto it = lastBefore.find(r.tid);
+      if (it == lastBefore.end() || it->second != i) continue;
+      r.ts = startTs;
+    } else if (r.ts > endTs) {
+      r.ts = endTs;
+    }
+    out.push_back(r);
+  }
+  std::stable_sort(out.begin(), out.end(), [](const ThreadNameRec& a, const ThreadNameRec& b) {
+    const uint64_t ta = a.ts, tb = b.ts;
+    return ta < tb;
+  });
+  names = std::move(out);
 }
 
 // Remaps the local string ids of `records` through `map` in place.
@@ -227,7 +288,6 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
     clipped += clipRecords(data.frameMarks, inHeader.start_ts, inHeader.end_ts);
     clipped += clipRecords(data.markers, inHeader.start_ts, inHeader.end_ts);
     clipped += clipRecords(data.plots, inHeader.start_ts, inHeader.end_ts);
-    clipped += clipRecords(data.threadNames, inHeader.start_ts, inHeader.end_ts);
     report.clippedRecords = clipped;
     if (clipped > 0)
       report.warnings.push_back(std::to_string(clipped) +
@@ -243,7 +303,6 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
   noteRange(data.frameMarks, any, lo, hi);
   noteRange(data.markers, any, lo, hi);
   noteRange(data.plots, any, lo, hi);
-  noteRange(data.threadNames, any, lo, hi);
   uint64_t startTs = inHeader.start_ts, endTs = inHeader.end_ts;
   if (any && !clipping) {
     if (startTs == 0 && endTs == 0) {
@@ -256,10 +315,30 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
   }
   report.startTs = startTs;
   report.endTs = endTs;
+  if (endTs > startTs) normalizeThreadNames(data.threadNames, startTs, endTs);
+
+  // The same sidecar merged twice would double every record.
+  std::string previousInfoText;
+  bool havePreviousInfo = false;
+  if (auto prev = reader.readCaptureInfo(); prev.ok()) {
+    previousInfoText = std::move(*prev);
+    havePreviousInfo = true;
+    const std::set<std::string> known = previousHashes(previousInfoText);
+    for (const SourceInfo& src : data.sources) {
+      if (src.hash == 0 || known.count(hashText(src.hash)) == 0) continue;
+      if (!options.force)
+        return makeError(ErrorCode::InvalidArgument,
+                         src.name + " was already merged into this trace (content hash " +
+                             hashText(src.hash) + "); use --force to merge it again");
+      report.warnings.push_back(src.name +
+                                " was already merged into this trace; merged again because of --force");
+    }
+  }
 
   if ((inHeader.flags & kFlagPartial) != 0)
     report.warnings.push_back(
-        "the input trace was partial (unfinished); the output contains what was readable");
+        "the input trace was partial (unfinished); the output contains what was readable and keeps the "
+        "partial flag");
 
   // ---- write the new file ----
   const fs::path tmp = tempPathFor(outPath);
@@ -390,11 +469,22 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
                                    0;
   if (haveInstrumentation) writer.addFlags(kFlagHasInstrumentation);
 
-  auto previousInfo = reader.readCaptureInfo();
-  const std::string previous = previousInfo.ok() ? *previousInfo : std::string();
-  writer.appendCaptureInfo(buildCaptureInfo(previousInfo.ok() ? &previous : nullptr, report, data));
+  writer.appendCaptureInfo(buildCaptureInfo(havePreviousInfo ? &previousInfoText : nullptr, report, data));
 
   TACHYON_TRY(writer.finish());
+  if ((inHeader.flags & kFlagPartial) != 0) {
+    // finish() clears the partial flag; the capture behind this trace is still cut short, so put it back (the
+    // trace now has a valid footer, which readers use regardless of the flag).
+    std::fstream header(tmp, std::ios::in | std::ios::out | std::ios::binary);
+    uint32_t flags = 0;
+    header.seekg(offsetof(FileHeader, flags));
+    header.read(reinterpret_cast<char*>(&flags), sizeof(flags));
+    flags |= kFlagPartial;
+    header.seekp(offsetof(FileHeader, flags));
+    header.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
+    header.flush();
+    if (!header) return makeError(ErrorCode::IoError, "cannot update the header of " + tmp.string());
+  }
 
   readerHolder.reset();
   fs::rename(tmp, outPath, ec);

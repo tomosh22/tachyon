@@ -1,5 +1,6 @@
 #include "inst/decoder.h"
 
+#include "core/hash.h"
 #include "inst/frame_stream.h"
 
 #include <algorithm>
@@ -57,6 +58,7 @@ struct InstDecoder::State {
   bool sawFirstFrame = false;
   bool firstFrameBad = false;
   uint64_t sourceBytes = 0;
+  uint64_t sourceHash = 0;
   // Whole decode: threads outlive streams (a stream switch keeps the rings' contents in order).
   std::unordered_map<uint32_t, ThreadState> threads;
   std::unordered_map<uint64_t, uint32_t> fiberDepth;
@@ -112,6 +114,7 @@ struct InstDecoder::State {
     sawFirstFrame = false;
     firstFrameBad = false;
     sourceBytes = 0;
+    sourceHash = 0;
     haveStream = false;
     ++out.stats.sources;
   }
@@ -384,6 +387,7 @@ struct InstDecoder::State {
     out.stats.bytes += size;
     assembler.feed(data, size, [this](const uint8_t* f, size_t n) { onFrame(f, n); });
     sourceBytes += size;
+    sourceHash = core::hashBytes(data, size, sourceHash);
     // Garbage from the very first byte is not a stream either.
     if (firstFrameBad || (!sawFirstFrame && assembler.corrupt()))
       return makeError(ErrorCode::CorruptData,
@@ -392,8 +396,10 @@ struct InstDecoder::State {
   }
 
   void endSource() {
+    out.sources.push_back({label, sourceBytes, sourceBytes == 0 ? 0 : sourceHash});
     out.stats.truncatedTailBytes += assembler.pendingBytes();
     out.stats.corruptBytes += assembler.discardedBytes();
+    out.stats.unknownFrames += assembler.skippedFrames();
     if (assembler.pendingBytes() > 0)
       notes.push_back(label + ": " + std::to_string(assembler.pendingBytes()) +
                       " bytes of an incomplete last frame were ignored (truncated stream)");

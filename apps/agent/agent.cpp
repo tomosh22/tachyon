@@ -17,11 +17,12 @@ namespace {
 // The exe of the start request that triggers a parked launch (see agent.h).
 constexpr const char* kResumeExe = "-";
 
-CaptureSummary toSummary(const capture::CaptureResult& r) {
+CaptureSummary toSummary(const capture::CaptureResult& r, std::vector<std::string> warnings = {}) {
   CaptureSummary s;
   s.path = r.tracePath.string();
   s.events_lost = r.eventsLost;
   s.duration_s = r.durationS;
+  s.warnings = capSummaryWarnings(std::move(warnings));
   return s;
 }
 
@@ -147,6 +148,13 @@ Response Agent::handleStart(const StartRequest& req) {
       ingestConfig.maxSpoolBytes = m_config.maxInstSpoolBytes;
       ingestConfig.drainIdleMs = m_config.instDrainIdleMs;
       ingestConfig.drainMaxMs = m_config.instDrainMaxMs;
+      ingestConfig.maxProcesses = m_config.maxInstProcesses;
+      ingestConfig.maxConnectionsPerProcess = m_config.maxInstConnectionsPerProcess;
+      ingestConfig.maxTotalSpoolBytes = m_config.maxInstTotalSpoolBytes;
+      ingestConfig.verifyPeerPid = m_config.verifyInstPeerPid;
+      m_sessionMode = opts.mode;
+      m_sessionPid = opts.pid;
+      m_sessionFollow = opts.followChildren;
       m_ingest = std::make_shared<inst::Ingest>(std::move(ingestConfig));
       m_circular = opts.circularMb > 0;
     }
@@ -232,19 +240,27 @@ std::shared_ptr<inst::Ingest> Agent::takeIngest(bool& circular) {
   return std::move(m_ingest);
 }
 
-void Agent::mergeSpools(inst::Ingest& ingest, const std::vector<inst::SpoolInfo>& spools,
-                        const capture::CaptureResult& result, bool clip, bool removeWhenDone) {
+std::vector<std::string> Agent::mergeSpools(inst::Ingest& ingest, const std::vector<inst::SpoolInfo>& spools,
+                                            const capture::CaptureResult& result, bool clip,
+                                            bool removeWhenDone) {
+  std::vector<std::string> warnings;
+  if (const uint32_t rejected = ingest.rejectedConnections(); rejected > 0)
+    warnings.push_back(
+        std::to_string(rejected) +
+        " instrumentation connections were refused (connection cap, wrong peer pid or no thread)");
   if (spools.empty()) {
     if (removeWhenDone) ingest.removeSpoolDir();
-    return;
+    return warnings;
   }
   std::vector<inst::MergeInput> inputs;
   for (const inst::SpoolInfo& info : spools) {
     inputs.push_back({info.path, info.flushedBytes});
-    if (info.stats.overflowed)
-      TACHYON_LOG_WARN(
-          "agent: the instrumentation spool of pid {} reached its {} byte cap; {} records dropped", info.pid,
-          m_config.maxInstSpoolBytes, info.stats.recordsDropped);
+    if (info.stats.overflowed) {
+      TACHYON_LOG_WARN("agent: the instrumentation spool of pid {} reached its cap; {} records dropped",
+                       info.pid, info.stats.recordsDropped);
+      warnings.push_back("instrumentation spool of pid " + std::to_string(info.pid) + " hit its size cap; " +
+                         std::to_string(info.stats.recordsDropped) + " records dropped");
+    }
   }
   inst::MergeOptions options;
   options.clipToTraceRange = clip;
@@ -252,18 +268,24 @@ void Agent::mergeSpools(inst::Ingest& ingest, const std::vector<inst::SpoolInfo>
   if (!merged.ok()) {
     TACHYON_LOG_ERROR("agent: merging instrumentation into {} failed: {}; spool files kept in {}",
                       result.tracePath.string(), merged.error().toString(), ingest.spoolDir().string());
-    return;
+    warnings.push_back("instrumentation merge failed (" + merged.error().message + "); spool files kept in " +
+                       ingest.spoolDir().string());
+    return warnings;
   }
   TACHYON_LOG_INFO(
       "agent: merged instrumentation into {}: {} scope events, {} fiber events, {} frame marks, {} markers, "
       "{} plot samples, {} thread names",
       result.tracePath.string(), merged->scopeEvents, merged->fiberEvents, merged->frameMarks,
       merged->markers, merged->plots, merged->threadNames);
-  for (const std::string& warning : merged->warnings) TACHYON_LOG_WARN("agent: instrumentation: {}", warning);
+  for (const std::string& warning : merged->warnings) {
+    TACHYON_LOG_WARN("agent: instrumentation: {}", warning);
+    warnings.push_back("instrumentation: " + warning);
+  }
   if (removeWhenDone && !m_config.keepInstSpool) ingest.removeSpoolDir();
+  return warnings;
 }
 
-Result<capture::CaptureResult> Agent::stopAndMerge() {
+Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& warnings) {
   bool circular = false;
   std::shared_ptr<inst::Ingest> ingest = takeIngest(circular);
   // Drain the SDK connections first: what the processes had already sent belongs to the capture.
@@ -272,7 +294,7 @@ Result<capture::CaptureResult> Agent::stopAndMerge() {
   auto result = m_backend->stop();
   if (ingest) {
     if (result.ok()) {
-      mergeSpools(*ingest, spools, *result, circular, true);
+      warnings = mergeSpools(*ingest, spools, *result, circular, true);
     } else {
       ingest->removeSpoolDir();
     }
@@ -281,13 +303,14 @@ Result<capture::CaptureResult> Agent::stopAndMerge() {
 }
 
 void Agent::conversionWorker() {
-  auto result = stopAndMerge();
+  std::vector<std::string> warnings;
+  auto result = stopAndMerge(warnings);
   std::lock_guard lock(m_mutex);
   if (result.ok()) {
     TACHYON_LOG_INFO("agent: capture done: {} ({} events lost)", result->tracePath.string(),
                      result->eventsLost);
     setStateLocked(CaptureState::Done, 1.0);
-    emit(CaptureDoneEvent{toSummary(*result)});
+    emit(CaptureDoneEvent{toSummary(*result, std::move(warnings))});
   } else {
     TACHYON_LOG_ERROR("agent: conversion failed: {}", result.error().toString());
     emit(ErrorEvent{result.error().message});
@@ -326,11 +349,12 @@ Response Agent::handleFlush(const FlushRequest& req) {
   if (!result.ok()) return makeErrorResponse(std::nullopt, result.error());
   // The flushed trace covers a window of the capture: add what the instrumented processes sent so far,
   // clipped to that window. The spools keep growing for the rest of the capture.
+  std::vector<std::string> flushWarnings;
   if (std::shared_ptr<inst::Ingest> ingest = currentIngest()) {
     const std::vector<inst::SpoolInfo> spools = ingest->snapshot();
-    mergeSpools(*ingest, spools, *result, true, false);
+    flushWarnings = mergeSpools(*ingest, spools, *result, true, false);
   }
-  return makeOkResponse(std::nullopt, toSummary(*result));
+  return makeOkResponse(std::nullopt, toSummary(*result, std::move(flushWarnings)));
 }
 
 Response Agent::handleCancel() {
@@ -382,6 +406,22 @@ Response Agent::handleCancel() {
   return makeOkResponse(std::nullopt);
 }
 
+bool Agent::instPidAllowedLocked(uint32_t pid) const {
+  if (pid == 0) return false;
+  if (m_sessionFollow) return true;  // descendants are not known through the backend interface
+  switch (m_sessionMode) {
+    case capture::CaptureMode::System: return true;
+    case capture::CaptureMode::Attach: return pid == m_sessionPid;
+    case capture::CaptureMode::Launch: {
+      if (m_watch == nullptr) return true;  // a backend that cannot tell (the mock)
+      const uint32_t root = m_watch->rootPid();
+      return root == 0 ||
+             pid == root;  // 0: not launched yet; nothing can be running then, nothing to protect
+    }
+  }
+  return false;
+}
+
 Response Agent::handleInstHello(const InstHelloRequest& req) {
   if (req.api_version >> 16 != kProtocolApiVersion >> 16)
     return makeErrorResponse(std::nullopt, makeError(ErrorCode::Internal, "unsupported SDK api_version"));
@@ -389,7 +429,13 @@ Response Agent::handleInstHello(const InstHelloRequest& req) {
   {
     std::lock_guard lock(m_mutex);
     const CaptureState st = m_state.load();
-    if (st == CaptureState::Starting || st == CaptureState::Capturing) ingest = m_ingest;
+    if (st == CaptureState::Starting || st == CaptureState::Capturing) {
+      if (!instPidAllowedLocked(req.pid))
+        return makeErrorResponse(
+            std::nullopt, makeError(ErrorCode::NoPrivilege, "pid " + std::to_string(req.pid) +
+                                                                " is not part of the running capture"));
+      ingest = m_ingest;
+    }
   }
   if (!ingest)
     return makeErrorResponse(
@@ -438,12 +484,13 @@ void Agent::shutdown() {
     setStateLocked(CaptureState::Idle, 0.0);
   }
   if (needStop) {
-    auto result = stopAndMerge();
+    std::vector<std::string> warnings;
+    auto result = stopAndMerge(warnings);
     std::lock_guard lock(m_mutex);
     if (result.ok()) {
       TACHYON_LOG_INFO("agent: shutdown stopped capture: {}", result->tracePath.string());
       setStateLocked(CaptureState::Done, 1.0);
-      emit(CaptureDoneEvent{toSummary(*result)});
+      emit(CaptureDoneEvent{toSummary(*result, std::move(warnings))});
     } else {
       TACHYON_LOG_ERROR("agent: shutdown stop failed: {}", result.error().toString());
     }

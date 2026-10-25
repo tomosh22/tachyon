@@ -45,7 +45,9 @@ struct InstHarness {
   std::unique_ptr<Agent> agent;
   std::unique_ptr<Server> server;
 
-  explicit InstHarness(AgentConfig tweaks = {}, bool junkFixture = false) {
+  // The test clients live in this process, so by default the peer pid check (which would reject the made-up
+  // hello pids) is off; the tests of that check switch it on.
+  explicit InstHarness(AgentConfig tweaks = {}, bool junkFixture = false, bool verifyPeer = false) {
     fixture = dir.path() / "fixture.tachyon";
     if (junkFixture) {
       std::ofstream(fixture, std::ios::binary) << "this is not a trace file at all";
@@ -57,6 +59,7 @@ struct InstHarness {
     AgentConfig ac = std::move(tweaks);
     ac.backendName = "mock";
     ac.agentAddress = address;
+    ac.verifyInstPeerPid = verifyPeer;
     ac.instDrainIdleMs = 100;
     ac.instDrainMaxMs = 2000;
     agent = std::make_unique<Agent>(std::make_unique<capture::MockBackend>(cfg), ac);
@@ -323,7 +326,8 @@ TEST(AgentInst, FlushMergesASnapshotClippedToTheFlushedWindowAndTheCaptureGoesOn
   StreamBuilder s;
   s.header(61, 1'000'000'000, 1);
   const uint64_t k = s.string("hitch");
-  s.scopeBegin(500, 61, k);  // before the window
+  s.threadName(400, 61, "named-long-ago");  // set before the window opens
+  s.scopeBegin(500, 61, k);                 // before the window
   s.scopeEnd(600, 61);
   s.scopeBegin(100'000, 61, k);  // inside
   s.scopeEnd(150'000, 61);
@@ -355,6 +359,13 @@ TEST(AgentInst, FlushMergesASnapshotClippedToTheFlushedWindowAndTheCaptureGoesOn
   const trace::ScopeEventRec fb = flushedScopes[0];
   const uint64_t fbTs = fb.ts;
   EXPECT_EQ(fbTs, 100'000u);
+  // Thread names are not windowed events: the name from before the window is kept, stamped with its start.
+  const trace::StringTable flushedStrings = flushed->readStrings().value();
+  const auto flushedNames = flushed->readThreadNames().value();
+  ASSERT_EQ(flushedNames.size(), 1u);
+  const trace::ThreadNameRec flushedName = flushedNames[0];
+  EXPECT_EQ(flushedStrings.get(flushedName.name), "named-long-ago");
+  EXPECT_EQ(pv(flushedName.ts), kTraceStart);
   EXPECT_EQ(flushed->header().start_ts, kTraceStart);  // clipped, not extended
   EXPECT_EQ(flushed->header().end_ts, kTraceEnd);
   EXPECT_EQ(h.agent->state(), CaptureState::Capturing);
@@ -379,6 +390,136 @@ TEST(AgentInst, AFailedMergeStillCompletesTheCaptureAndKeepsTheSpool) {
   EXPECT_TRUE(fs::exists(path));
   EXPECT_TRUE(fs::exists(h.spoolDir("junk.tachyon") / "inst-8.tachyon-inst"));
   EXPECT_EQ(h.agent->state(), CaptureState::Idle);
+}
+
+StartRequest attachRequest(const InstHarness& h, const std::string& out, uint32_t pid) {
+  StartRequest r = h.startRequest(out);
+  r.mode = capture::CaptureMode::Attach;
+  r.pid = pid;
+  return r;
+}
+
+TEST(AgentInst, OnlyPidsOfTheCaptureMaySayHello) {
+  InstHarness h;
+  Client c = h.connect();
+  ASSERT_TRUE(c.call(attachRequest(h, "att.tachyon", 777), 10000)->ok);
+  auto stranger = c.call(InstHelloRequest{778, kProtocolApiVersion}, 10000);
+  ASSERT_TRUE(stranger.ok());
+  EXPECT_FALSE(stranger->ok);
+  EXPECT_EQ(stranger->code, ErrorCode::NoPrivilege);
+  EXPECT_FALSE(h.hello(c, 777).empty());
+  (void)h.stopAndWait(c);
+
+  // System mode: any pid.
+  ASSERT_TRUE(c.call(h.startRequest("sys.tachyon"), 10000)->ok);
+  EXPECT_FALSE(h.hello(c, 778).empty());
+  (void)h.stopAndWait(c);
+
+  // A launch with children to follow: descendants are unknown to the backend interface, so any pid.
+  StartRequest follow = h.startRequest("fol.tachyon");
+  follow.mode = capture::CaptureMode::Launch;
+  follow.exe = "unused";
+  follow.follow_children = true;
+  // (the mock backend does not launch anything; this only checks the agent's rule)
+  auto started = c.call(follow, 10000);
+  ASSERT_TRUE(started.ok());
+  if (started->ok) {
+    EXPECT_FALSE(h.hello(c, 4321).empty());
+    (void)h.stopAndWait(c);
+  }
+}
+
+TEST(AgentInst, TooManyInstrumentedProcessesGetBusy) {
+  AgentConfig tweaks;
+  tweaks.maxInstProcesses = 2;
+  InstHarness h(tweaks);
+  Client c = h.connect();
+  ASSERT_TRUE(c.call(h.startRequest("busy.tachyon"), 10000)->ok);
+  EXPECT_FALSE(h.hello(c, 1).empty());
+  EXPECT_FALSE(h.hello(c, 2).empty());
+  auto third = c.call(InstHelloRequest{3, kProtocolApiVersion}, 10000);
+  ASSERT_TRUE(third.ok());
+  EXPECT_FALSE(third->ok);
+  EXPECT_EQ(third->code, ErrorCode::Busy);
+  (void)h.stopAndWait(c);
+}
+
+TEST(AgentInst, DataConnectionsMustComeFromTheProcessThatSaidHello) {
+  InstHarness h({}, false, /*verifyPeer=*/true);
+  Client c = h.connect();
+  ASSERT_TRUE(c.call(h.startRequest("peer.tachyon"), 10000)->ok);
+  const uint32_t me = static_cast<uint32_t>(control::testing_util::currentPid());
+  const std::string honest = h.hello(c, me);
+  const std::string liar = h.hello(c, me + 1);  // claims to be another process, then connects from this one
+  ASSERT_FALSE(honest.empty());
+  ASSERT_FALSE(liar.empty());
+  RawClient a, b;
+  ASSERT_TRUE(a.connect(honest));
+  ASSERT_TRUE(b.connect(liar));
+  const StreamBuilder good = processStream(me, 5000, 3), forged = processStream(me + 1, 5000, 3);
+  ASSERT_TRUE(a.send(good.bytes().data(), good.bytes().size()));
+  (void)b.send(forged.bytes().data(), forged.bytes().size());
+  const std::string path = h.stopAndWait(c);
+  auto reader = trace::TraceReader::open(path);
+  ASSERT_TRUE(reader.ok());
+  const auto scopes = reader->readScopeEvents().value();
+  EXPECT_EQ(scopes.size(), 12u);
+  for (const auto& rec : scopes) {
+    const trace::ScopeEventRec r = rec;
+    EXPECT_EQ(pv(r.tid), me);
+  }
+}
+
+TEST(AgentInst, ProblemsReachTheClientAsWarningsOfCaptureDone) {
+  InstHarness h;
+  Client c = h.connect();
+  ASSERT_TRUE(c.call(h.startRequest("warn.tachyon"), 10000)->ok);
+  const std::string address = h.hello(c, 12);
+  StreamBuilder s;
+  s.header(12, 1'000'000'000, 5000);
+  const uint64_t k = s.string("leaky");
+  s.scopeBegin(5100, 12, k);  // never closed
+  RawClient sdk;
+  ASSERT_TRUE(sdk.connect(address));
+  ASSERT_TRUE(sdk.send(s.bytes().data(), s.bytes().size()));
+  auto stop = c.call(StopRequest{}, 10000);
+  ASSERT_TRUE(stop.ok() && stop->ok);
+  auto done =
+      c.waitForEvent([](const Event& e) { return std::holds_alternative<CaptureDoneEvent>(e); }, 20000);
+  ASSERT_TRUE(done.ok());
+  const auto& warnings = std::get<CaptureDoneEvent>(*done).summary.warnings;
+  ASSERT_FALSE(warnings.empty());
+  bool found = false;
+  for (const std::string& w : warnings) found = found || w.find("still open") != std::string::npos;
+  EXPECT_TRUE(found);
+  for (const std::string& w : warnings) EXPECT_LE(w.size(), kMaxSummaryWarningChars);
+  EXPECT_LE(warnings.size(), kMaxSummaryWarnings);
+}
+
+TEST(AgentInst, TheCliPrintsMergeWarningsOnStderrAndInJson) {
+  InstHarness h({}, /*junkFixture=*/true);  // the merge fails: the fixture is not a trace
+  Client c = h.connect();
+  ASSERT_TRUE(c.call(h.startRequest("clw.tachyon"), 10000)->ok);
+  const std::string address = h.hello(c, 8);
+  const StreamBuilder s = processStream(8, 5000);
+  RawClient sdk;
+  ASSERT_TRUE(sdk.connect(address));
+  ASSERT_TRUE(sdk.send(s.bytes().data(), s.bytes().size()));
+  std::ostringstream out, err;
+  const int code = cli::run({"--socket", h.address, "stop", "--wait"}, out, err);
+  EXPECT_EQ(code, cli::kExitOk) << err.str();
+  EXPECT_NE(err.str().find("warning: instrumentation merge failed"), std::string::npos) << err.str();
+
+  // The same through --json: the warnings travel in the capture_done line.
+  ASSERT_TRUE(c.call(h.startRequest("clw2.tachyon"), 10000)->ok);
+  const std::string address2 = h.hello(c, 9);
+  RawClient sdk2;
+  ASSERT_TRUE(sdk2.connect(address2));
+  const StreamBuilder s2 = processStream(9, 5000);
+  ASSERT_TRUE(sdk2.send(s2.bytes().data(), s2.bytes().size()));
+  std::ostringstream out2, err2;
+  EXPECT_EQ(cli::run({"--socket", h.address, "--json", "stop", "--wait"}, out2, err2), cli::kExitOk);
+  EXPECT_NE(out2.str().find("\"warnings\":[\""), std::string::npos) << out2.str();
 }
 
 TEST(AgentInst, SpoolRootSettingMovesTheSpoolDirectory) {

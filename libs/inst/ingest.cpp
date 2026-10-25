@@ -30,6 +30,7 @@ class SpoolSink final : public IStreamSink {
   void onClose() override {
     m_spool.noteTruncatedTail(m_assembler.pendingBytes());
     m_spool.noteCorrupt(m_assembler.discardedBytes());
+    m_spool.noteSkipped(m_assembler.skippedFrames());
   }
 
  private:
@@ -40,10 +41,19 @@ class SpoolSink final : public IStreamSink {
 
 }  // namespace
 
-Ingest::Ingest(IngestConfig config) : m_config(std::move(config)) {}
+Ingest::Ingest(IngestConfig config) : m_config(std::move(config)) {
+  m_budget = std::make_shared<SpoolBudget>(m_config.maxTotalSpoolBytes);
+}
 
 Ingest::~Ingest() {
   (void)finish();
+}
+
+uint32_t Ingest::rejectedConnections() const {
+  std::lock_guard lock(m_mutex);
+  uint32_t total = m_rejected;
+  for (const auto& [pid, p] : m_processes) total += p.server->rejectedCount();
+  return total;
 }
 
 size_t Ingest::processCount() const {
@@ -55,6 +65,9 @@ Result<void> Ingest::attach(uint32_t pid, const std::string& address) {
   std::lock_guard lock(m_mutex);
   if (m_finished) return makeError(ErrorCode::Busy, "instrumentation ingestion has finished");
   if (m_processes.count(pid) != 0) return ok();
+  if (m_processes.size() >= m_config.maxProcesses)
+    return makeError(ErrorCode::Busy, "too many instrumented processes in this capture (" +
+                                          std::to_string(m_config.maxProcesses) + ")");
   if (!m_dirCreated) {
     std::error_code ec;
     fs::create_directories(m_config.spoolDir, ec);
@@ -64,12 +77,16 @@ Result<void> Ingest::attach(uint32_t pid, const std::string& address) {
     m_dirCreated = true;
   }
   const fs::path file = m_config.spoolDir / ("inst-" + std::to_string(pid) + ".tachyon-inst");
-  TACHYON_TRY_ASSIGN(std::unique_ptr<Spool> spool, Spool::create(file, m_config.maxSpoolBytes));
+  TACHYON_TRY_ASSIGN(std::unique_ptr<Spool> spool, Spool::create(file, m_config.maxSpoolBytes, m_budget));
   Spool* raw = spool.get();
-  TACHYON_TRY_ASSIGN(std::unique_ptr<RawStreamServer> server,
-                     RawStreamServer::listen(address, [raw]() -> std::unique_ptr<IStreamSink> {
-                       return std::make_unique<SpoolSink>(*raw);
-                     }));
+  RawServerOptions serverOptions;
+  serverOptions.maxConnections = m_config.maxConnectionsPerProcess;
+  serverOptions.expectedPeerPid = m_config.verifyPeerPid ? pid : 0;
+  TACHYON_TRY_ASSIGN(
+      std::unique_ptr<RawStreamServer> server,
+      RawStreamServer::listen(
+          address, [raw]() -> std::unique_ptr<IStreamSink> { return std::make_unique<SpoolSink>(*raw); },
+          serverOptions));
   Process p;
   p.pid = pid;
   p.spool = std::move(spool);
@@ -107,9 +124,15 @@ std::vector<SpoolInfo> Ingest::finish() {
   std::vector<std::thread> drains;
   for (auto& [pid, p] : processes) {
     RawStreamServer* server = p.server.get();
-    drains.emplace_back([server, this] { server->shutdown(m_config.drainIdleMs, m_config.drainMaxMs); });
+    try {
+      drains.emplace_back([server, this] { server->shutdown(m_config.drainIdleMs, m_config.drainMaxMs); });
+    } catch (const std::exception&) {
+      server->shutdown(m_config.drainIdleMs, m_config.drainMaxMs);  // no thread to spare: drain one by one
+    }
   }
   for (std::thread& t : drains) t.join();
+  uint32_t rejected = 0;
+  for (auto& [pid, p] : processes) rejected += p.server->rejectedCount();
 
   std::vector<SpoolInfo> infos;
   for (auto& [pid, p] : processes) {
@@ -131,6 +154,7 @@ std::vector<SpoolInfo> Ingest::finish() {
     infos.push_back(std::move(info));
   }
   std::lock_guard lock(m_mutex);
+  m_rejected = rejected;
   m_final = infos;
   return infos;
 }

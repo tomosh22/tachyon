@@ -11,6 +11,7 @@
 #include "core/result.h"
 #include "inst/frame_stream.h"
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -20,7 +21,28 @@
 
 namespace tachyon::inst {
 
-constexpr uint64_t kDefaultMaxSpoolBytes = 1ull << 30;  // 1 GiB per process
+constexpr uint64_t kDefaultMaxSpoolBytes = 1ull << 30;       // 1 GiB per process
+constexpr uint64_t kDefaultMaxTotalSpoolBytes = 4ull << 30;  // 4 GiB per capture, all processes together
+
+// Disk budget shared by the spools of one capture.
+class SpoolBudget {
+ public:
+  explicit SpoolBudget(uint64_t limit) : m_limit(limit) {}
+  // Thread-safe. Takes `bytes` from the budget; false (and nothing taken) when they do not fit.
+  bool reserve(uint64_t bytes) {
+    uint64_t used = m_used.load(std::memory_order_relaxed);
+    do {
+      if (used + bytes > m_limit) return false;
+    } while (!m_used.compare_exchange_weak(used, used + bytes, std::memory_order_relaxed));
+    return true;
+  }
+  // Thread-safe.
+  uint64_t used() const { return m_used.load(std::memory_order_relaxed); }
+
+ private:
+  const uint64_t m_limit;
+  std::atomic<uint64_t> m_used{0};
+};
 
 struct SpoolStats {
   uint64_t framesWritten = 0;
@@ -29,6 +51,7 @@ struct SpoolStats {
   uint64_t recordsDropped = 0;      // records those frames carried (a Dropped frame counts its own count)
   uint64_t truncatedTailBytes = 0;  // bytes of an incomplete last frame when a connection ended
   uint64_t corruptBytes = 0;        // bytes discarded after an implausible frame length
+  uint64_t skippedFrames = 0;       // oversized frames skipped by their length
   uint32_t connections = 0;         // streams that delivered data
   bool overflowed = false;
 };
@@ -36,7 +59,10 @@ struct SpoolStats {
 class Spool {
  public:
   // Thread-safe: creates (truncates) `file`; its directory must exist.
-  static Result<std::unique_ptr<Spool>> create(const std::filesystem::path& file, uint64_t maxBytes);
+  // `budget` (optional) is shared with the other spools of the capture; frames that do not fit it are dropped
+  // like frames past the per-spool cap.
+  static Result<std::unique_ptr<Spool>> create(const std::filesystem::path& file, uint64_t maxBytes,
+                                               std::shared_ptr<SpoolBudget> budget = nullptr);
   // Thread-safe: closes the file (see close()).
   ~Spool();
   Spool(const Spool&) = delete;
@@ -48,6 +74,8 @@ class Spool {
   void noteTruncatedTail(size_t tailBytes);
   // Thread-safe. A stream became corrupt; `discarded` bytes were thrown away.
   void noteCorrupt(uint64_t discarded);
+  // Thread-safe. Oversized frames were skipped by their length.
+  void noteSkipped(uint64_t frames);
   // Thread-safe. A new stream (connection) started delivering.
   void noteConnection();
 
@@ -63,11 +91,13 @@ class Spool {
   const std::filesystem::path& path() const { return m_path; }
 
  private:
-  Spool(std::filesystem::path path, std::ofstream file, uint64_t maxBytes);
+  Spool(std::filesystem::path path, std::ofstream file, uint64_t maxBytes,
+        std::shared_ptr<SpoolBudget> budget);
   Result<void> flushLocked();
 
   const std::filesystem::path m_path;
   const uint64_t m_maxBytes;
+  const std::shared_ptr<SpoolBudget> m_budget;
   mutable std::mutex m_mutex;
   std::ofstream m_file;
   std::vector<uint8_t> m_buffer;

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <tuple>
 
 namespace tachyon::inst {
 namespace {
@@ -159,10 +160,13 @@ TEST(Merge, ToANewFileKeepsTheInputAndAddsInstrumentation) {
   EXPECT_EQ(info["sampling_hz"], 8000);  // the original document survives
   EXPECT_EQ(info["agent_version"], "test");
   ASSERT_TRUE(info.contains("instrumentation"));
-  EXPECT_EQ(info["instrumentation"]["scope_events"], 6);
+  const auto& merge0 = info["instrumentation"]["merges"][0];
+  EXPECT_EQ(merge0["scope_events"], 6);
+  EXPECT_EQ(merge0["sources"].size(), 1u);
+  EXPECT_EQ(merge0["sources"][0]["hash"].get<std::string>().size(), 16u);
   EXPECT_EQ(info["instrumentation"]["merge_count"], 1);
-  EXPECT_EQ(info["instrumentation"]["streams"].size(), 1u);
-  EXPECT_EQ(info["instrumentation"]["streams"][0]["pid"], 1234);
+  EXPECT_EQ(merge0["streams"].size(), 1u);
+  EXPECT_EQ(merge0["streams"][0]["pid"], 1234);
 }
 
 TEST(Merge, InPlaceGoesThroughATemporaryFileAndLeavesNothingBehind) {
@@ -305,7 +309,7 @@ TEST(Merge, ClippingNeedsAKnownWindowOtherwiseTheRangeIsFilledFromTheRecords) {
   ASSERT_TRUE(merged.ok());
   EXPECT_EQ(merged->clippedRecords, 0u);
   EXPECT_EQ(merged->scopeEvents, 6u);
-  EXPECT_EQ(merged->startTs, 1500u);
+  EXPECT_EQ(merged->startTs, 1510u);  // thread names (at 1500) do not count
   EXPECT_EQ(merged->endTs, 1550u);
 }
 
@@ -342,6 +346,125 @@ TEST(Merge, MergingTwiceUnitesTheRecordsInTimestampOrder) {
   EXPECT_EQ(frames, 2u);
   const auto info = nlohmann::json::parse(reader->readCaptureInfo().value());
   EXPECT_EQ(info["instrumentation"]["merge_count"], 2);
+}
+
+std::vector<std::tuple<uint32_t, uint64_t, std::string>> readNames(const fs::path& path) {
+  auto reader = TraceReader::open(path);
+  EXPECT_TRUE(reader.ok());
+  std::vector<std::tuple<uint32_t, uint64_t, std::string>> out;
+  if (!reader.ok()) return out;
+  const StringTable strings = reader->readStrings().value();
+  const auto names = reader->readThreadNames().value();
+  for (const auto& rec : names) {
+    const ThreadNameRec r = rec;
+    out.emplace_back(r.tid, r.ts, std::string(strings.get(r.name)));
+  }
+  return out;
+}
+
+StreamBuilder namesAndOneScope() {
+  StreamBuilder b;
+  b.header();
+  const uint64_t k = b.string("work");
+  b.threadName(100, 5, "old");             // before the window, replaced by the next one
+  b.threadName(500, 5, "renamed-before");  // the name thread 5 has when the window opens
+  b.threadName(2000, 6, "inside");
+  b.threadName(5000, 5, "after");       // after the window
+  b.threadName(300, 7, "late-attach");  // set long before the window, never renamed
+  b.scopeBegin(1500, 6, k);
+  b.scopeEnd(1600, 6);
+  return b;
+}
+
+TEST(Merge, ThreadNamesAreNotClippedTheLastNameBeforeTheWindowIsKeptAtItsStart) {
+  TempDir dir;
+  const BaseTrace base = writeBaseTrace(dir.path() / "base.tachyon", 1000, 3000);
+  const fs::path inst = namesAndOneScope().write(dir.path() / "a.tachyon-inst");
+  MergeOptions opts;
+  opts.outPath = dir.path() / "out.tachyon";
+  opts.clipToTraceRange = true;  // a flush / circular capture
+  const MergeInput in{inst};
+  auto merged = mergeInstrumentation(base.path, std::span<const MergeInput>(&in, 1), opts);
+  ASSERT_TRUE(merged.ok()) << merged.error().toString();
+  EXPECT_EQ(merged->threadNames, 4u);  // "old" is superseded; nothing is counted as clipped
+  EXPECT_EQ(merged->clippedRecords, 0u);
+  EXPECT_EQ(merged->startTs, 1000u);
+  EXPECT_EQ(merged->endTs, 3000u);
+  const auto names = readNames(opts.outPath);
+  ASSERT_EQ(names.size(), 4u);
+  using Row = std::tuple<uint32_t, uint64_t, std::string>;
+  EXPECT_EQ(names[0], (Row{7, 1000, "late-attach"}));
+  EXPECT_EQ(names[1], (Row{5, 1000, "renamed-before"}));
+  EXPECT_EQ(names[2], (Row{6, 2000, "inside"}));
+  EXPECT_EQ(names[3], (Row{5, 3000, "after"}));
+}
+
+TEST(Merge, ThreadNamesNeverWidenTheRangeAndAreClampedIntoIt) {
+  TempDir dir;
+  const BaseTrace base = writeBaseTrace(dir.path() / "base.tachyon", 1000, 3000);
+  const fs::path inst = namesAndOneScope().write(dir.path() / "a.tachyon-inst");
+  MergeOptions opts;
+  opts.outPath = dir.path() / "out.tachyon";  // default: extend instead of clip
+  const MergeInput in{inst};
+  auto merged = mergeInstrumentation(base.path, std::span<const MergeInput>(&in, 1), opts);
+  ASSERT_TRUE(merged.ok()) << merged.error().toString();
+  EXPECT_EQ(merged->startTs, 1000u);  // the names at 100 and 5000 did not move the range
+  EXPECT_EQ(merged->endTs, 3000u);
+  auto reader = TraceReader::open(opts.outPath);
+  EXPECT_EQ(reader->header().start_ts, 1000u);
+  EXPECT_EQ(reader->header().end_ts, 3000u);
+  for (const auto& [tid, ts, name] : readNames(opts.outPath)) {
+    EXPECT_GE(ts, 1000u) << name;
+    EXPECT_LE(ts, 3000u) << name;
+  }
+}
+
+TEST(Merge, MergingTheSameSidecarTwiceIsRefusedUnlessForced) {
+  TempDir dir;
+  const BaseTrace base = writeBaseTrace(dir.path() / "base.tachyon");
+  const fs::path copy = dir.path() / "work.tachyon";
+  fs::copy_file(base.path, copy);
+  const fs::path inst = sampleInstrumentation().write(dir.path() / "a.tachyon-inst");
+  const MergeInput in{inst};
+  ASSERT_TRUE(mergeInstrumentation(copy, std::span<const MergeInput>(&in, 1)).ok());
+  const auto afterFirst = readBytes(copy);
+
+  auto again = mergeInstrumentation(copy, std::span<const MergeInput>(&in, 1));
+  ASSERT_FALSE(again.ok());
+  EXPECT_EQ(again.error().code, ErrorCode::InvalidArgument);
+  EXPECT_NE(again.error().message.find("already merged"), std::string::npos) << again.error().message;
+  EXPECT_NE(again.error().message.find("--force"), std::string::npos);
+  EXPECT_EQ(readBytes(copy), afterFirst);  // untouched, no temp file
+  EXPECT_EQ(countFiles(dir.path()), 3u);
+
+  MergeOptions force;
+  force.force = true;
+  auto forced = mergeInstrumentation(copy, std::span<const MergeInput>(&in, 1), force);
+  ASSERT_TRUE(forced.ok()) << forced.error().toString();
+  EXPECT_TRUE(hasWarning(*forced, "merged again"));
+  auto reader = TraceReader::open(copy);
+  EXPECT_EQ(reader->readScopeEvents().value().size(), 12u);
+}
+
+TEST(Merge, CaptureInfoListsEveryMergeAndKeepsEarlierOnes) {
+  TempDir dir;
+  const BaseTrace base = writeBaseTrace(dir.path() / "base.tachyon");
+  const fs::path copy = dir.path() / "work.tachyon";
+  fs::copy_file(base.path, copy);
+  const fs::path first = sampleInstrumentation(1500).write(dir.path() / "first.tachyon-inst");
+  const fs::path second = sampleInstrumentation(1700).write(dir.path() / "second.tachyon-inst");
+  const MergeInput in1{first}, in2{second};
+  ASSERT_TRUE(mergeInstrumentation(copy, std::span<const MergeInput>(&in1, 1)).ok());
+  ASSERT_TRUE(mergeInstrumentation(copy, std::span<const MergeInput>(&in2, 1)).ok());
+  auto reader = TraceReader::open(copy);
+  const auto info = nlohmann::json::parse(reader->readCaptureInfo().value());
+  const auto& merges = info["instrumentation"]["merges"];
+  ASSERT_EQ(merges.size(), 2u);
+  EXPECT_EQ(info["instrumentation"]["merge_count"], 2);
+  EXPECT_EQ(merges[0]["scope_events"], 6);
+  EXPECT_EQ(merges[1]["scope_events"], 6);
+  EXPECT_NE(merges[0]["sources"][0]["hash"], merges[1]["sources"][0]["hash"]);
+  EXPECT_EQ(info["sampling_hz"], 8000);
 }
 
 TEST(Merge, NumberedSiblingsAreMergedInNumericOrder) {
@@ -430,7 +553,7 @@ TEST(Merge, DroppedRecordsBecomeMarkersAndWarnings) {
   }
   EXPECT_TRUE(found);
   const auto info = nlohmann::json::parse(reader->readCaptureInfo().value());
-  EXPECT_EQ(info["instrumentation"]["dropped_records"], 17);
+  EXPECT_EQ(info["instrumentation"]["merges"][0]["dropped_records"], 17);
 }
 
 TEST(Merge, UnbalancedScopesAreWarnings) {
@@ -603,8 +726,10 @@ TEST(Merge, PartialInputIsRecoveredIntoAFinishedFile) {
   EXPECT_TRUE(hasWarning(*merged, "partial"));
   auto reader = TraceReader::open(opts.outPath);
   ASSERT_TRUE(reader.ok());
-  EXPECT_FALSE(reader->isPartial());
+  // The capture behind the input was cut short: the flag stays, though the file now has a valid footer.
+  EXPECT_TRUE(reader->isPartial());
   EXPECT_EQ(reader->readSamples().value().size(), 1u);
+  EXPECT_EQ(reader->readScopeEvents().value().size(), 6u);
 }
 
 TEST(Merge, MoreThanOneChunkOfEachKindIsSplitAtTheFormatLimit) {
