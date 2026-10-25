@@ -35,7 +35,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-42 | Threads timeline | D | merged; needs GPU verification (60 fps) | wp/42-threads-timeline | 2026-10-25 |
 | WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | merged | wp/42b-timeline-symbols | 2026-10-25 |
 | WP-43 | Call graph panel | D | merged | wp/43-call-graph | 2026-10-25 |
-| WP-44 | Function list and butterfly | D | in progress | wp/44-function-list | 2026-10-25 |
+| WP-44 | Function list and butterfly | D | merged | wp/44-function-list | 2026-10-25 |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
 | WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
 | WP-47 | Search and Function Statistics | D | not started | wp/47-function-stats | |
@@ -162,7 +162,14 @@ The verifier passed everything except the quartile definition. That is now fixed
 
 Shared helpers moved to libs/analysis/detail/query_support.h (pure move). `libs/analysis/scope_pairing.h` is the base for WP-53's fiber-aware pairing.
 
+## WP-44 notes
+
+Verifier PASS. Rows match bottomUpFunctions. The Butterfly matches analysis::butterfly for all 401 medium functions, with 0 mismatches. Sort is a total order on every column. The text filter matches brute force, and regex-like input is safe. Close and reopen is ASan-clean. Sorting 100k rows takes 9–12 ms (budget 20 ms); a panel frame takes 0.06 ms (budget 2 ms). Viewer helpers moved to apps/viewer/common.
+
 ## Queued follow-ups
+
+- WP-33b (also): empty-stack samples are counted in topDown's root exclusive but dropped by bottomUp under KernelFrames::Show/Group. Result: Function List % ≠ Call Graph % on traces with frameless samples (repro: 80% vs 100%). Fix in libs/analysis with a `<no stack>` row (kRootKey) in bottomUp, or by excluding the samples from topDown, consistently in both.
+- Viewer polish (with WP-48): the Butterfly forces inline/kernel mode for inline or `<kernel>` keys without showing it in its toggles. Add a "forced for this selection" hint. Put the module-inclusive double-count note on the % cell too.
 
 - WP-33b: `Filter::subtreePath` (FunctionKey path prefix, applied after flatten; hashed in QueryCache), then switch the Call Graph "Filter to subtree" to it and drop the main-thread subtree resolver. Also: pie chart gets a "self" slice; selected-row deep-cap message.
 
