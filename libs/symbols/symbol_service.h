@@ -25,7 +25,6 @@
 
 namespace tachyon::symbols {
 
-using LocateFn = std::function<Result<std::filesystem::path>(const Module&)>;
 using ProviderFactory =
     std::function<std::unique_ptr<ISymbolProvider>(const Module&, const std::filesystem::path&)>;
 
@@ -36,8 +35,8 @@ struct SymbolProgress {
 
 class SymbolService {
  public:
-  // Thread-safe (constructor). `servers` and `cacheDir` are kept for the WP-21 locator; until then the
-  // default locate function only knows the symbol file overrides.
+  // Thread-safe (constructor). `servers` and `cacheDir` configure the default SymbolLocator (WP-21),
+  // consulted after the symbol file overrides.
   SymbolService(std::vector<std::string> servers, std::filesystem::path cacheDir);
   // Cancels pending module loads, joins the workers. Does not touch the model.
   ~SymbolService();
@@ -47,7 +46,7 @@ class SymbolService {
   // Configuration. Not thread-safe; call before resolveAllAsync().
   // Number of worker threads (0 = min(hardware_concurrency, 8)).
   void setWorkerThreads(unsigned n) { m_workerThreads = n; }
-  // Replaces the locate function consulted after the overrides. Default: SymbolLocator stub (NotFound).
+  // Replaces the locate function consulted after the overrides. Default: SymbolLocator(servers, cacheDir).
   void setLocate(LocateFn locate);
   // Replaces the provider factory. Default: JsonSymbolProvider for *.json paths; nullptr result = Failed.
   // Providers must intern into stringSink() so their StringIdx values are valid for symbolStrings().
