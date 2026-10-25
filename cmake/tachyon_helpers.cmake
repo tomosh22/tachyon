@@ -1,5 +1,8 @@
 # Helpers shared by every library, app, and test.
 
+# Fixtures generated at build time by tracegen (WP-04) land here. Committed fixtures stay under tests/fixtures.
+set(TACHYON_GENERATED_FIXTURE_DIR "${PROJECT_BINARY_DIR}/fixtures")
+
 # tachyon_add_library(<name> SOURCES ... [PUBLIC_DEPS ...] [PRIVATE_DEPS ...])
 # Creates static library tachyon_<name> with alias tachyon::<name>; include root is libs/ so headers are
 # included as "<name>/<header>.h".
@@ -33,7 +36,12 @@ function(tachyon_add_test name)
   target_link_libraries(${name} PRIVATE ${ARG_DEPS} GTest::gtest GTest::gmock GTest::gtest_main)
   target_compile_features(${name} PRIVATE cxx_std_20)
   target_compile_definitions(${name} PRIVATE TACHYON_FIXTURE_DIR="${PROJECT_SOURCE_DIR}/tests/fixtures"
+                                             TACHYON_GENERATED_FIXTURE_DIR="${TACHYON_GENERATED_FIXTURE_DIR}"
                                              TACHYON_BINARY_DIR="${PROJECT_BINARY_DIR}")
+  # Tests that read generated fixtures must be built after them (target defined by tools/tracegen, WP-04).
+  if(TARGET tachyon_fixtures)
+    add_dependencies(${name} tachyon_fixtures)
+  endif()
   tachyon_set_warnings(${name})
   if(NOT ARG_LABELS)
     set(ARG_LABELS unit)
