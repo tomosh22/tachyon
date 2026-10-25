@@ -56,7 +56,6 @@ TEST(SdkOverheadPerf, ConnectedBeginEndPairUnder40ns) {
   RecordProperty("median_ns", std::to_string(ns));
   EXPECT_EQ(drops, 0u) << "measured the drop path, not the recording path";
   EXPECT_LT(ns, 2 * kTargetNs);
-  ADD_FAILURE() << "TEMPORARY PROBE connected median ns=" << ns;
   Tachyon_Internal_Restart();
 }
 
@@ -69,7 +68,6 @@ TEST(SdkOverheadPerf, RuntimeDisabledBeginEndPairUnder10ns) {
               kTargetNs, 2 * kTargetNs);
   RecordProperty("median_ns", std::to_string(ns));
   EXPECT_LT(ns, 2 * kTargetNs);
-  ADD_FAILURE() << "TEMPORARY PROBE disabled median ns=" << ns;
   sdk_testing::unsetEnv("TACHYON_DISABLE");
   Tachyon_Internal_Restart();
 }
