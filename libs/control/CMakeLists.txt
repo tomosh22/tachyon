@@ -4,3 +4,6 @@ tachyon_add_library(control
   PRIVATE_DEPS nlohmann_json::nlohmann_json)
 find_package(Threads REQUIRED)
 target_link_libraries(tachyon_control PUBLIC Threads::Threads)
+if(WIN32)
+  target_link_libraries(tachyon_control PUBLIC advapi32)
+endif()

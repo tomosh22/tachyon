@@ -5,7 +5,9 @@
 #include "control/transport.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -26,7 +28,15 @@ class IRequestHandler {
   virtual Response handle(ClientId client, const Request& request) = 0;
 };
 
-// One accept thread plus one thread per client. Handler must outlive the server.
+// Longest outbound backlog per client (queued responses + events, in bytes). A client that lets more than
+// this pile up (it does not read) is disconnected; see Server.
+constexpr size_t kMaxQueuedBytesPerClient = 2 * 1024 * 1024;
+
+// One accept thread plus a reader thread and a writer thread per client. Handler must outlive the server.
+//
+// All traffic to a client (responses and broadcast events, in order) goes through a per-client queue drained
+// by that client's writer thread, so a client that stops reading can never block the thread that produces an
+// event or another client's request: its queue grows to kMaxQueuedBytesPerClient and the client is dropped.
 class Server {
  public:
   // Thread-safe.
@@ -42,7 +52,8 @@ class Server {
   // from a handler callback.
   void stop();
 
-  // Thread-safe. Sends the event line to every connected client; clients that fail to receive are dropped.
+  // Thread-safe, never blocks on a client. Queues the event line for every connected client; clients whose
+  // queue overflows or whose connection fails are dropped.
   void broadcast(const Event& event);
 
   // Thread-safe.
@@ -54,9 +65,21 @@ class Server {
   struct ClientEntry {
     ClientId id = 0;
     std::shared_ptr<IConnection> connection;
-    std::thread thread;
+    std::thread thread;        // reads requests
+    std::thread writerThread;  // drains outQueue
     std::atomic<bool> finished{false};
+
+    std::mutex outMutex;
+    std::condition_variable outCv;
+    std::deque<std::string> outQueue;
+    size_t outBytes = 0;
+    bool outClosed = false;
   };
+
+  // Queues a line for the client's writer; false (and the connection is closed) on overflow.
+  static bool enqueue(ClientEntry& entry, std::string line);
+  static void closeOutbound(ClientEntry& entry);
+  void writerLoop(ClientEntry* entry);
 
   void acceptLoop();
   void clientLoop(ClientEntry* entry);

@@ -13,9 +13,13 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+// sddl.h needs windows.h first.
+#include <sddl.h>
 
 #include <atomic>
 #include <cstdlib>
+#include <memory>
+#include <vector>
 
 namespace tachyon::control {
 
@@ -108,18 +112,90 @@ class PipeConnection final : public detail::FramedConnection {
   std::atomic<bool> m_closed{false};
 };
 
-HANDLE createInstance(const std::string& name, bool first) {
+// SDDL for the agent pipe. The agent is elevated, the client (CLI / viewer) is usually the interactive user's
+// non-elevated process, so the default DACL (full control for creator, SYSTEM, Administrators; read for
+// Everyone and Anonymous) is replaced by:
+//   D:P                  protected: nothing is inherited from a parent object
+//   (D;;GA;;;NU)         deny every network logon (belt and braces next to PIPE_REJECT_REMOTE_CLIENTS)
+//   (A;;GA;;;SY)         SYSTEM
+//   (A;;GA;;;BA)         Administrators
+//   (A;;GA;;;<user>)     the account that runs the agent (needed so a non-elevated agent can create the next
+//                        pipe instance)
+//   (A;;0x12019b;;;AU)   Authenticated Users: FILE_GENERIC_READ | FILE_GENERIC_WRITE without
+//                        FILE_APPEND_DATA (= FILE_CREATE_PIPE_INSTANCE), so a client can talk to the agent
+//                        but cannot create a competing instance of the pipe. Anonymous and guests are not
+//                        Authenticated Users. Clients must therefore open the pipe with kPipeClientAccess,
+//                        not GENERIC_READ | GENERIC_WRITE.
+constexpr DWORD kPipeClientAccess = FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES;
+
+std::wstring currentUserSidString() {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return {};
+  DWORD size = 0;
+  GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+  std::wstring result;
+  if (size > 0) {
+    std::vector<char> buf(size);
+    if (GetTokenInformation(token, TokenUser, buf.data(), size, &size)) {
+      LPWSTR text = nullptr;
+      if (ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid, &text)) {
+        result = text;
+        LocalFree(text);
+      }
+    }
+  }
+  CloseHandle(token);
+  return result;
+}
+
+std::wstring pipeSddl() {
+  std::wstring sddl = L"D:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)";
+  const std::wstring user = currentUserSidString();
+  if (!user.empty()) sddl += L"(A;;GA;;;" + user + L")";
+  sddl += L"(A;;0x12019b;;;AU)";
+  return sddl;
+}
+
+// The security descriptor is built once per listener: a new pipe instance is created after every accept and
+// clients get ERROR_PIPE_BUSY while none is pending, so that window must stay as short as possible.
+class PipeSecurity {
+ public:
+  PipeSecurity() = default;
+  ~PipeSecurity() {
+    if (m_descriptor != nullptr) LocalFree(m_descriptor);
+  }
+  PipeSecurity(const PipeSecurity&) = delete;
+  PipeSecurity& operator=(const PipeSecurity&) = delete;
+
+  bool init() {
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(pipeSddl().c_str(), SDDL_REVISION_1,
+                                                              &m_descriptor, nullptr))
+      return false;
+    m_attributes.nLength = sizeof(m_attributes);
+    m_attributes.lpSecurityDescriptor = m_descriptor;
+    m_attributes.bInheritHandle = FALSE;
+    return true;
+  }
+  SECURITY_ATTRIBUTES* attributes() { return &m_attributes; }
+
+ private:
+  PSECURITY_DESCRIPTOR m_descriptor = nullptr;
+  SECURITY_ATTRIBUTES m_attributes{};
+};
+
+HANDLE createInstance(const std::string& name, bool first, PipeSecurity& security) {
   DWORD openMode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
   if (first) openMode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
-  return CreateNamedPipeA(name.c_str(), openMode,
-                          PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                          PIPE_UNLIMITED_INSTANCES, kPipeBufferBytes, kPipeBufferBytes, 0, nullptr);
+  return CreateNamedPipeA(
+      name.c_str(), openMode, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+      PIPE_UNLIMITED_INSTANCES, kPipeBufferBytes, kPipeBufferBytes, 0, security.attributes());
 }
 
 class PipeListener final : public IListener {
  public:
-  PipeListener(std::string name, HANDLE firstInstance)
+  PipeListener(std::string name, HANDLE firstInstance, std::unique_ptr<PipeSecurity> security)
       : m_name(std::move(name)),
+        m_security(std::move(security)),
         m_pending(firstInstance),
         m_closeEvent(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
   ~PipeListener() override {
@@ -155,7 +231,7 @@ class PipeListener final : public IListener {
     if (!connected) return makeError(ErrorCode::Cancelled, "listener closed");
 
     // Keep an unconnected instance available at all times so clients never see "file not found".
-    m_pending = createInstance(m_name, false);
+    m_pending = createInstance(m_name, false, *m_security);
     if (m_pending == INVALID_HANDLE_VALUE) {
       const Error e = winError(ErrorCode::IoError, "CreateNamedPipe");
       CloseHandle(instance);
@@ -172,6 +248,7 @@ class PipeListener final : public IListener {
 
  private:
   std::string m_name;
+  std::unique_ptr<PipeSecurity> m_security;
   HANDLE m_pending;  // only touched by the accept() thread and the destructor
   HANDLE m_closeEvent;
   std::atomic<bool> m_closed{false};
@@ -196,19 +273,24 @@ std::string instrumentationAddress(const std::string& agentAddress, uint32_t pid
 }
 
 Result<std::unique_ptr<IListener>> listenOn(const std::string& address) {
-  HANDLE h = createInstance(address, true);
+  auto security = std::make_unique<PipeSecurity>();
+  if (!security->init()) return winError(ErrorCode::IoError, "building the pipe security descriptor");
+  HANDLE h = createInstance(address, true, *security);
   if (h == INVALID_HANDLE_VALUE) {
     const DWORD err = GetLastError();
     if (err == ERROR_ACCESS_DENIED || err == ERROR_PIPE_BUSY)
       return winError(ErrorCode::Busy, "pipe already in use: " + address, err);
     return winError(ErrorCode::IoError, "CreateNamedPipe " + address, err);
   }
-  return std::unique_ptr<IListener>(new PipeListener(address, h));
+  return std::unique_ptr<IListener>(new PipeListener(address, h, std::move(security)));
 }
 
 Result<std::unique_ptr<IConnection>> connectTo(const std::string& address) {
-  for (int attempt = 0; attempt < 5; ++attempt) {
-    HANDLE h = CreateFileA(address.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+  // ERROR_PIPE_BUSY: every instance is connected, or the server is between accepting a client and creating
+  // the next instance (WaitNamedPipe then fails at once). Keep trying for a few seconds.
+  const ULONGLONG deadline = GetTickCount64() + 5000;
+  do {
+    HANDLE h = CreateFileA(address.c_str(), kPipeClientAccess, 0, nullptr, OPEN_EXISTING,
                            FILE_FLAG_OVERLAPPED, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
       DWORD mode = PIPE_READMODE_BYTE;
@@ -216,13 +298,11 @@ Result<std::unique_ptr<IConnection>> connectTo(const std::string& address) {
       return std::unique_ptr<IConnection>(new PipeConnection(h));
     }
     const DWORD err = GetLastError();
-    if (err == ERROR_PIPE_BUSY) {
-      WaitNamedPipeA(address.c_str(), 1000);
-      continue;
-    }
-    return winError(err == ERROR_FILE_NOT_FOUND ? ErrorCode::NotFound : ErrorCode::IoError,
-                    "connect " + address, err);
-  }
+    if (err != ERROR_PIPE_BUSY)
+      return winError(err == ERROR_FILE_NOT_FOUND ? ErrorCode::NotFound : ErrorCode::IoError,
+                      "connect " + address, err);
+    if (!WaitNamedPipeA(address.c_str(), 100)) Sleep(5);
+  } while (GetTickCount64() < deadline);
   return makeError(ErrorCode::Busy, "pipe busy: " + address);
 }
 

@@ -12,6 +12,7 @@
 #include "control/server.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -64,7 +65,12 @@ class Agent final : public control::IRequestHandler {
   AgentConfig m_config;
   EventSink m_sink;
 
-  std::mutex m_mutex;  // serialises state transitions and the events they emit
+  // Serialises state transitions and the events they emit. Never held across a backend call (start, stop,
+  // flush, checkPrivileges): the backend's progress callback takes it, and a slow backend must not stall
+  // status requests or other clients.
+  std::mutex m_mutex;
+  std::condition_variable m_flushDone;  // signalled when m_flushing drops
+  bool m_flushing = false;              // a backend->flush() is in flight (guarded by m_mutex)
   std::atomic<capture::CaptureState> m_state{capture::CaptureState::Idle};
   std::atomic<double> m_progress{0.0};
   std::thread m_worker;

@@ -3,6 +3,7 @@
 #include "agent/privileges.h"
 #include "agent/stub_backend.h"
 #include "capture/mock/mock_backend.h"
+#include "capture/windows_etw/windows_etw_backend.h"
 #include "control/server.h"
 #include "control/transport.h"
 #include "core/log.h"
@@ -72,9 +73,11 @@ void printUsage() {
       stderr,
       "usage: tachyon-agent [--backend mock|etw|perf] [--socket PATH | --pipe NAME]\n"
       "                     [--log-level trace|debug|info|warn|error]\n"
-      "                     [--mock-fixture FILE] [--mock-duration-ms N] [--mock-steps N]\n"
+      "                     [--mock-fixture FILE] [--mock-duration-ms N] [--mock-steps N] "
+      "[--etw-delete-raw]\n"
       "The address defaults to $TACHYON_AGENT_PIPE or the platform default. The mock backend copies\n"
-      "$TACHYON_MOCK_FIXTURE (or --mock-fixture) to the requested output path.\n");
+      "$TACHYON_MOCK_FIXTURE (or --mock-fixture) to the requested output path. The etw backend keeps the\n"
+      "raw <out>.etl next to the trace unless --etw-delete-raw is given.\n");
 }
 
 struct Options {
@@ -84,6 +87,7 @@ struct Options {
   std::string mockFixture;
   long mockDurationMs = 0;
   long mockSteps = 4;
+  bool etwDeleteRaw = false;
   bool help = false;
 };
 
@@ -105,6 +109,8 @@ bool parseArgs(int argc, char** argv, Options& o) {
       if (!value(o.address)) return false;
     } else if (a == "--log-level") {
       if (!value(o.logLevel)) return false;
+    } else if (a == "--etw-delete-raw") {
+      o.etwDeleteRaw = true;
     } else if (a == "--mock-fixture") {
       if (!value(o.mockFixture)) return false;
     } else if (a == "--mock-duration-ms") {
@@ -175,7 +181,21 @@ int main(int argc, char** argv) {
                    TACHYON_PLATFORM_WINDOWS ? "an elevated (administrator) process" : "root or CAP_PERFMON");
       return kExitNoPrivilege;
     }
-    backend = std::make_unique<agent::StubBackend>(opt.backend);
+    if (opt.backend == "etw") {
+      // Stops Tachyon sessions left behind by a crashed agent before the first capture (see EtwSession).
+      auto orphans = capture::etw::EtwSession::cleanupOrphans();
+      if (!orphans.ok()) {
+        TACHYON_LOG_WARN("agent: ETW orphan cleanup failed: {}", orphans.error().toString());
+      } else {
+        for (const std::string& n : orphans->stopped)
+          TACHYON_LOG_WARN("agent: stopped orphaned ETW session '{}'", n);
+      }
+      capture::WindowsEtwBackendConfig etwCfg;
+      etwCfg.keepRawEtl = !opt.etwDeleteRaw;
+      backend = std::make_unique<capture::WindowsEtwBackend>(etwCfg);
+    } else {
+      backend = std::make_unique<agent::StubBackend>(opt.backend);
+    }
   } else {
     std::fprintf(stderr, "tachyon-agent: unknown backend '%s' (expected mock|etw|perf)\n",
                  opt.backend.c_str());
