@@ -52,9 +52,9 @@ bool ModuleBucket::unload(uint64_t base, uint64_t ts) {
 ModuleTable::ModuleTable(PeLookupFn lookup, DevicePathMapper mapper)
     : m_lookup(std::move(lookup)), m_mapper(std::move(mapper)) {}
 
-ModuleInfo ModuleTable::identify(uint32_t pid, uint64_t base, uint64_t size, const std::string& loggedPath,
-                                 uint32_t timeDateStamp) {
-  ModuleInfo info;
+LoadedModule ModuleTable::identify(uint32_t pid, uint64_t base, uint64_t size, const std::string& loggedPath,
+                                   uint32_t timeDateStamp) {
+  LoadedModule info;
   info.path = m_mapper.toDosPath(loggedPath);
   trace::ModuleRec& rec = info.rec;
   rec.pid = pid;
@@ -94,11 +94,11 @@ ModuleInfo ModuleTable::identify(uint32_t pid, uint64_t base, uint64_t size, con
     return info;
   }
 
-  // Fallback: id_kind 0 with TimeDateStamp (u32) and SizeOfImage (u32), little-endian, in the id bytes.
-  // Prefer the loaded image's own values (from the event) over the file's.
+  // Fallback: id_kind 3 (kModuleIdPeTimestampSize) with TimeDateStamp (u32) and SizeOfImage (u32),
+  // little-endian, in the id bytes. Prefer the loaded image's own values (from the event) over the file's.
   const uint32_t stamp = timeDateStamp != 0 ? timeDateStamp : (pe.ok ? pe.info.timeDateStamp : 0);
   const uint32_t imageSize = size != 0 ? static_cast<uint32_t>(size) : (pe.ok ? pe.info.sizeOfImage : 0);
-  rec.id_kind = 0;
+  rec.id_kind = trace::kModuleIdPeTimestampSize;
   rec.id_len = 8;
   std::memcpy(rec.id, &stamp, 4);
   std::memcpy(rec.id + 4, &imageSize, 4);
@@ -119,7 +119,7 @@ uint32_t ModuleTable::load(uint32_t pid, uint64_t base, uint64_t size, const std
   const bool kernel = base >= kKernelAddressBase;
   ModuleBucket& bucket = kernel ? m_kernel : m_processes[pid];
   if (const ModuleInterval* open = bucket.findOpen(base, size)) return open->moduleIdx;
-  ModuleInfo info = identify(kernel ? 0 : pid, base, size, loggedPath, timeDateStamp);
+  LoadedModule info = identify(kernel ? 0 : pid, base, size, loggedPath, timeDateStamp);
   info.rec.load_ts = loadTs;
   const auto idx = static_cast<uint32_t>(m_modules.size());
   m_modules.push_back(std::move(info));

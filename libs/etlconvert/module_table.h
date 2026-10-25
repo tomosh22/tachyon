@@ -29,7 +29,7 @@ struct ModuleIdCounters {
   uint32_t mismatch = 0;     // subset of fallback: file on disk differs from the loaded image
 };
 
-struct ModuleInfo {
+struct LoadedModule {
   trace::ModuleRec rec{};  // path is filled in when written
   std::string path;        // DOS path when conversion succeeded, else as logged
 };
@@ -80,17 +80,17 @@ class ModuleTable {
   // Thread-safe for const access.
   const ModuleBucket& kernelBucket() const { return m_kernel; }
   // Thread-safe for const access. Indexed by ModuleIdx.
-  const std::vector<ModuleInfo>& modules() const { return m_modules; }
+  const std::vector<LoadedModule>& modules() const { return m_modules; }
   // Thread-safe for const access.
   const ModuleIdCounters& counters() const { return m_counters; }
 
  private:
-  ModuleInfo identify(uint32_t pid, uint64_t base, uint64_t size, const std::string& loggedPath,
-                      uint32_t timeDateStamp);
+  LoadedModule identify(uint32_t pid, uint64_t base, uint64_t size, const std::string& loggedPath,
+                        uint32_t timeDateStamp);
 
   PeLookupFn m_lookup;
   DevicePathMapper m_mapper;
-  std::vector<ModuleInfo> m_modules;
+  std::vector<LoadedModule> m_modules;
   std::unordered_map<uint32_t, ModuleBucket> m_processes;
   ModuleBucket m_kernel;
   ModuleIdCounters m_counters;

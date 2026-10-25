@@ -298,7 +298,7 @@ struct ReadBack {
   trace::StringTable strings;
   std::vector<trace::CallstackNodeRec> nodes;
   std::vector<trace::FrameRec> frames;
-  std::vector<trace::ModuleRec> modules;
+  std::vector<trace::ModuleInfo> modules;
   std::vector<trace::ThreadRec> threads;
   std::vector<trace::ProcessRec> processes;
   trace::SampleBatch samples;
@@ -332,7 +332,7 @@ inline std::unique_ptr<ReadBack> readBack(const std::filesystem::path& path) {
   take(rb->reader.readStrings(), rb->strings);
   take(rb->reader.readCallstackNodes(), rb->nodes);
   take(rb->reader.readFrames(), rb->frames);
-  take(rb->reader.readModules(), rb->modules);
+  take(rb->reader.readModuleInfos(), rb->modules);
   take(rb->reader.readThreads(), rb->threads);
   take(rb->reader.readProcesses(), rb->processes);
   take(rb->reader.readSamples(), rb->samples);

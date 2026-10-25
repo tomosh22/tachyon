@@ -167,7 +167,8 @@ TEST(Pipeline, ProcessModeKeepsTargetSamplesAndRelatedSwitches) {
   EXPECT_EQ(c1.old_wait_mode, 1);
   EXPECT_EQ(c1.new_priority, 8);
   EXPECT_EQ(c1.cpu, 0u);
-  EXPECT_EQ(c1.reserved, 1u);  // the stack belongs to the incoming thread (101), not old_tid (201)
+  EXPECT_EQ(c1.reserved, trace::kSwitchFlagStackFromOtherThread);  // the stack belongs to the incoming thread
+                                                                   // (101), not old_tid (201)
   EXPECT_EQ(rb.stackOf(c1.old_thread_stack), (std::vector<std::pair<uint32_t, uint64_t>>{{0, 0x3000}}));
   const trace::ContextSwitchRec& c3 = rb.switches[1];
   EXPECT_EQ(c3.new_tid, 0u);
@@ -252,7 +253,7 @@ TEST(Pipeline, ModulesAreIdentifiedAndMappedPerProcess) {
   ASSERT_NE(c.rb, nullptr);
   const ReadBack& rb = *c.rb;
   ASSERT_EQ(rb.modules.size(), 4u);
-  const trace::ModuleRec& game = rb.modules[0];
+  const trace::ModuleInfo& game = rb.modules[0];
   EXPECT_EQ(rb.str(game.path), "C:\\game\\game.exe");
   EXPECT_EQ(game.pid, 100u);
   EXPECT_EQ(game.base, kGameBase);
@@ -263,10 +264,11 @@ TEST(Pipeline, ModulesAreIdentifiedAndMappedPerProcess) {
   EXPECT_EQ(game.load_ts, 3u);
   EXPECT_EQ(game.unload_ts, 9000u);  // still loaded: trace end
 
-  const trace::ModuleRec& kernel = rb.modules[1];
+  const trace::ModuleInfo& kernel = rb.modules[1];
   EXPECT_EQ(rb.str(kernel.path), "C:\\Windows\\system32\\ntoskrnl.exe");
   EXPECT_EQ(kernel.pid, 0u);
-  EXPECT_EQ(kernel.id_kind, 0);  // file not found: TimeDateStamp + SizeOfImage fallback
+  EXPECT_EQ(kernel.id_kind,
+            trace::kModuleIdPeTimestampSize);  // file not found: TimeDateStamp + SizeOfImage fallback
   EXPECT_EQ(kernel.id_len, 8);
 
   EXPECT_EQ(rb.modules[2].pid, 100u);
@@ -505,11 +507,9 @@ TEST(HexFixtures, WP01SyntheticBasicConverts) {
   EXPECT_EQ(rb->str(rb->processes[0].name), "game.exe");
   ASSERT_EQ(rb->modules.size(), 1u);
   EXPECT_EQ(rb->str(rb->modules[0].path), "\\Device\\HarddiskVolume3\\game\\game.exe");
-  EXPECT_EQ(rb->modules[0].id_kind, 0);        // no such file here: fallback
-  const uint64_t base0 = rb->modules[0].base;  // packed member: copy before binding a reference
-  EXPECT_EQ(base0, 0x7ff600000000ull);
-  const uint64_t size0 = rb->modules[0].size;
-  EXPECT_EQ(size0, 0x10000u);
+  EXPECT_EQ(rb->modules[0].id_kind, trace::kModuleIdPeTimestampSize);  // no such file here: fallback
+  EXPECT_EQ(0x7ff600000000ull);
+  EXPECT_EQ(rb->modules[0].size, 0x10000u);
   bool renamed = false;
   for (const auto& n : rb->names) renamed |= rb->str(n.name) == "RenderThread";
   EXPECT_TRUE(renamed);

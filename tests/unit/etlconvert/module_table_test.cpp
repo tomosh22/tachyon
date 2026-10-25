@@ -66,7 +66,7 @@ TEST(ModuleTable, IdentifiesRsdsFromPeFile) {
   const uint32_t idx =
       t.load(100, 0x7ff600000000ull, 0x10000, "\\Device\\HarddiskVolume3\\game\\game.exe", 0, 0x5F001234, 0);
   ASSERT_EQ(idx, 0u);
-  const ModuleInfo& m = t.modules()[0];
+  const LoadedModule& m = t.modules()[0];
   EXPECT_EQ(m.path, "C:\\game\\game.exe");
   EXPECT_EQ(m.rec.id_kind, trace::kModuleIdPdb);
   EXPECT_EQ(m.rec.id_len, 16);
@@ -81,7 +81,7 @@ TEST(ModuleTable, FallbackWhenFileMissing) {
   ModuleTable t(lookupFrom({}), DevicePathMapper{});
   t.load(100, 0x400000, 0x20000, "C:\\gone.dll", 0, 0xAABBCCDD, 0);
   const trace::ModuleRec& r = t.modules()[0].rec;
-  EXPECT_EQ(r.id_kind, 0);
+  EXPECT_EQ(r.id_kind, trace::kModuleIdPeTimestampSize);
   EXPECT_EQ(r.id_len, 8);
   uint32_t stamp = 0;
   uint32_t size = 0;
@@ -98,7 +98,7 @@ TEST(ModuleTable, FallbackWhenFileDiffersFromLoadedImage) {
   disk.timeDateStamp = 0x11111111;  // a different build than the one loaded
   ModuleTable t(lookupFrom({{"C:\\a.dll", disk}}), DevicePathMapper{});
   t.load(1, 0x400000, 0x20000, "C:\\a.dll", 0, 0x22222222, 0);
-  EXPECT_EQ(t.modules()[0].rec.id_kind, 0);
+  EXPECT_EQ(t.modules()[0].rec.id_kind, trace::kModuleIdPeTimestampSize);
   EXPECT_EQ(t.counters().mismatch, 1u);
   // The size can differ too.
   PeSpec sized;
@@ -113,7 +113,7 @@ TEST(ModuleTable, FallbackWhenNoCodeView) {
   spec.codeView = false;
   ModuleTable t(lookupFrom({{"C:\\n.dll", spec}}), DevicePathMapper{});
   t.load(1, 0x400000, spec.sizeOfImage, "C:\\n.dll", 0, spec.timeDateStamp, 0);
-  EXPECT_EQ(t.modules()[0].rec.id_kind, 0);
+  EXPECT_EQ(t.modules()[0].rec.id_kind, trace::kModuleIdPeTimestampSize);
   EXPECT_EQ(t.counters().noCodeView, 1u);
 }
 

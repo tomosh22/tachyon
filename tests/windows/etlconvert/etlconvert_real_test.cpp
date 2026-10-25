@@ -30,11 +30,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -88,14 +91,33 @@ class PdbNames {
   DWORD64 m_base = 0;
 };
 
+// CI hides the stdout of passing tests, so the key numbers go to stderr, to a file in the build directory and
+// to the gtest XML (RecordProperty "summary").
+class Tee {
+ public:
+  template <typename T>
+  Tee& operator<<(const T& value) {
+    std::ostringstream one;
+    one << value;
+    std::fprintf(stderr, "%s", one.str().c_str());
+    m_text += one.str();
+    return *this;
+  }
+  const std::string& text() const { return m_text; }
+
+ private:
+  std::string m_text;
+};
+
 TEST(EtlConvertWindows, ConvertsRealTestbedEtl) {
+  Tee out;
   const std::filesystem::path exe = TACHYON_TESTBED_EXE;
   ASSERT_TRUE(std::filesystem::exists(exe)) << exe;
   const std::filesystem::path etl = std::filesystem::path(TACHYON_BINARY_DIR) / "etlconvert_real.etl";
-  const std::filesystem::path out = std::filesystem::path(TACHYON_BINARY_DIR) / "etlconvert_real.tachyon";
+  const std::filesystem::path outFile = std::filesystem::path(TACHYON_BINARY_DIR) / "etlconvert_real.tachyon";
   std::error_code ec;
   std::filesystem::remove(etl, ec);
-  std::filesystem::remove(out, ec);
+  std::filesystem::remove(outFile, ec);
 
   etlstat::CliOptions rec;
   rec.command = etlstat::Command::Record;
@@ -111,8 +133,8 @@ TEST(EtlConvertWindows, ConvertsRealTestbedEtl) {
   ASSERT_TRUE(recorded.ok()) << recorded.error().toString();
   const uint32_t pid = recorded->exePid;
   ASSERT_NE(pid, 0u);
-  std::cout << "[etlconvert] recorded pid " << pid << ", eventsLost " << recorded->eventsLost << ", "
-            << recorded->fileBytes << " bytes\n";
+  out << "[etlconvert] recorded pid " << pid << ", eventsLost " << recorded->eventsLost << ", "
+      << recorded->fileBytes << " bytes\n";
 
   ConvertOptions options;
   options.targetPids = {pid};
@@ -125,36 +147,34 @@ TEST(EtlConvertWindows, ConvertsRealTestbedEtl) {
     progressMonotonic &= p >= lastProgress;
     lastProgress = p;
   };
-  auto converted = EtlConverter::convert(etl, out, options);
+  auto converted = EtlConverter::convert(etl, outFile, options);
   ASSERT_TRUE(converted.ok()) << converted.error().toString();
   const ConvertStats& st = *converted;
   EXPECT_TRUE(progressMonotonic);
   EXPECT_FLOAT_EQ(lastProgress, 1.0f);
 
-  std::cout << "[etlconvert] events " << st.eventsTotal << " (samples " << st.sampledProfileEvents
-            << ", cswitch " << st.cswitchEvents << ", ready " << st.readyEvents << ", stackwalk "
-            << st.stackWalkEvents << "); written: samples " << st.samplesWritten << ", cswitch "
-            << st.cswitchesWritten << ", ready " << st.readiesWritten << "; stacks matched "
-            << st.stacksMatched << " unmatched " << st.stacksUnmatched << " two-part " << st.stacksTwoPart
-            << "; modules rsds " << st.modulesRsds << " fallback " << st.modulesFallback << " (missing "
-            << st.modulesFileMissing << ", differ " << st.modulesMismatch << ", no codeview "
-            << st.modulesNoCodeView << "); " << st.seconds << " s\n";
+  out << "[etlconvert] events " << st.eventsTotal << " (samples " << st.sampledProfileEvents << ", cswitch "
+      << st.cswitchEvents << ", ready " << st.readyEvents << ", stackwalk " << st.stackWalkEvents
+      << "); written: samples " << st.samplesWritten << ", cswitch " << st.cswitchesWritten << ", ready "
+      << st.readiesWritten << "; stacks matched " << st.stacksMatched << " unmatched " << st.stacksUnmatched
+      << " two-part " << st.stacksTwoPart << "; modules rsds " << st.modulesRsds << " fallback "
+      << st.modulesFallback << " (missing " << st.modulesFileMissing << ", differ " << st.modulesMismatch
+      << ", no codeview " << st.modulesNoCodeView << "); " << st.seconds << " s\n";
   for (size_t k = 0; k < 3; ++k) {
-    std::cout << "[etlconvert] stack match roles for " << parentKindName(static_cast<ParentKind>(k)) << ":";
+    out << "[etlconvert] stack match roles for " << parentKindName(static_cast<ParentKind>(k)) << ":";
     for (size_t r = 0; r < 3; ++r)
-      std::cout << ' ' << matchRoleName(static_cast<MatchRole>(r)) << '=' << st.matchRole[k][r];
-    std::cout << " (with stack " << st.parentsWithStack[k] << ", without " << st.parentsWithoutStack[k]
-              << ")\n";
+      out << ' ' << matchRoleName(static_cast<MatchRole>(r)) << '=' << st.matchRole[k][r];
+    out << " (with stack " << st.parentsWithStack[k] << ", without " << st.parentsWithoutStack[k] << ")\n";
   }
-  for (const std::string& w : st.warnings) std::cout << "[etlconvert] warning: " << w << "\n";
+  for (const std::string& w : st.warnings) out << "[etlconvert] warning: " << w << "\n";
 
-  auto reader = trace::TraceReader::open(out);
+  auto reader = trace::TraceReader::open(outFile);
   ASSERT_TRUE(reader.ok()) << reader.error().toString();
   EXPECT_EQ(reader->header().platform, trace::kPlatformWindows);
   EXPECT_EQ(reader->header().flags & trace::kFlagPartial, 0u);
   auto strings = reader->readStrings();
   auto threads = reader->readThreads();
-  auto modules = reader->readModules();
+  auto modules = reader->readModuleInfos();
   auto samples = reader->readSamples();
   auto switches = reader->readContextSwitches();
   auto nodes = reader->readCallstackNodes();
@@ -205,10 +225,10 @@ TEST(EtlConvertWindows, ConvertsRealTestbedEtl) {
   // At least one module is identified by PDB GUID; the testbed exe matches its own PE header.
   const trace::StringTable& strs = *strings;
   uint32_t rsds = 0;
-  const trace::ModuleRec* testbedModule = nullptr;
+  const trace::ModuleInfo* testbedModule = nullptr;
   uint32_t testbedModuleIdx = kInvalidIdx;
   for (size_t i = 0; i < modules->size(); ++i) {
-    const trace::ModuleRec& m = (*modules)[i];
+    const trace::ModuleInfo& m = (*modules)[i];
     if (m.id_kind == trace::kModuleIdPdb) ++rsds;
     if (m.pid == pid && endsWith(lower(std::string(strs.get(m.path))), "tachyon-testbed.exe")) {
       testbedModule = &m;
@@ -221,7 +241,7 @@ TEST(EtlConvertWindows, ConvertsRealTestbedEtl) {
   ASSERT_TRUE(pe.ok()) << pe.error().toString();
   if (pe->hasCodeView) {
     EXPECT_EQ(testbedModule->id_kind, trace::kModuleIdPdb);
-    EXPECT_EQ(std::memcmp(testbedModule->id, pe->guid, 16), 0);
+    EXPECT_EQ(std::memcmp(testbedModule->id.data(), pe->guid, 16), 0);
     EXPECT_EQ(testbedModule->age, pe->age);
   }
 
@@ -237,15 +257,14 @@ TEST(EtlConvertWindows, ConvertsRealTestbedEtl) {
     ++inExe;
     byName[names.nameOf(leaf.addr_or_rva)]++;
   }
-  std::cout << "[etlconvert] leaf samples in tachyon-testbed.exe: " << inExe << " of " << samples->size()
-            << "\n";
+  out << "[etlconvert] leaf samples in tachyon-testbed.exe: " << inExe << " of " << samples->size() << "\n";
   EXPECT_GT(inExe, samples->size() / 4);
   std::vector<std::pair<uint64_t, std::string>> ranked;
   for (const auto& [name, n] : byName) ranked.emplace_back(n, name);
   std::sort(ranked.rbegin(), ranked.rend());
   for (size_t i = 0; i < ranked.size() && i < 8; ++i)
-    std::cout << "[etlconvert]   " << ranked[i].first << "  "
-              << (ranked[i].second.empty() ? "<no symbol>" : ranked[i].second) << "\n";
+    out << "[etlconvert]   " << ranked[i].first << "  "
+        << (ranked[i].second.empty() ? "<no symbol>" : ranked[i].second) << "\n";
 
   auto countOf = [&](const char* needle) -> uint64_t {
     uint64_t total = 0;
@@ -258,16 +277,17 @@ TEST(EtlConvertWindows, ConvertsRealTestbedEtl) {
   const uint64_t b = countOf("hot_b");
   const uint64_t c = countOf("hot_c");
   if (!names.usable() || a + b + c == 0) {
-    std::cout
-        << "[etlconvert] hot_a/hot_b/hot_c ranking skipped: PDB symbols not available next to the exe\n";
+    out << "[etlconvert] hot_a/hot_b/hot_c ranking skipped: PDB symbols not available next to the exe\n";
   } else {
-    std::cout << "[etlconvert] hot_a=" << a << " hot_b=" << b << " hot_c=" << c << "\n";
+    out << "[etlconvert] hot_a=" << a << " hot_b=" << b << " hot_c=" << c << "\n";
     EXPECT_GT(a, b);
     EXPECT_GT(b, c);
   }
 
+  RecordProperty("summary", out.text());
+  std::ofstream(std::filesystem::path(TACHYON_BINARY_DIR) / "etlconvert_real_summary.txt") << out.text();
   std::filesystem::remove(etl, ec);
-  std::filesystem::remove(out, ec);
+  std::filesystem::remove(outFile, ec);
 }
 
 }  // namespace

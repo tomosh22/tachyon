@@ -568,8 +568,8 @@ struct ConversionPipeline::Impl final : ParentListener {
         s.rec.old_wait_reason = p.bytes[1];
         s.rec.old_wait_mode = p.bytes[2];
         s.rec.new_priority = p.bytes[3];
-        // reserved bit0: the stack belongs to a thread other than old_tid (see report; role is [VERIFY]).
-        s.rec.reserved = p.hasStack() && p.stackThread != p.tidB ? 1u : 0u;
+        s.rec.reserved =
+            p.hasStack() && p.stackThread != p.tidB ? trace::kSwitchFlagStackFromOtherThread : 0u;
         s.stack = ref;
         b.switches.push_back(s);
         ++stats.cswitchesWritten;
@@ -583,7 +583,8 @@ struct ConversionPipeline::Impl final : ParentListener {
         r.rec.readying_tid = p.tidB;
         r.rec.adjust_reason = p.bytes[0];
         r.rec.flags = p.bytes[1];
-        r.rec.reserved = p.hasStack() && p.stackThread != p.tidB ? 1 : 0;
+        r.rec.reserved =
+            p.hasStack() && p.stackThread != p.tidB ? trace::kSwitchFlagStackFromOtherThread : 0u;
         r.stack = ref;
         b.readies.push_back(r);
         ++stats.readiesWritten;
@@ -791,7 +792,7 @@ Result<ConvertStats> ConversionPipeline::finish() {
 
   std::vector<trace::ModuleRec> moduleRecs;
   moduleRecs.reserve(s.modules->modules().size());
-  for (const ModuleInfo& m : s.modules->modules()) {
+  for (const LoadedModule& m : s.modules->modules()) {
     trace::ModuleRec rec = m.rec;
     rec.path = w.internString(m.path);
     if (rec.load_ts == 0) rec.load_ts = startTs;
