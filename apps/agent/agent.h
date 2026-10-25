@@ -2,8 +2,9 @@
 //
 // State machine (one capture at a time):
 //   idle -> starting -> capturing -> converting -> done -> idle
-// `done` is transient: after conversion the agent emits state(done), capture_done, then state(idle), so
-// status requests observe `idle` again right after the capture_done event was sent. A start while the state
+// `done` is transient: after conversion the agent emits state(done), capture_done, then state(idle); the
+// state itself is already idle when capture_done is emitted, so a status request or start sent in reaction to
+// capture_done (or error) never observes `done`. A start while the state
 // is not idle is rejected with EBUSY. A failed start or conversion returns to idle (conversion failures
 // additionally emit an `error` event).
 //
@@ -122,6 +123,8 @@ class Agent final : public control::IRequestHandler {
   void watcherLoop();
   void setStateLocked(capture::CaptureState state, double progress);
   void emit(const control::Event& event);
+  // Locked: state -> idle, then emits `finalEvent` and state(idle) (see the definition for the ordering).
+  void finishCaptureLocked(const control::Event& finalEvent);
   void conversionWorker();
 
   // The instrumentation ingest of the running capture, or null.

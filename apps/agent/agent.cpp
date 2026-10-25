@@ -310,12 +310,21 @@ void Agent::conversionWorker() {
     TACHYON_LOG_INFO("agent: capture done: {} ({} events lost)", result->tracePath.string(),
                      result->eventsLost);
     setStateLocked(CaptureState::Done, 1.0);
-    emit(CaptureDoneEvent{toSummary(*result, std::move(warnings))});
+    finishCaptureLocked(CaptureDoneEvent{toSummary(*result, std::move(warnings))});
   } else {
     TACHYON_LOG_ERROR("agent: conversion failed: {}", result.error().toString());
-    emit(ErrorEvent{result.error().message});
+    finishCaptureLocked(ErrorEvent{result.error().message});
   }
-  setStateLocked(CaptureState::Idle, 0.0);
+}
+
+void Agent::finishCaptureLocked(const Event& finalEvent) {
+  // The state is idle before anyone can see the final event, so a client that reacts to capture_done (or
+  // error) with a status request or a new start never meets `done`. The event order is unchanged:
+  // state(done), capture_done, state(idle).
+  m_state.store(CaptureState::Idle);
+  m_progress.store(0.0);
+  emit(finalEvent);
+  emit(StateEvent{CaptureState::Idle, 0.0});
 }
 
 Response Agent::handleFlush(const FlushRequest& req) {
@@ -490,11 +499,11 @@ void Agent::shutdown() {
     if (result.ok()) {
       TACHYON_LOG_INFO("agent: shutdown stopped capture: {}", result->tracePath.string());
       setStateLocked(CaptureState::Done, 1.0);
-      emit(CaptureDoneEvent{toSummary(*result, std::move(warnings))});
+      finishCaptureLocked(CaptureDoneEvent{toSummary(*result, std::move(warnings))});
     } else {
       TACHYON_LOG_ERROR("agent: shutdown stop failed: {}", result.error().toString());
+      setStateLocked(CaptureState::Idle, 0.0);
     }
-    setStateLocked(CaptureState::Idle, 0.0);
   }
   std::thread worker;
   {
