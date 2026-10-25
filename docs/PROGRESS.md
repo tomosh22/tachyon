@@ -55,7 +55,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
 | WP-70 | `perf_event_open` backend | — | not started | wp/70-perf-backend | |
 | WP-71 | Scheduler events | — | not started | wp/71-sched | |
-| WP-72 | DWARF symbol provider | B | not started | wp/72-dwarf | |
+| WP-72 | DWARF symbol provider | B | in progress | wp/72-dwarf-provider | 2026-10-25 |
 | WP-73 | Linux SDK transport and privileges | — | not started | wp/73-linux-sdk | |
 
 ## Milestone gates
