@@ -32,6 +32,10 @@ struct ScopeStack {
   void reset() { *this = ScopeStack(); }
 };
 
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)  // padded due to alignas: intentional (false-sharing avoidance)
+#endif
 struct alignas(64) ThreadRing {
   // ---- producer-owned ----
   std::atomic<uint64_t> head{0};  // total bytes ever written; published with release
@@ -53,6 +57,9 @@ struct alignas(64) ThreadRing {
   // ---- shared ----
   std::atomic<bool> retired{false};  // set by the owning thread's exit; never cleared
 };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 // Producer: free bytes check. `bytes` must include any headroom the caller wants to keep. Thread-safe only
 // for the owning thread.
