@@ -28,12 +28,13 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace tachyon::symbols {
 namespace {
 
-constexpr DWORD kUndnameNameOnly = 0x1000;             // UNDNAME_NAME_ONLY (dbghelp.h)
 constexpr uint64_t kMaxPublicDisplacement = 1u << 20;  // reject public symbols further away than this
 
 template <typename T>
@@ -182,45 +183,30 @@ class ComSession final : public IDiaSymbolSession {
   ComSession(std::shared_ptr<DiaLibrary> lib, ComPtr<IDiaDataSource> source, ComPtr<IDiaSession> session)
       : m_lib(std::move(lib)), m_source(std::move(source)), m_session(std::move(session)) {}
 
-  std::optional<DiaRawFunction> findFunction(uint64_t rva) override {
-    if (rva > std::numeric_limits<DWORD>::max()) return std::nullopt;
+  // Enumerates the global function and public symbols once into sorted tables, so address lookups are binary
+  // searches in this process instead of a DIA query per address (a failing findSymbolByRVA costs ~190 us).
+  HRESULT buildTables() {
     ensureComInitialized();
-    const DWORD rva32 = static_cast<DWORD>(rva);
-    ComPtr<IDiaSymbol> sym;
-    if (m_session->findSymbolByRVA(rva32, SymTagFunction, sym.put()) == S_OK && sym) {
-      DWORD start = 0;
-      ULONGLONG length = 0;
-      if (SUCCEEDED(sym->get_relativeVirtualAddress(&start)) && SUCCEEDED(sym->get_length(&length)) &&
-          rva32 >= start && (length == 0 || rva32 - start < length)) {
-        DiaRawFunction out;
-        out.startRva = start;
-        out.size = length;
-        BSTR name = nullptr;
-        if (SUCCEEDED(sym->get_name(&name))) out.name = takeBstr(name);
-        m_lastFunction = std::move(sym);
-        m_lastFunctionStart = start;
-        return out;
-      }
-    }
-    sym.reset();
-    if (m_session->findSymbolByRVA(rva32, SymTagPublicSymbol, sym.put()) != S_OK || !sym) return std::nullopt;
-    DWORD start = 0;
-    if (FAILED(sym->get_relativeVirtualAddress(&start)) || rva32 < start) return std::nullopt;
-    if (rva32 - start > kMaxPublicDisplacement) return std::nullopt;
-    ULONGLONG length = 0;
-    sym->get_length(&length);
-    if (length != 0 && rva32 - start >= length) return std::nullopt;
-    DiaRawFunction out;
-    out.startRva = start;
-    out.size = length;
-    out.isPublicSymbol = true;
-    BSTR name = nullptr;
-    if (SUCCEEDED(sym->get_undecoratedNameEx(kUndnameNameOnly, &name)) && name != nullptr) {
-      out.name = takeBstr(name);
-    } else if (SUCCEEDED(sym->get_name(&name))) {
-      out.name = takeBstr(name);
-    }
-    return out;
+    ComPtr<IDiaSymbol> global;
+    HRESULT hr = m_session->get_globalScope(global.put());
+    if (FAILED(hr) || !global) return FAILED(hr) ? hr : E_FAIL;
+    enumerate(global.get(), SymTagFunction, /*isPublic=*/false, m_functions);
+    enumerate(global.get(), SymTagPublicSymbol, /*isPublic=*/true, m_publics);
+    return S_OK;
+  }
+
+  std::optional<DiaRawFunction> findFunction(uint64_t rva) override {
+    // Private function symbols first (the last one starting at or before rva), then public symbols, whose
+    // extent runs to the next public symbol (capped), since public symbols carry no length.
+    if (const Entry* f = containing(m_functions, rva)) return toRaw(*f, f->size, false);
+    auto it = std::upper_bound(m_publics.begin(), m_publics.end(), rva,
+                               [](uint64_t v, const Entry& e) { return v < e.rva; });
+    if (it == m_publics.begin()) return std::nullopt;
+    const Entry& pub = *(it - 1);
+    uint64_t extent = kMaxPublicDisplacement;
+    if (it != m_publics.end()) extent = std::min<uint64_t>(extent, it->rva - pub.rva);
+    if (rva - pub.rva >= extent) return std::nullopt;
+    return toRaw(pub, extent, true);
   }
 
   std::optional<DiaRawLine> findLine(uint64_t rva) override {
@@ -241,19 +227,10 @@ class ComSession final : public IDiaSymbolSession {
     if (rva > std::numeric_limits<DWORD>::max()) return out;
     ensureComInitialized();
     const DWORD rva32 = static_cast<DWORD>(rva);
-    if (!m_lastFunction || m_lastFunctionStart != function.startRva) {
-      m_lastFunction.reset();
-      ComPtr<IDiaSymbol> sym;
-      if (m_session->findSymbolByRVA(static_cast<DWORD>(function.startRva), SymTagFunction, sym.put()) !=
-              S_OK ||
-          !sym) {
-        return out;
-      }
-      m_lastFunction = std::move(sym);
-      m_lastFunctionStart = function.startRva;
-    }
+    IDiaSymbol* parent = functionSymbol(function.startRva);
+    if (parent == nullptr) return out;
     ComPtr<IDiaEnumSymbols> frames;
-    if (m_lastFunction->findInlineFramesByRVA(rva32, frames.put()) != S_OK || !frames) return out;
+    if (parent->findInlineFramesByRVA(rva32, frames.put()) != S_OK || !frames) return out;
     for (;;) {
       ComPtr<IDiaSymbol> inl;
       ULONG fetched = 0;
@@ -296,11 +273,79 @@ class ComSession final : public IDiaSymbolSession {
   }
 
  private:
+  struct Entry {
+    uint32_t rva = 0;
+    uint32_t size = 0;
+    std::string name;
+  };
+
+  static DiaRawFunction toRaw(const Entry& e, uint64_t size, bool isPublic) {
+    DiaRawFunction out;
+    out.startRva = e.rva;
+    out.size = size;
+    out.name = e.name;
+    out.isPublicSymbol = isPublic;
+    return out;
+  }
+
+  // The entry with the greatest start <= rva that also covers rva, or nullptr.
+  static const Entry* containing(const std::vector<Entry>& table, uint64_t rva) {
+    auto it = std::upper_bound(table.begin(), table.end(), rva,
+                               [](uint64_t v, const Entry& e) { return v < e.rva; });
+    if (it == table.begin()) return nullptr;
+    --it;
+    return (it->size != 0 && rva - it->rva < it->size) ? &*it : nullptr;
+  }
+
+  void enumerate(IDiaSymbol* global, enum SymTagEnum tag, bool isPublic, std::vector<Entry>& out) {
+    ComPtr<IDiaEnumSymbols> en;
+    if (FAILED(global->findChildren(tag, nullptr, nsNone, en.put())) || !en) return;
+    for (;;) {
+      IDiaSymbol* batch[64] = {};
+      ULONG fetched = 0;
+      const HRESULT hr = en->Next(64, batch, &fetched);
+      if (FAILED(hr) || fetched == 0) break;
+      for (ULONG i = 0; i < fetched; ++i) {
+        ComPtr<IDiaSymbol> sym;
+        *sym.put() = batch[i];
+        DWORD rva = 0;
+        if (FAILED(sym->get_relativeVirtualAddress(&rva)) || rva == 0) continue;
+        ULONGLONG length = 0;
+        if (!isPublic) sym->get_length(&length);
+        if (!isPublic && length == 0) continue;
+        Entry e;
+        e.rva = rva;
+        e.size = static_cast<uint32_t>(std::min<ULONGLONG>(length, 0xFFFFFFFFull));
+        BSTR name = nullptr;
+        // Public names stay decorated here; DiaSymbolProvider undecorates each distinct function once.
+        if (SUCCEEDED(sym->get_name(&name))) e.name = takeBstr(name);
+        out.push_back(std::move(e));
+      }
+      if (hr == S_FALSE) break;
+    }
+    std::stable_sort(out.begin(), out.end(), [](const Entry& a, const Entry& b) { return a.rva < b.rva; });
+  }
+
+  // The function symbol starting at `start` (needed as the parent of inline queries), cached per function.
+  IDiaSymbol* functionSymbol(uint64_t start) {
+    auto it = m_symbols.find(start);
+    if (it != m_symbols.end()) return it->second.get();
+    ComPtr<IDiaSymbol> sym;
+    if (m_session->findSymbolByRVA(static_cast<DWORD>(start), SymTagFunction, sym.put()) != S_OK || !sym) {
+      m_symbols.emplace(start, ComPtr<IDiaSymbol>());
+      return nullptr;
+    }
+    IDiaSymbol* raw = sym.get();
+    m_symbols.emplace(start, std::move(sym));
+    return raw;
+  }
+
   std::shared_ptr<DiaLibrary> m_lib;  // declared first: destroyed last, after the COM objects below
   ComPtr<IDiaDataSource> m_source;
   ComPtr<IDiaSession> m_session;
-  ComPtr<IDiaSymbol> m_lastFunction;  // function symbol of the last findFunction (reused by findInlines)
-  uint64_t m_lastFunctionStart = 0;
+  std::vector<Entry> m_functions;  // private function symbols, sorted by rva
+  std::vector<Entry> m_publics;    // public symbols, sorted by rva
+  std::unordered_map<uint64_t, ComPtr<IDiaSymbol>> m_symbols;
 };
 
 class ComOpener final : public IDiaSessionOpener {
@@ -328,8 +373,10 @@ class ComOpener final : public IDiaSessionOpener {
     ComPtr<IDiaSession> session;
     hr = source->openSession(session.put());
     if (FAILED(hr)) return mapDiaLoadError(static_cast<uint32_t>(hr), pdbFile);
-    return std::unique_ptr<IDiaSymbolSession>(
-        std::make_unique<ComSession>(m_lib, std::move(source), std::move(session)));
+    auto result = std::make_unique<ComSession>(m_lib, std::move(source), std::move(session));
+    hr = result->buildTables();
+    if (FAILED(hr)) return mapDiaLoadError(static_cast<uint32_t>(hr), pdbFile);
+    return std::unique_ptr<IDiaSymbolSession>(std::move(result));
   }
 
  private:

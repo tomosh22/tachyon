@@ -46,6 +46,7 @@ struct Testbed {
   fs::path pdb;
   model::Module module;
   std::vector<etlconvert::PeFunctionRange> ranges;
+  uint32_t sizeOfImage = 0;
   bool ok = false;
   std::string why;
 };
@@ -57,6 +58,7 @@ Testbed loadTestbed() {
     t.why = "testbed has no CodeView record";
     return t;
   }
+  t.sizeOfImage = pe.value().sizeOfImage;
   t.pdb = pe.value().pdbPath;
   if (!fs::exists(t.pdb)) t.pdb = fs::path(t.exe).replace_extension(".pdb");
   if (!fs::exists(t.pdb)) {
@@ -89,32 +91,25 @@ class DiaWindows : public ::testing::Test {
     m_provider = std::make_unique<DiaSymbolProvider>(m_strings, m_opener);
     auto r = m_provider->load(m_tb.module, m_tb.pdb);
     ASSERT_TRUE(r.ok()) << r.error().toString();
-    // Function start rva by name, from the exception directory.
-    size_t unresolved = 0;
-    size_t shifted = 0;
-    for (const auto& range : m_tb.ranges) {
-      const ResolvedAddress a = m_provider->resolve(range.beginRva);
-      if (!a.resolved) {
-        ++unresolved;
+    // Function start rva by name. Leaf functions (hot_a & co) have no .pdata entry, so walk the PDB's own
+    // function extents from the start of .text instead of the exception directory.
+    uint32_t hi = 0;
+    for (const auto& range : m_tb.ranges) hi = std::max(hi, range.endRva);
+    hi = std::min<uint32_t>(m_tb.sizeOfImage, hi + 0x10000);
+    for (uint32_t rva = 0x1000; rva < hi;) {
+      auto b = m_provider->functionBounds(rva);
+      if (!b.ok() || b.value().size == 0) {
+        ++rva;
         continue;
       }
-      const std::string name(m_strings.get(a.function));
-      if (a.functionStartRva != range.beginRva) {
-        ++shifted;
-        if (name.find("hot") != std::string::npos || name.find("inline") != std::string::npos) {
-          std::printf("[dia] pdata begin %x resolves to %s starting at %llx\n", range.beginRva, name.c_str(),
-                      static_cast<unsigned long long>(a.functionStartRva));
-        }
-        continue;
-      }
-      if (name.find("hot") != std::string::npos || name.find("inline") != std::string::npos ||
-          name.find("spin") != std::string::npos) {
-        std::printf("[dia] pdata function %x..%x = %s\n", range.beginRva, range.endRva, name.c_str());
-      }
-      m_byName.emplace(name, range);
+      const std::string name(m_strings.get(b.value().name));
+      const uint32_t start = static_cast<uint32_t>(b.value().startRva);
+      const uint32_t end = start + static_cast<uint32_t>(b.value().size);
+      m_byName.emplace(name, etlconvert::PeFunctionRange{start, end});
+      rva = std::max(rva + 1, end);
     }
-    std::printf("[dia] %zu pdata functions: %zu named, %zu unresolved, %zu with a different start\n",
-                m_tb.ranges.size(), m_byName.size(), unresolved, shifted);
+    std::printf("[dia] %zu functions walked in the PDB (%zu pdata entries)\n", m_byName.size(),
+                m_tb.ranges.size());
   }
 
   SymbolStringTable m_strings;
@@ -151,45 +146,76 @@ TEST_F(DiaWindows, ResolvesHotFunctionsToFileAndLine) {
 TEST_F(DiaWindows, InlineScenarioYieldsInlineChains) {
   const auto it = m_byName.find("inline_hot_loop");
   ASSERT_NE(it, m_byName.end());
-  std::set<std::string> innermost;
-  size_t withInlines = 0;
+  const uint64_t loopStart = it->second.beginRva;
+  // The optimizer splits the loop into several blocks; every .pdata block that belongs to the function
+  // counts.
+  std::vector<etlconvert::PeFunctionRange> blocks;
+  blocks.push_back(it->second);
+  for (const auto& range : m_tb.ranges) {
+    const ResolvedAddress a = m_provider->resolve(range.beginRva);
+    if (a.resolved && a.functionStartRva == loopStart && range.beginRva != loopStart) blocks.push_back(range);
+  }
   std::map<std::string, size_t> chains;
-  for (uint64_t rva = it->second.beginRva; rva < it->second.endRva; ++rva) {
-    const ResolvedAddress a = m_provider->resolve(rva);
-    ASSERT_TRUE(a.resolved);
-    EXPECT_EQ(m_strings.get(a.function), "inline_hot_loop");  // the physical frame, never the inlinee
-    if (a.inlines.empty()) continue;
-    ++withInlines;
-    innermost.insert(std::string(m_strings.get(a.inlines.front().function)));
-    std::string chain;
-    for (const InlineFrame& f : a.inlines) {
-      chain += std::string(m_strings.get(f.function)) + ":" + std::to_string(f.line) + " < ";
-    }
-    ++chains[chain];
-    for (const InlineFrame& f : a.inlines) {
-      EXPECT_FALSE(m_strings.get(f.function).empty());
+  std::set<std::string> allNames;
+  size_t withInlines = 0;
+  bool burnInsideInlineA = false;
+  for (const auto& block : blocks) {
+    for (uint64_t rva = block.beginRva; rva < block.endRva; ++rva) {
+      const ResolvedAddress a = m_provider->resolve(rva);
+      ASSERT_TRUE(a.resolved);
+      EXPECT_EQ(m_strings.get(a.function), "inline_hot_loop");  // the physical frame, never the inlinee
+      if (a.inlines.empty()) continue;
+      ++withInlines;
+      std::string chain;
+      int burnAt = -1;
+      int inlineAAt = -1;
+      for (size_t i = 0; i < a.inlines.size(); ++i) {
+        const std::string name(m_strings.get(a.inlines[i].function));
+        EXPECT_FALSE(name.empty());
+        allNames.insert(name);
+        chain += name + ":" + std::to_string(a.inlines[i].line) + " < ";
+        if (name.find("::burn") != std::string::npos) burnAt = static_cast<int>(i);
+        if (name.find("inline_a") != std::string::npos) inlineAAt = static_cast<int>(i);
+      }
+      ++chains[chain];
+      if (burnAt >= 0 && inlineAAt >= 0 && burnAt < inlineAAt) burnInsideInlineA = true;  // innermost first
     }
   }
   EXPECT_GT(withInlines, 0u);
   const auto has = [&](const char* needle) {
-    return std::any_of(innermost.begin(), innermost.end(),
+    return std::any_of(allNames.begin(), allNames.end(),
                        [&](const std::string& n) { return n.find(needle) != std::string::npos; });
   };
-  EXPECT_TRUE(has("inline_a")) << "innermost inlines seen: " << innermost.size();
+  EXPECT_TRUE(has("inline_a")) << "inline names seen: " << allNames.size();
   EXPECT_TRUE(has("inline_b"));
   EXPECT_TRUE(has("inline_c"));
-  for (const std::string& n : innermost) std::printf("[dia] inline_hot_loop inlinee: %s\n", n.c_str());
+  EXPECT_TRUE(burnInsideInlineA) << "burn must precede (be inside) inline_a in an innermost-first chain";
   for (const auto& [chain, count] : chains) std::printf("[dia] chain x%zu: %s\n", count, chain.c_str());
 }
 
-TEST_F(DiaWindows, FunctionBoundsMatchTheExceptionDirectory) {
+TEST_F(DiaWindows, FunctionBoundsAreConsistentWithTheExceptionDirectory) {
   const auto it = m_byName.find("hot_a");
   ASSERT_NE(it, m_byName.end());
-  auto b = m_provider->functionBounds(it->second.beginRva + 1);
+  const uint64_t start = it->second.beginRva;
+  auto b = m_provider->functionBounds(start + 1);
   ASSERT_TRUE(b.ok()) << b.error().toString();
-  EXPECT_EQ(b.value().startRva, it->second.beginRva);
+  EXPECT_EQ(b.value().startRva, start);
   EXPECT_EQ(b.value().size, it->second.endRva - it->second.beginRva);
+  EXPECT_GT(b.value().size, 0u);
   EXPECT_EQ(m_strings.get(b.value().name), "hot_a");
+  // The last byte is inside the function.
+  auto last = m_provider->functionBounds(start + b.value().size - 1);
+  ASSERT_TRUE(last.ok());
+  EXPECT_EQ(last.value().startRva, start);
+  // Where .pdata has an entry for a function (non-leaf), the PDB's extent does not run past it.
+  size_t compared = 0;
+  for (const auto& range : m_tb.ranges) {
+    const auto bounds = m_provider->functionBounds(range.beginRva);
+    if (!bounds.ok() || bounds.value().startRva != range.beginRva) continue;
+    EXPECT_LE(bounds.value().startRva + bounds.value().size, range.endRva + 16u);
+    ++compared;
+  }
+  EXPECT_GT(compared, 100u);
   EXPECT_FALSE(m_provider->functionBounds(0xFFFFFFF0u).ok());
   EXPECT_EQ(m_provider->functionBounds(0xFFFFFFF0u).error().code, ErrorCode::NotFound);
 }
