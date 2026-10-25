@@ -31,10 +31,11 @@ using model::ThreadState;
 using testutil::HandModel;
 using testutil::ScopeBuilder;
 
+// Budget 50 ms (200 ms under asan); asserted at 2x like the perf budgets, so a loaded runner does not flake.
 #ifdef TACHYON_TEST_ASAN
-constexpr double kBudgetMs = 200.0;
+constexpr double kBudgetMs = 2 * 200.0;
 #else
-constexpr double kBudgetMs = 50.0;
+constexpr double kBudgetMs = 2 * 50.0;
 #endif
 
 // 4 threads x 250 000 scopes, two fibers per thread switching every 4 scopes: 1 M scopes in 8 big lanes.
