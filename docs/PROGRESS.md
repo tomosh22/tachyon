@@ -27,7 +27,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
 | WP-35 | Function and scope statistics, frames | C | not started | wp/35-stats | |
 | WP-36 | Timeline LOD | C | in progress | wp/36-lod | 2026-10-25 |
-| WP-40 | Viewer shell | D | in review | wp/40-viewer-shell | 2026-10-25 |
+| WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | not started | wp/41-session-explorer | |
 | WP-42 | Threads timeline | D | not started | wp/42-timeline | |
 | WP-43 | Call graph panel | D | not started | wp/43-call-graph | |
@@ -141,6 +141,12 @@ tachyon-testbed --scenario spin --duration 30
 tachyon-cli stop --wait                                 (check events_lost == 0 in capture_done)
 ```
 Hardening follow-ups assigned to WP-13: pipe client SQOS flags (SECURITY_SQOS_PRESENT|SECURITY_IDENTIFICATION); an RAII guard for the agent's flush-in-flight flag; call the interval setter with handle 0 directly.
+
+### WP-40 (any desktop)
+```
+build/<preset>/bin/tachyon-viewer build/<preset>/fixtures/medium.tachyon
+```
+Check by hand: window opens, Trace Info panel shows 16 threads / 7,486,737 samples, Ctrl+P palette, File > Open browser, drag-and-drop, View > Theme / UI Scale, layout persists across restarts. The viewer has only been run headless and under Xvfb so far.
 
 ## Open questions (Part 7) and assumed defaults
 
