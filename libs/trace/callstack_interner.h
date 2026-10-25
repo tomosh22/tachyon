@@ -3,6 +3,7 @@
 
 #include "core/hash.h"
 #include "core/strong_id.h"
+#include "trace/huge_allocator.h"
 #include "trace/trace_format.h"
 
 #include <cassert>
@@ -79,8 +80,8 @@ class CallstackInterner {
   CallstackIdx insertNew(size_t slot, CallstackIdx parent, FrameIdx frame);
   void rehash(size_t newSlots);
 
-  std::vector<CallstackNodeRec> m_nodes;
-  std::vector<uint32_t> m_table;
+  std::vector<CallstackNodeRec, HugePageAllocator<CallstackNodeRec>> m_nodes;
+  std::vector<uint32_t, HugePageAllocator<uint32_t>> m_table;
   double m_worstAfterResize = 0;
 };
 
