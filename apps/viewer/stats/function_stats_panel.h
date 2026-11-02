@@ -154,6 +154,9 @@ class FunctionStatsPanel final : public IPanel {
   void applyIndex(const PanelContext& context, std::shared_ptr<const stats::SearchIndex> index);
   void applyResult(const PanelContext& context, std::shared_ptr<const StatsResult> result);
   void runSearch();
+  // Takes the result and its highlight off the timeline; with `requery` the statistics are queried again
+  // the next time the panel updates.
+  void clearHighlight(const PanelContext& context, bool requery);
   void applyQueryText(const std::string& text);
   void resetDocumentState();
   void useEntry(const PanelContext& context, stats::SearchEntry entry, bool publishSelection);

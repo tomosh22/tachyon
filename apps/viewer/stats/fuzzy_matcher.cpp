@@ -43,31 +43,68 @@ FuzzyMatch make(MatchTier tier, int64_t intra) {
   return FuzzyMatch{tier, static_cast<int32_t>(tier) * kBase + clampIntra(intra)};
 }
 
-// Greedy forward match, tightened backwards: positions of the query characters in `lower` or empty.
-bool subsequencePositions(std::string_view q, std::string_view lower, uint32_t* pos) {
-  size_t at = 0, last = 0;
-  for (char c : q) {
-    const void* hit = at < lower.size() ? std::memchr(lower.data() + at, c, lower.size() - at) : nullptr;
-    if (!hit) return false;
-    last = static_cast<size_t>(static_cast<const char*>(hit) - lower.data());
-    at = last + 1;
-  }
-  // Tightest window ending at `last`: walk backwards.
-  size_t k = q.size();
-  size_t start = last;
-  for (size_t i = last + 1; i-- > 0;) {
-    if (lower[i] == q[k - 1]) {
-      if (--k == 0) {
-        start = i;
-        break;
+size_t utf8Length(unsigned char lead) {
+  if (lead < 0x80) return 1;
+  if (lead >= 0xC2 && lead <= 0xDF) return 2;
+  if (lead >= 0xE0 && lead <= 0xEF) return 3;
+  if (lead >= 0xF0 && lead <= 0xF4) return 4;
+  return 0;  // a continuation byte or an invalid lead
+}
+
+// Positions (byte offsets of the start of each query code point) of the subsequence match in `lower`,
+// tightened to the shortest window ending at the greedy match's end. Query units are whole UTF-8 code points,
+// so a match never starts or ends inside a multi-byte sequence of the name.
+bool subsequencePositions(const FuzzyQuery& q, std::string_view lower, uint32_t* pos) {
+  const std::string_view sub = q.sub;
+  const size_t count = q.unitCount;
+  if (q.ascii) {
+    size_t at = 0, last = 0;
+    for (char c : sub) {
+      const void* hit = at < lower.size() ? std::memchr(lower.data() + at, c, lower.size() - at) : nullptr;
+      if (!hit) return false;
+      last = static_cast<size_t>(static_cast<const char*>(hit) - lower.data());
+      at = last + 1;
+    }
+    size_t k = sub.size();
+    size_t start = last;
+    for (size_t i = last + 1; i-- > 0;) {
+      if (lower[i] == sub[k - 1]) {
+        if (--k == 0) {
+          start = i;
+          break;
+        }
       }
     }
+    size_t cur = start, i = 0;
+    for (char c : sub) {
+      while (lower[cur] != c) ++cur;
+      pos[i++] = static_cast<uint32_t>(cur);
+      ++cur;
+    }
+    return true;
   }
-  size_t cur = start, i = 0;
-  for (char c : q) {
-    while (lower[cur] != c) ++cur;
-    pos[i++] = static_cast<uint32_t>(cur);
-    ++cur;
+  const auto unit = [&](size_t k) { return sub.substr(q.unitOffset[k], q.unitLength[k]); };
+  size_t at = 0, last = 0;
+  for (size_t k = 0; k < count; ++k) {
+    const size_t hit = lower.find(unit(k), at);
+    if (hit == std::string_view::npos) return false;
+    last = hit;
+    at = hit + q.unitLength[k];
+  }
+  size_t end = last + q.unitLength[count - 1];
+  size_t start = last;
+  for (size_t k = count; k-- > 0;) {
+    const size_t len = q.unitLength[k];
+    if (end < len) return false;
+    start = lower.rfind(unit(k), end - len);
+    if (start == std::string_view::npos) return false;
+    end = start;
+  }
+  size_t cur = start;
+  for (size_t k = 0; k < count; ++k) {
+    cur = lower.find(unit(k), cur);
+    pos[k] = static_cast<uint32_t>(cur);
+    cur += q.unitLength[k];
   }
   return true;
 }
@@ -76,26 +113,27 @@ FuzzyMatch subsequenceMatch(const FuzzyQuery& q, std::string_view text, std::str
   uint32_t stackPos[64];
   std::vector<uint32_t> heapPos;  // only for queries longer than 64 characters
   uint32_t* pos = stackPos;
-  if (q.lower.size() > 64) {
-    heapPos.resize(q.lower.size());
+  const size_t count = q.unitCount;
+  if (count > 64) {
+    heapPos.resize(count);
     pos = heapPos.data();
   }
-  if (!subsequencePositions(q.lower, lower, pos)) return {};
-  const size_t count = q.lower.size();
+  if (!subsequencePositions(q, lower, pos)) return {};
   int64_t s = 0;
   int run = 0;
   for (size_t i = 0; i < count; ++i) {
     const uint32_t p = pos[i];
     s += 16;
-    if (i > 0 && p == pos[i - 1] + 1) {
+    if (i > 0 && p == pos[i - 1] + q.unitLength[i - 1]) {
       ++run;
       s += 12 * std::min(run, 4);
     } else {
       run = 0;
-      if (i > 0) s -= 3 + std::min<int64_t>(p - pos[i - 1] - 1, 10);
+      if (i > 0) s -= 3 + std::min<int64_t>(p - pos[i - 1] - q.unitLength[i - 1], 10);
     }
     if (isWordStart(text, p)) s += 24;
-    if (isUpper(static_cast<unsigned char>(q.typed[i])) && text[p] == q.typed[i]) s += 4;
+    const char typed = q.subTyped[q.unitOffset[i]];
+    if (isUpper(static_cast<unsigned char>(typed)) && text[p] == typed) s += 4;
   }
   s -= std::min<int64_t>(pos[0], 20);
   return make(MatchTier::Subsequence, s);
@@ -127,18 +165,48 @@ FuzzyMatch matchWithFind(const FuzzyQuery& q, std::string_view text, std::string
 
 FuzzyQuery FuzzyQuery::make(std::string_view text) {
   FuzzyQuery q;
-  for (char c : text) {
-    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
-    q.typed.push_back(c);
-    q.lower.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
+  const auto isSpace = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+  const auto fold = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
+  q.valid = true;
+  for (size_t i = 0; i < text.size() && q.valid;) {
+    const size_t n = utf8Length(static_cast<unsigned char>(text[i]));
+    if (n == 0 || i + n > text.size()) {
+      q.valid = false;
+      break;
+    }
+    for (size_t k = 1; k < n; ++k)
+      if ((static_cast<unsigned char>(text[i + k]) & 0xC0) != 0x80) q.valid = false;
+    i += n;
   }
+  if (!q.valid) return q;
+  size_t first = 0, last = text.size();
+  while (first < last && isSpace(text[first])) ++first;
+  while (last > first && isSpace(text[last - 1])) --last;
+  for (size_t i = first; i < last; ++i) {
+    q.typed.push_back(text[i]);
+    q.lower.push_back(fold(text[i]));
+    if (isSpace(text[i])) continue;
+    q.subTyped.push_back(text[i]);
+    q.sub.push_back(fold(text[i]));
+  }
+  q.ascii = true;
+  for (size_t i = 0; i < q.sub.size();) {
+    const size_t n = utf8Length(static_cast<unsigned char>(q.sub[i]));
+    if (n != 1) q.ascii = false;
+    q.unitOffset.push_back(static_cast<uint32_t>(i));
+    q.unitLength.push_back(static_cast<uint8_t>(n));
+    i += n;
+  }
+  q.unitCount = q.unitOffset.size();
   return q;
 }
 
 FuzzyMatch fuzzyMatch(const FuzzyQuery& query, std::string_view text, std::string_view lower) {
+  if (!query.valid) return {};  // a partial UTF-8 sequence never matches
   if (query.empty()) return FuzzyMatch{MatchTier::Prefix, kBase * static_cast<int32_t>(MatchTier::Prefix)};
-  if (query.lower.size() > text.size()) return {};
-  return matchWithFind(query, text, lower, lower.find(query.lower));
+  if (query.sub.size() > text.size()) return {};
+  const size_t found = query.lower.size() <= text.size() ? lower.find(query.lower) : std::string_view::npos;
+  return matchWithFind(query, text, lower, found);
 }
 
 FuzzyMatch fuzzyMatch(std::string_view query, std::string_view text) {
@@ -170,7 +238,7 @@ std::vector<FuzzyResult> FuzzyIndex::search(std::string_view query, size_t limit
 std::vector<FuzzyResult> FuzzyIndex::search(const FuzzyQuery& query, size_t limit) const {
   std::vector<FuzzyResult> out;
   const size_t count = size();
-  if (limit == 0 || count == 0) return out;
+  if (limit == 0 || count == 0 || !query.valid) return out;
   if (query.empty()) {
     const FuzzyMatch all{MatchTier::Prefix, kBase * static_cast<int32_t>(MatchTier::Prefix)};
     for (uint32_t i = 0; i < count && out.size() < limit; ++i) out.push_back({i, all});
@@ -185,18 +253,19 @@ std::vector<FuzzyResult> FuzzyIndex::search(const FuzzyQuery& query, size_t limi
     return a.index < b.index;
   };
   // Max-heap by "worse": the top is the worst of the kept results.
-  const size_t qn = query.lower.size();
+  const size_t qn = query.lower.size();    // contiguous match length (inner spaces kept)
+  const size_t minLen = query.sub.size();  // a subsequence match needs at least this many bytes
   const std::string_view q = query.lower;
   const std::string_view allText = m_text, allLower = m_lower;
   int64_t maxCase = 0;
-  for (char c : query.typed) maxCase += isUpper(static_cast<unsigned char>(c)) ? 4 : 0;
+  for (char c : query.subTyped) maxCase += isUpper(static_cast<unsigned char>(c)) ? 4 : 0;
   maxCase = std::min<int64_t>(maxCase, 2000);
   out.reserve(limit + 1);
   for (uint32_t i = 0; i < count; ++i) {
     const uint32_t off = m_offsets[i], len = m_offsets[i + 1] - m_offsets[i];
-    if (len < qn) continue;
+    if (len < minLen) continue;
     const std::string_view lower = allLower.substr(off, len);
-    const size_t found = lower.find(q);
+    const size_t found = len >= qn ? lower.find(q) : std::string_view::npos;
     const bool full = out.size() == limit;
     if (full) {
       const int32_t worst = out.front().match.score;

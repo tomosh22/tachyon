@@ -179,3 +179,47 @@ TEST(FuzzyMatcher, SearchEqualsBruteForceMatchOverTheIndex) {
     }
   }
 }
+
+TEST(FuzzyMatcher, WhitespaceIsTreatedConsistentlyOnBothSides) {
+  // Inner spaces of the query count in the contiguous tiers: "operator new" is not "operatornew".
+  EXPECT_EQ(fuzzyMatch("operator new", "operator new").tier, MatchTier::Exact);
+  EXPECT_EQ(fuzzyMatch("operator new", "operatornew").tier, MatchTier::Subsequence);
+  EXPECT_EQ(fuzzyMatch("operatornew", "operator new").tier, MatchTier::Subsequence);
+  EXPECT_EQ(fuzzyMatch("operator new", "operator new[]").tier, MatchTier::Prefix);
+  EXPECT_EQ(fuzzyMatch("  operator new  ", "operator new").tier, MatchTier::Exact);  // trimmed at the ends
+  const std::vector<std::string> names = {"operatornew", "operator new[]", "operator new", "operator delete"};
+  const auto order = ranked(names, "operator new");
+  ASSERT_GE(order.size(), 3u);
+  EXPECT_EQ(order[0], "operator new");
+  EXPECT_EQ(order[1], "operator new[]");
+  EXPECT_EQ(order[2], "operatornew");
+  // Template argument lists contain ", ".
+  const std::string tmpl = "std::map<int, std::string>::insert";
+  EXPECT_EQ(fuzzyMatch("map<int, std::string>", tmpl).tier, MatchTier::WordStart);
+  EXPECT_EQ(fuzzyMatch("map<int,std::string>", tmpl).tier, MatchTier::Subsequence);
+  EXPECT_EQ(fuzzyMatch("map<int, string>", tmpl).tier, MatchTier::Subsequence);
+  EXPECT_EQ(fuzzyMatch("int,std", "std::map<int, std::string>").tier, MatchTier::Subsequence);
+  EXPECT_FALSE(fuzzyMatch("map<int, float>", tmpl).matched());
+}
+
+TEST(FuzzyMatcher, Utf8IsMatchedByCodePointAndPartialSequencesNeverMatch) {
+  const std::string text = "Engine::caf\xC3\xA9_update";  // cafe with e-acute (C3 A9)
+  EXPECT_EQ(fuzzyMatch("caf\xC3\xA9", text).tier, MatchTier::WordStart);
+  EXPECT_EQ(fuzzyMatch("cf\xC3\xA9u", text).tier, MatchTier::Subsequence);
+  EXPECT_TRUE(fuzzyMatch("\xC3\xA9", text).matched());
+  // A lone lead byte, a lone continuation byte and a truncated sequence match nothing, not even the half of
+  // the code point that is in the name.
+  EXPECT_FALSE(fuzzyMatch("\xC3", text).matched());
+  EXPECT_FALSE(fuzzyMatch("\xA9", text).matched());
+  EXPECT_FALSE(fuzzyMatch("caf\xC3", text).matched());
+  FuzzyIndex idx;
+  idx.add(text);
+  idx.add("plain");
+  EXPECT_TRUE(idx.search("\xA9", 10).empty());
+  EXPECT_TRUE(idx.search("\xC3", 10).empty());
+  EXPECT_EQ(idx.search("caf\xC3\xA9", 10).size(), 1u);
+  // A code point that shares its lead byte with another one does not match it: U+00E9 vs U+00E8.
+  EXPECT_FALSE(fuzzyMatch("caf\xC3\xA8", text).matched());
+  // Case folding is ASCII only: a non-ASCII upper case letter does not fold.
+  EXPECT_FALSE(fuzzyMatch("caf\xC3\x89", text).matched());  // U+00C9
+}

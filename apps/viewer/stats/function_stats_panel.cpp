@@ -78,6 +78,15 @@ void FunctionStatsPanel::resetDocumentState() {
   m_haveDocument = false;
 }
 
+void FunctionStatsPanel::clearHighlight(const PanelContext& context, bool requery) {
+  m_result.reset();
+  m_current.reset();
+  if (m_publishedHighlight && context.selection)
+    context.selection->setInstanceHighlight(std::nullopt, nullptr);
+  m_publishedHighlight = false;
+  if (requery) m_haveRequestedStats = false;
+}
+
 void FunctionStatsPanel::onDocumentChanged(const Document*) {
   resetDocumentState();
 }
@@ -215,6 +224,7 @@ void FunctionStatsPanel::update(const PanelContext& context) {
       applyResult(context, result->value());
     } else {
       m_message = "Query failed: " + result->error().toString();
+      clearHighlight(context, false);  // the timeline must not keep showing the previous function
     }
   }
 
@@ -430,7 +440,15 @@ void FunctionStatsPanel::draw(const PanelContext& context, bool* open) {
   m_histogram = {};
   m_boxPlot = {};
   m_searchActive = false;
-  if (!ImGui::Begin(name(), open)) {
+  const bool shown = ImGui::Begin(name(), open);
+  if (open && !*open) {
+    // Closed with the window's X: the highlight goes with the panel; reopening queries (cached) and shows
+    // it again.
+    clearHighlight(context, true);
+    ImGui::End();
+    return;
+  }
+  if (!shown) {
     ImGui::End();
     return;
   }

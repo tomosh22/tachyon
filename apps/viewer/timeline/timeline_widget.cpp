@@ -633,7 +633,6 @@ void TimelineWidget::drawInstanceHighlights(ImDrawList* dl, const PanelContext& 
   size_t budget = kMaxRectsPerFrame;
   const ImU32 fill = IM_COL32(255, 190, 40, 80), edge = IM_COL32(255, 205, 70, 255);
   std::vector<stats::OverlayRect> rects;
-  std::optional<HighlightRectInfo> current;
   for (size_t i = visible.first; i < visible.last && budget > 0; ++i) {
     const RowLayout& row = d.layout[i];
     rects.clear();
@@ -660,14 +659,28 @@ void TimelineWidget::drawInstanceHighlights(ImDrawList* dl, const PanelContext& 
       info.y0 = top;
       info.y1 = bottom;
       info.current = h.current && *h.current == r.instance;
-      if (info.current) current = info;
       m_highlightRects.push_back(info);
     }
   }
   m_stats.highlightRects = static_cast<uint32_t>(m_highlightRects.size());
-  if (current) {
-    dl->AddRect(ImVec2(current->x0 - 1.0f, current->y0), ImVec2(current->x1 + 1.0f, current->y1),
-                IM_COL32(255, 255, 255, 255), 0.0f, 0, 2.0f);
+  // The current instance gets its own outline, also when its rect was merged into a run or left out.
+  if (h.current && *h.current < h.instances->size()) {
+    const analysis::Instance& inst = (*h.instances)[*h.current];
+    for (size_t i = visible.first; i < visible.last; ++i) {
+      const RowLayout& row = d.layout[i];
+      if (row.thread != inst.thread) continue;
+      const float x0 = m_geometry.plotX0, w = m_geometry.plotWidth;
+      const double a = relTickToX(d.view, toRelative(d.limits, inst.begin), x0, w);
+      const double b = relTickToX(d.view, toRelative(d.limits, inst.end), x0, w);
+      if (b < x0 || a > x0 + w) break;
+      const float xa = static_cast<float>(std::max(a, static_cast<double>(x0)));
+      const float xb =
+          std::max(static_cast<float>(std::min(b, static_cast<double>(x0 + w))), xa + stats::kMinRectWidth);
+      const float top = originY + row.y0;
+      dl->AddRect(ImVec2(xa - 1.0f, top), ImVec2(xb + 1.0f, top + row.height), IM_COL32(255, 255, 255, 255),
+                  0.0f, 0, 2.0f);
+      break;
+    }
   }
 }
 

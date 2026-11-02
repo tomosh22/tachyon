@@ -57,11 +57,16 @@ class InstanceIndex {
   // Struct of arrays in begin order: the searches touch only contiguous 8-byte columns, not the (large,
   // shared) instance list.
   struct Row {
-    std::vector<uint32_t> index;   // position in the instance list
-    std::vector<uint64_t> begin;   // begin ticks
-    std::vector<uint64_t> end;     // end ticks
-    std::vector<uint64_t> maxEnd;  // running maximum of `end` over [0..k]
+    std::vector<uint32_t> index;        // position in the instance list
+    std::vector<uint64_t> begin;        // begin ticks
+    std::vector<uint64_t> end;          // end ticks
+    std::vector<uint64_t> maxEnd;       // running maximum of `end` over [0..k]
+    std::vector<uint64_t> blockMaxEnd;  // maximum of `end` over each block of kBlock entries
   };
+
+  static constexpr size_t kBlock = 64;
+  // First position in [lo, hi) whose end lies after `limit`, or hi.
+  static size_t firstEndingAfter(const Row& row, size_t lo, size_t hi, uint64_t limit);
 
   std::shared_ptr<const std::vector<analysis::Instance>> m_instances;
   std::vector<Row> m_rows;

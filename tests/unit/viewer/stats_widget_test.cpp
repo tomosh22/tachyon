@@ -704,3 +704,29 @@ TEST(StatsWidget, ClosingTheDocumentDropsEverything) {
   EXPECT_EQ(h.panel->index(), nullptr);
   EXPECT_TRUE(h.panel->hits().empty());
 }
+
+TEST(StatsWidget, ClosingThePanelWithTheXTakesTheHighlightOffTheTimeline) {
+  Harness h;
+  h.open("scopes.tachyon");
+  h.openPanel();
+  h.choose("Frame");
+  h.frames(3);
+  ASSERT_TRUE(h.bus().state().instanceHighlight.active());
+  ASSERT_FALSE(h.widget().lastHighlightRects().empty());
+  const ImGuiWindow* w = ImGui::FindWindowByName(FunctionStatsPanel::kName);
+  ASSERT_NE(w, nullptr);
+  const ImGuiStyle& style = ImGui::GetStyle();
+  h.click(w->Pos.x + w->SizeFull.x - style.FramePadding.x - ImGui::GetFontSize() * 0.5f,
+          w->Pos.y + w->TitleBarHeight * 0.5f);
+  h.frames(3);
+  PanelEntry* entry = h.entryOf(FunctionStatsPanel::kName);
+  ASSERT_FALSE(entry->open) << "the click did not hit the close button";
+  EXPECT_FALSE(h.bus().state().instanceHighlight.active());
+  EXPECT_TRUE(h.widget().lastHighlightRects().empty());
+  // The selection is kept: opening the panel again shows the same function and the overlay again.
+  entry->open = true;
+  ASSERT_TRUE(h.until([&] { return h.panel->result() != nullptr; }));
+  h.frames(3);
+  EXPECT_TRUE(h.bus().state().instanceHighlight.active());
+  EXPECT_FALSE(h.widget().lastHighlightRects().empty());
+}

@@ -23,6 +23,25 @@ InstanceIndex::InstanceIndex(std::shared_ptr<const std::vector<analysis::Instanc
     r.end.push_back(all[i].end);
     r.maxEnd.push_back(r.maxEnd.empty() ? all[i].end : std::max(r.maxEnd.back(), all[i].end));
   }
+  for (Row& r : m_rows) {
+    r.blockMaxEnd.assign((r.end.size() + kBlock - 1) / kBlock, 0);
+    for (size_t i = 0; i < r.end.size(); ++i)
+      r.blockMaxEnd[i / kBlock] = std::max(r.blockMaxEnd[i / kBlock], r.end[i]);
+  }
+}
+
+size_t InstanceIndex::firstEndingAfter(const Row& row, size_t lo, size_t hi, uint64_t limit) {
+  size_t i = lo;
+  for (; i < hi && i % kBlock != 0; ++i)
+    if (row.end[i] > limit) return i;
+  for (; i + kBlock <= hi; i += kBlock) {
+    if (row.blockMaxEnd[i / kBlock] <= limit) continue;
+    for (size_t j = i; j < i + kBlock; ++j)
+      if (row.end[j] > limit) return j;
+  }
+  for (; i < hi; ++i)
+    if (row.end[i] > limit) return i;
+  return hi;
 }
 
 const std::vector<analysis::Instance>& InstanceIndex::instances() const {
@@ -112,7 +131,11 @@ bool InstanceIndex::rectsFor(ThreadIdx thread, const timeline::TimeView& view,
           hi = mid;
         }
       }
-      const size_t next = std::max(lo, k + 1);
+      size_t next = std::max(lo, k + 1);
+      // Only instances that end inside the cell are merged into this rect; the first one that reaches beyond
+      // it (a wide instance that begins in the same cell) is processed on its own and drawn in full.
+      next = firstEndingAfter(row, k + 1, next, nextTick);
+      next = std::max(next, k + 1);
       // The skipped instances begin in the same cell: the rect stands for them as well.
       if (!out.empty() && next > k + 1) out.back().count += static_cast<uint32_t>(next - k - 1);
       k = next;

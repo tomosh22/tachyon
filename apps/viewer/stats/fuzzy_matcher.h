@@ -8,8 +8,8 @@
 //   WordStart   the query occurs contiguously starting at a word start ("Engine::update" for "update";
 //               word starts follow a non-alphanumeric character or a lower-to-upper case change)
 //   Substring   the query occurs contiguously somewhere else
-//   Subsequence the characters occur in order with gaps; scored by contiguous runs, word-start hits and
-//               case matches, minus gap penalties
+//   Subsequence the characters occur in order with gaps (whitespace of the query and of the name is
+//               skipped); scored by contiguous runs, word-start hits and case matches, minus gap penalties
 // Inside the contiguous tiers a shorter name and an earlier position score higher; a query character typed in
 // upper case that meets an upper-case name character earns a small bonus. Ties are broken by the shorter
 // name, then by the entry's position in the index, so the order is total and deterministic.
@@ -25,14 +25,26 @@ namespace tachyon::viewer::stats {
 
 enum class MatchTier : uint8_t { None = 0, Subsequence, Substring, WordStart, Prefix, Exact };
 
-// A normalized query: whitespace removed, a lower-case copy for matching and the typed case for the bonus.
+// A normalized query. `typed` / `lower` keep the text as typed (trimmed at both ends, inner whitespace kept)
+// and drive the contiguous tiers, so "operator new" does not match "operatornew" as Exact. `sub` is `lower`
+// without any whitespace and drives the subsequence tier, which skips whitespace of the names as well.
+// Case folding is ASCII only (A-Z); other code points compare as they are. Matching is by code point: a query
+// that is not valid UTF-8 matches nothing, and a UTF-8 query never matches part of a multi-byte sequence of a
+// name.
 struct FuzzyQuery {
-  std::string typed;  // whitespace removed, case kept
-  std::string lower;  // ASCII lower case of `typed`
+  std::string typed;     // trimmed, case kept
+  std::string lower;     // ASCII lower case of `typed`
+  std::string sub;       // `lower` without whitespace
+  std::string subTyped;  // `typed` without whitespace
+  bool valid = true;     // well-formed UTF-8
+  bool ascii = true;     // every code point of `sub` is one byte
+  size_t unitCount = 0;  // code points of `sub`
+  std::vector<uint32_t> unitOffset;
+  std::vector<uint8_t> unitLength;
 
   // Thread-safe: pure function.
   static FuzzyQuery make(std::string_view text);
-  bool empty() const { return lower.empty(); }
+  bool empty() const { return sub.empty(); }
 };
 
 struct FuzzyMatch {

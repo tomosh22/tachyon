@@ -403,6 +403,35 @@ TEST(InstanceIndexTest, NestedAndTinyInstancesAreBoundedAndMerge) {
   EXPECT_EQ(r.size(), 10u);
 }
 
+TEST(InstanceIndexTest, AWideInstanceInTheCellOfSubPixelOnesIsDrawnInFull) {
+  const auto lim = limits(0, 1000000);
+  const timeline::TimeView full{0.0, 1000000.0};  // 1000 ticks per pixel, cells of 2000 ticks
+  // Sub-pixel instances at 100, 200, 300; a wide one begins at 400 in the same cell and lasts 100000 ticks
+  // (100 px); more sub-pixel ones follow.
+  const auto l = list({{ThreadIdx(0), 100, 101},
+                       {ThreadIdx(0), 200, 201},
+                       {ThreadIdx(0), 300, 301},
+                       {ThreadIdx(0), 400, 100400},
+                       {ThreadIdx(0), 500, 501},
+                       {ThreadIdx(0), 200000, 200001}});
+  const InstanceIndex idx(l, 1);
+  std::vector<OverlayRect> r;
+  EXPECT_TRUE(idx.rectsFor(ThreadIdx(0), full, lim, 0.0f, 1000.0f, 100, r));
+  float widest = 0;
+  for (const OverlayRect& o : r) widest = std::max(widest, o.x1 - o.x0);
+  EXPECT_GE(widest, 99.0f);  // the wide instance is not cut to the cell's 2 px
+  // Many tiny instances before a wide one in one cell are skipped in blocks, the wide one still found.
+  std::vector<Instance> v;
+  for (uint64_t i = 0; i < 1000; ++i) v.push_back({ThreadIdx(0), 10000 + i, 10000 + i + 1});
+  v.push_back({ThreadIdx(0), 11000, 60000});
+  const InstanceIndex many(list(v), 1);
+  r.clear();
+  EXPECT_TRUE(many.rectsFor(ThreadIdx(0), full, lim, 0.0f, 1000.0f, 100, r));
+  widest = 0;
+  for (const OverlayRect& o : r) widest = std::max(widest, o.x1 - o.x0);
+  EXPECT_GE(widest, 49.0f);
+}
+
 TEST(InstanceIndexTest, OverlappingInstancesOfOneThreadAreFoundFromTheRunningMaximum) {
   // A long instance that began long before the window must still be found; the ones after it are in order.
   const auto lim = limits(0, 100000);
