@@ -36,7 +36,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | merged | wp/42b-timeline-symbols | 2026-10-25 |
 | WP-43 | Call graph panel | D | merged | wp/43-call-graph | 2026-10-25 |
 | WP-44 | Function list and butterfly | D | merged | wp/44-function-list | 2026-10-25 |
-| WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
+| WP-45 | Source and disassembly panel | D | in progress | wp/45-source-panel | 2026-11-03 |
 | WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
 | WP-47 | Search and Function Statistics | D | merged | wp/47-function-stats | 2026-10-25 |
 | WP-48 | Status, warnings, symbol progress | D | merged | wp/48-status-warnings | 2026-11-02 |
@@ -50,7 +50,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-60 | Flight recorder mode | — | not started | wp/60-flight-recorder | |
 | WP-61 | Remote capture | — | not started | wp/61-remote | |
 | WP-62 | CI report tool | E | in progress | wp/62-ci-report | 2026-11-02 |
-| WP-63 | Exporters | — | not started | wp/63-exporters | |
+| WP-63 | Exporters | E | in progress | wp/63-exporters | 2026-11-03 |
 | WP-64 | Large-trace performance pass | — | not started | wp/64-perf-pass | |
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
