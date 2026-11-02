@@ -26,7 +26,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-32 | Attribution and aggregation | C | merged | wp/32-attribution | 2026-10-25 |
 | WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | merged | wp/32b-return-address | 2026-10-25 |
 | WP-33 | Filters, cancellation, query cache | C | merged | wp/33-query-cache | 2026-10-25 |
-| WP-34 | Line/instruction attribution, disassembly | C | in progress | wp/34-lines-disasm | 2026-10-25 |
+| WP-34 | Line/instruction attribution, disassembly | C | merged (WP-34b follow-up) | wp/34-lines-disasm | 2026-10-25 |
 | WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
@@ -174,7 +174,14 @@ Verifier PASS (conditional on D1). Rule-5 placement matches a brute-force oracle
 
 Verifier PASS. An independent llvm-symbolizer oracle on 2000 testbed and 2000 libc addresses shows 0 chain-length, function-start, file or line mismatches; the remaining differences are demangler style or an intended line fallback. Fuzzing at scale 10 under ASan is clean, TSan is clean with 8 threads, and memory is about 4–7 KB per function. 1 M RVAs resolve in 0.16 s warm (budget 20 s).
 
+## WP-34 notes
+
+Verifier PASS. A randomized independent oracle ran 9,600 checks with 0 mismatches: running/ready/waiting split, recursion, the return-address rule, blocking-stack attribution and filters. On medium, the sum of line runningTicks equals inclusive time for 202 functions. Disassembly agrees with objdump on 44,849 + 213 instructions (counts and boundaries identical, only cosmetic spelling differs), and readImageBytes matches `objdump -s` byte for byte. The decoder is fuzz-clean under asan. The Windows test disassembled hot_a with real DIA and sample hits landed inside its bounds. Timings: linesForFunction 22 ms (budget 100 ms); disassembling 64 KB takes 4.1 ms (budget 20 ms).
+
 ## Queued follow-ups
+
+- WP-34b: use the exact inline call-site line (`ra.inlines.back()` when its file is the function's file; providers already put call-site lines on outer frames) instead of the nearest-preceding-row approximation; handle a same-file inlined callee; clamp `readImageBytes` size so a hostile image cannot cause a huge allocation (bad_alloc); bound the SourceLocator cache.
+- SdkOverheadPerf on the Windows runner measured 95–110 ns against the 80 ns CI gate (it passed on re-run). The plan concern about the 40 ns target is still awaiting the user; if the Windows flake recurs, raise the Windows gate to 2× the 80 ns budget (160 ns).
 
 - Test hygiene (orchestrator, done): the testbed share checks skip when the load average exceeds the core count; the cancellation-latency tests assert at 2× their 50 ms budget. Both only failed when parallel agents overloaded the 4-core dev box.
 
