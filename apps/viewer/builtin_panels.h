@@ -30,4 +30,12 @@ std::unique_ptr<IPanel> makeFunctionListPanel();
 // implemented in functions/butterfly_panel.cpp.
 std::unique_ptr<IPanel> makeButterflyPanel();
 
+// Thread-safe: factory. WP-47: fuzzy function / scope search with per-instance statistics, histogram, box
+// plot and a timeline instance highlight ("Function Statistics"); implemented in
+// stats/function_stats_panel.cpp.
+std::unique_ptr<IPanel> makeFunctionStatsPanel();
+
+// Name of the Function Statistics panel (what PanelRequest and the Ctrl+F shortcut ask for).
+inline constexpr const char* kFunctionStatsPanelName = "Function Statistics";
+
 }  // namespace tachyon::viewer

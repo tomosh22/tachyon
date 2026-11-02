@@ -9,6 +9,7 @@ tachyon_add_test(viewer_tests
           interaction_runner_test.cpp interaction_widget_test.cpp
           callgraph_model_test.cpp callgraph_widget_test.cpp
           functions_model_test.cpp functions_widget_test.cpp
+          stats_fuzzy_test.cpp stats_model_test.cpp stats_widget_test.cpp
   DEPS tachyon::viewer_core tachyon::analysis tachyon::symbols)
 
 # Headless end-to-end checks of the real binary: no display, Null renderer, 100 frames.

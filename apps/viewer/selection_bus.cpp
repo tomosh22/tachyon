@@ -58,6 +58,28 @@ uint64_t SelectionBus::requestPanel(std::string name) {
   return m_state.panelRequest.serial;
 }
 
+uint64_t SelectionBus::setInstanceHighlight(
+    std::optional<FunctionKey> key, std::shared_ptr<const std::vector<analysis::Instance>> instances) {
+  InstanceHighlight next;
+  if (instances) {
+    next.generation = m_nextSerial++;
+    next.key = key;
+    next.instances = std::move(instances);
+  } else if (m_state.instanceHighlight.generation == 0) {
+    return 0;  // already clear
+  }
+  m_state.instanceHighlight = std::move(next);
+  publish(SelectionField::InstanceHighlight);
+  return m_state.instanceHighlight.generation;
+}
+
+void SelectionBus::setHighlightCurrent(std::optional<uint32_t> index) {
+  InstanceHighlight& h = m_state.instanceHighlight;
+  if (!h.active() || h.current == index) return;
+  h.current = index;
+  publish(SelectionField::InstanceHighlight);
+}
+
 void SelectionBus::clear() {
   m_state = SelectionState{};
   publish(SelectionField::All);

@@ -12,6 +12,7 @@
 #include "viewer/interaction/arrow_geometry.h"
 #include "viewer/interaction/interaction_model.h"
 #include "viewer/panel.h"
+#include "viewer/stats/instance_index.h"
 #include "viewer/timeline/timeline_colors.h"
 #include "viewer/timeline/timeline_data.h"
 #include "viewer/timeline/timeline_math.h"
@@ -51,6 +52,7 @@ struct TimelineFrameStats {
   uint32_t rects = 0;
   uint32_t flameSpans = 0;
   uint32_t frameMarksDrawn = 0;
+  uint32_t highlightRects = 0;  // WP-47: instance highlight rects drawn
 };
 
 // One wake-up arrow drawn in the last frame (WP-46; tests).
@@ -59,6 +61,15 @@ struct WakeArrowInfo {
   interaction::ArrowGeometry geometry;
   bool selected = false;   // the persistent arrow of SelectionState::selectedWait (else the hover arrow)
   std::string wakerLabel;  // text next to the edge marker
+};
+
+// One rect of the instance highlight drawn in the last frame (WP-47; tests).
+struct HighlightRectInfo {
+  ThreadIdx thread;
+  uint32_t instance = 0;  // index into the highlighted instance list (the first one of a run)
+  uint32_t count = 1;     // instances the rect stands for (> 1: a run of sub-pixel instances)
+  float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  bool current = false;  // the instance last navigated to
 };
 
 // Where the widget put things on screen in the last frame (tests aim the mouse with it).
@@ -120,6 +131,9 @@ class TimelineWidget {
   const TimelineScreenGeometry& screenGeometry() const { return m_geometry; }
   // Wake-up arrows drawn in the last frame: the hovered wait's and the selected wait's (WP-46).
   const std::vector<WakeArrowInfo>& lastArrows() const { return m_arrows; }
+  // WP-47: the rects of the instance highlight (SelectionState::instanceHighlight) drawn in the last frame,
+  // one per visible instance on a visible row.
+  const std::vector<HighlightRectInfo>& lastHighlightRects() const { return m_highlightRects; }
   // Screen y of the centre of the state band of `thread`'s row in the last frame (nullopt: no such row).
   std::optional<float> bandCenterY(ThreadIdx thread) const;
   // Block until the background build is done, pumping nothing (only valid with buildInline or after the job
@@ -157,6 +171,8 @@ class TimelineWidget {
   void drawWakeArrows(ImDrawList* dl, const PanelContext& context, const Hit& hit);
   void drawWakeArrow(ImDrawList* dl, const PanelContext& context, const interaction::WaitEpisode& episode,
                      bool selected);
+  void drawInstanceHighlights(ImDrawList* dl, const PanelContext& context, const RowRange& visible,
+                              float originY);
   void drawRangeOverlays(ImDrawList* dl, const PanelContext& context, float y0, float y1);
   uint32_t flameDepthFor(ThreadIdx thread) const;
 
@@ -192,6 +208,10 @@ class TimelineWidget {
   std::optional<NavigationRequest> m_pendingNav;  // WP-46: applied at the start of the next draw
   uint64_t m_lastNavSerial = 0;
   ThreadIdx m_scrollToThread;  // row to bring into view once the layout is known
+  // WP-47: per-thread index of the highlighted instance list, rebuilt when the bus generation changes.
+  std::unique_ptr<stats::InstanceIndex> m_highlightIndex;
+  uint64_t m_highlightGeneration = 0;
+  std::vector<HighlightRectInfo> m_highlightRects;
 };
 
 }  // namespace tachyon::viewer::timeline
