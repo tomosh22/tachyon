@@ -116,7 +116,7 @@ TEST(DisasmWindows, HotAInstructionsAndSampleHitsLandInsideItsBounds) {
   EXPECT_TRUE(sawRet);
 
   // 3. A synthetic trace with one sample per instruction of hot_a (leaf), 100 ticks each.
-  testutil::HandModel h;
+  analysis::testutil::HandModel h;
   h.m.modules[0] = tb.module;
   h.state(0, 0, 10'000'000, model::ThreadState::Running);
   uint64_t ts = 0;
