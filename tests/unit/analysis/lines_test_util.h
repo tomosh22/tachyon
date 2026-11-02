@@ -46,7 +46,7 @@ class LineProvider final : public symbols::ISymbolProvider {
     r.resolved = true;
     r.function = m_strings.intern(f->name);
     r.functionStartRva = f->start;
-    r.file = m_strings.intern(f->file);
+    if (f->file != nullptr) r.file = m_strings.intern(f->file);
     r.line = 0;
     for (const LineSpec& l : f->lines) {
       if (rva >= f->start + l.off && rva < f->start + l.off + l.size) {
@@ -90,10 +90,21 @@ class LineProvider final : public symbols::ISymbolProvider {
   std::vector<FnSpec> m_fns;
 };
 
-constexpr uint64_t kMain = 0x2000, kF = 0x1000, kG = 0x3000, kH = 0x4000;
+constexpr uint64_t kMain = 0x2000, kF = 0x1000, kG = 0x3000, kH = 0x4000, kN = 0x5000, kD = 0x6000;
 
 inline std::vector<FnSpec> specs() {
   return {
+      // N: no line information at all (ResolvedAddress::file stays invalid).
+      {"N", nullptr, kN, 0x100, {}, {}},
+      // D: DWARF/DIA convention. inlines[0] sits at the line-table position (callee.h:7); the outer frame
+      // carries
+      // the position inside Mid (mid.h:33), not a position of D itself.
+      {"D",
+       "d.cpp",
+       kD,
+       0x100,
+       {{0x00, 0x30, 10, nullptr}, {0x30, 0x30, 7, "callee.h"}, {0x60, 0xA0, 60, nullptr}},
+       {{0x30, 0x30, "Callee", "callee.h", 7}, {0x30, 0x30, "Mid", "mid.h", 33}}},
       {"Main", "main.cpp", kMain, 0x100, {{0x00, 0x80, 100, nullptr}, {0x80, 0x80, 110, nullptr}}, {}},
       // F: lines 10 [0,0x10) 20 [0x10,0x30) 30 [0x30,0x50) 40 [0x50,0x80) 50 [0x80,0x100)
       {"F",

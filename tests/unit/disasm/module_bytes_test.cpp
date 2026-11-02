@@ -190,6 +190,36 @@ TEST(ModuleBytesTest, RejectsOtherFormatsAndMissingFiles) {
   fs::remove(q);
 }
 
+// A header whose PT_LOAD claims 1<<44 bytes must not make a huge request allocate (found by the WP-34
+// verifier).
+TEST(ModuleBytesTest, HugeSizesAreRejectedWithoutAllocating) {
+  std::vector<uint8_t> f(64 + 56, 0);
+  std::memcpy(f.data(),
+              "\x7f"
+              "ELF",
+              4);
+  f[4] = 2;
+  f[5] = 1;
+  put<uint64_t>(f, 32, 64);
+  put<uint16_t>(f, 54, 56);
+  put<uint16_t>(f, 56, 1);
+  put<uint32_t>(f, 64, 1);
+  put<uint64_t>(f, 64 + 40, uint64_t{1} << 44);
+  const fs::path p = writeTemp("big.elf", f);
+  auto huge = readImageBytes(p, 0, size_t{1} << 40);
+  ASSERT_FALSE(huge.ok());
+  EXPECT_EQ(huge.error().code, ErrorCode::InvalidArgument);
+  EXPECT_FALSE(readImageBytes(p, 0, kMaxReadBytes + 1).ok());
+  // Within the limit the zero-filled mapping is served (bounded by the request).
+  auto ok = readImageBytes(p, 0x1000, 4096);
+  ASSERT_TRUE(ok.ok());
+  EXPECT_EQ(ok->size(), 4096u);
+  model::Module m;
+  m.path = p.string();
+  EXPECT_FALSE(readModuleBytes(m, 0, size_t{1} << 40).ok());
+  fs::remove(p);
+}
+
 #if defined(__linux__)
 extern "C" __attribute__((noinline, used)) int tachyonWp34Probe(int x) {
   volatile int y = x * 31 + 7;

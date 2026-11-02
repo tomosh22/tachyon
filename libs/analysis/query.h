@@ -417,11 +417,17 @@ struct InstructionAgg {
 
 // Thread-safe. Time per source line of `key`, sorted by line ascending, only lines with ticks > 0.
 //  * runningTicks: the weight (rule 1) of the samples whose matching frame is on that line. The line of a
-//    frame is the line-table line of its (return-address-rule) address when that is in the function's own
-//    file; code that belongs to an inlined callee is attributed to the call site in the function's own file
-//    (the providers give the line-table position when it lies in the function's file, else the nearest
-//    preceding own-file line of the function). With an inline key the line is the position inside that
-//    inlined function, as reported in the inline chain (InlineFrame::line).
+//    frame is ResolvedAddress::line of its (return-address-rule) address when that row is in the function's
+//    own file. A row in another file (code of an inlined callee defined elsewhere) is attributed to the
+//    nearest preceding line row of the function's own file, an APPROXIMATION of the call site. A frame whose
+//    lookup has no line row (ResolvedAddress::file invalid) goes to line 0. Provider conventions: the JSON
+//    provider's line table is in the function's own file (ResolvedAddress::line is already the call-site line
+//    inside inlined ranges; chain lines are positions inside the inlined functions). The DWARF and DIA
+//    providers put the line-table position in inlines[0] and, in each outer frame, the position inside that
+//    inlined function where the next inner frame was called; the physical function's own call-site line is
+//    not exposed by ResolvedAddress (a provider/header change would be needed for an exact value). With an
+//    inline key the line is the position inside that inlined function, as reported in the inline chain
+//    (InlineFrame::line).
 //  * waitingTicks / readyTicks: the clipped duration (to [t0, t1)) of Waiting / Ready intervals of the
 //    selected threads whose blocking stack contains the function (leaf exact, outer frames address - 1), on
 //    the line of the outermost matching frame of that blocking stack. subtreeRoot and function apply to the

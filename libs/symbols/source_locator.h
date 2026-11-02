@@ -17,6 +17,7 @@
 #include "core/result.h"
 
 #include <filesystem>
+#include <list>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -37,6 +38,8 @@ struct SourceLocatorConfig {
 
 class SourceLocator {
  public:
+  static constexpr size_t kMaxCacheEntries = 4096;
+
   // Thread-safe (constructor).
   explicit SourceLocator(SourceLocatorConfig config = {});
 
@@ -50,14 +53,21 @@ class SourceLocator {
   SourceLocatorConfig config() const;
   // Thread-safe.
   void clearCache();
+  // Thread-safe. Number of cached results (at most kMaxCacheEntries; least recently used are evicted).
+  size_t cacheSize() const;
 
  private:
   Result<std::filesystem::path> resolve(const SourceLocatorConfig& cfg, std::string_view debugPath) const;
 
   mutable std::mutex m_mutex;
   SourceLocatorConfig m_config;
-  // debug path -> located path (empty = not found)
-  mutable std::unordered_map<std::string, std::filesystem::path> m_cache;
+  // LRU of kMaxCacheEntries: front = most recently used. debug path -> located path (empty = not found)
+  struct CacheEntry {
+    std::filesystem::path path;
+    std::list<std::string>::iterator lru;
+  };
+  mutable std::list<std::string> m_lru;
+  mutable std::unordered_map<std::string, CacheEntry> m_cache;
 };
 
 }  // namespace tachyon::symbols

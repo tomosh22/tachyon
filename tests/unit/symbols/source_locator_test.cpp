@@ -140,5 +140,23 @@ TEST(SourceLocatorTest, ResultsAreCachedUntilCleared) {
   EXPECT_TRUE(loc.config().searchRoots.empty());
 }
 
+TEST(SourceLocatorTest, CacheIsBoundedAndKeepsRecentEntries) {
+  Tree t;
+  t.file("keep.cpp");
+  SourceLocatorConfig cfg;
+  cfg.searchRoots = {t.root};
+  SourceLocator loc(cfg);
+  ASSERT_TRUE(loc.locate("/p/keep.cpp").ok());
+  for (size_t i = 0; i < SourceLocator::kMaxCacheEntries + 100; ++i) {
+    (void)loc.locate("/p/missing" + std::to_string(i) + ".cpp");
+    if (i % 1000 == 0) (void)loc.locate("/p/keep.cpp");  // stays recently used
+  }
+  EXPECT_LE(loc.cacheSize(), SourceLocator::kMaxCacheEntries);
+  EXPECT_GE(loc.cacheSize(), SourceLocator::kMaxCacheEntries - 1);
+  // The oldest negative entry was evicted, so it is looked up again and now found.
+  t.file("missing0.cpp");
+  EXPECT_TRUE(loc.locate("/p/missing0.cpp").ok());
+}
+
 }  // namespace
 }  // namespace tachyon::symbols
