@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <new>
 
 namespace tachyon::disasm {
 
@@ -162,6 +163,8 @@ Result<std::vector<Segment>> elfSegments(File& f, const uint8_t* head, size_t he
 }  // namespace
 
 Result<std::vector<uint8_t>> readImageBytes(const std::filesystem::path& path, uint64_t rva, size_t size) {
+  if (size > kMaxReadBytes)
+    return makeError(ErrorCode::InvalidArgument, "requested size exceeds the 64 MiB read limit");
   File f;
   if (!f.open(path)) return makeError(ErrorCode::IoError, "cannot open " + path.string());
   uint8_t head[64];
@@ -177,7 +180,11 @@ Result<std::vector<uint8_t>> readImageBytes(const std::filesystem::path& path, u
     segs = elfSegments(f, head, headLen);
   }
   if (!segs) return segs.error();
-  return extract(f, *segs, rva, size);
+  try {
+    return extract(f, *segs, rva, size);
+  } catch (const std::bad_alloc&) {
+    return makeError(ErrorCode::OutOfMemory, "cannot allocate the requested image bytes");
+  }
 }
 
 Result<std::vector<uint8_t>> readModuleBytes(const model::Module& module, uint64_t rva, size_t size,

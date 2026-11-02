@@ -74,6 +74,7 @@ void SourceLocator::configure(SourceLocatorConfig config) {
   std::lock_guard<std::mutex> lock(m_mutex);
   m_config = std::move(config);
   m_cache.clear();
+  m_lru.clear();
 }
 
 SourceLocatorConfig SourceLocator::config() const {
@@ -84,6 +85,12 @@ SourceLocatorConfig SourceLocator::config() const {
 void SourceLocator::clearCache() {
   std::lock_guard<std::mutex> lock(m_mutex);
   m_cache.clear();
+  m_lru.clear();
+}
+
+size_t SourceLocator::cacheSize() const {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  return m_cache.size();
 }
 
 Result<fs::path> SourceLocator::locate(std::string_view debugPath) const {
@@ -92,16 +99,29 @@ Result<fs::path> SourceLocator::locate(std::string_view debugPath) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     const auto it = m_cache.find(std::string(debugPath));
     if (it != m_cache.end()) {
-      if (it->second.empty())
+      m_lru.splice(m_lru.begin(), m_lru, it->second.lru);
+      if (it->second.path.empty())
         return makeError(ErrorCode::NotFound, "source file not found: " + std::string(debugPath));
-      return it->second;
+      return it->second.path;
     }
     cfg = m_config;
   }
   Result<fs::path> r = resolve(cfg, debugPath);
   {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_cache[std::string(debugPath)] = r ? *r : fs::path();
+    const std::string key(debugPath);
+    const auto it = m_cache.find(key);
+    if (it != m_cache.end()) {
+      it->second.path = r ? *r : fs::path();
+      m_lru.splice(m_lru.begin(), m_lru, it->second.lru);
+    } else {
+      m_lru.push_front(key);
+      m_cache.emplace(key, CacheEntry{r ? *r : fs::path(), m_lru.begin()});
+      while (m_cache.size() > kMaxCacheEntries) {
+        m_cache.erase(m_lru.back());
+        m_lru.pop_back();
+      }
+    }
   }
   return r;
 }

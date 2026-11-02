@@ -17,6 +17,8 @@
 namespace tachyon::disasm {
 
 inline constexpr size_t kMaxInstructionLength = 15;
+// Largest `size` readImageBytes accepts; a larger request is an InvalidArgument error (nothing is allocated).
+inline constexpr size_t kMaxReadBytes = size_t{64} << 20;
 
 struct Instruction {
   uint64_t rva = 0;                                    // module-relative address of the first byte
@@ -48,8 +50,10 @@ std::vector<Instruction> disassemble(std::span<const uint8_t> bytes, uint64_t ba
 // minus the load address of the lowest PT_LOAD, so the ELF virtual address is
 // `rva + (lowest PT_LOAD p_vaddr rounded down to 4096)`, which is mapped through PT_LOAD (bytes beyond
 // p_filesz within p_memsz read as zero). The result may be shorter than `size` where the mapping ends (or the
-// file is truncated); NotFound when `rva` itself is not mapped, Unsupported for other file formats,
-// CorruptData for malformed headers, IoError when the file cannot be read.
+// file is truncated, and never beyond what the headers map); a `size` above kMaxReadBytes gives
+// InvalidArgument and an allocation failure OutOfMemory; NotFound when `rva` itself is not mapped,
+// Unsupported for other file formats, CorruptData for malformed headers, IoError when the file cannot be
+// read.
 Result<std::vector<uint8_t>> readImageBytes(const std::filesystem::path& path, uint64_t rva, size_t size);
 
 // Thread-safe. readImageBytes on `module.path`, or on `pathOverride` when it is not empty (the module path of

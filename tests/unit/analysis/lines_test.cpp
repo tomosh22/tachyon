@@ -343,5 +343,39 @@ TEST(LinesTest, EmptyRangeCancelAndCaching) {
   EXPECT_EQ(i1->get(), i2->get());
 }
 
+TEST(LinesTest, NoLineRowGivesLineZero) {
+  Probe p;
+  p.samples(p.h.stack({kMain + 0x10, kN + 0x20}), 3);
+  p.finish();
+  QueryContext ctx(p.h.m, *p.h.svc);
+  auto lines = linesForFunction(ctx, {}, fk(kN));
+  ASSERT_TRUE(lines.ok());
+  ASSERT_EQ(lines->size(), 1u);
+  EXPECT_EQ((*lines)[0].line, 0u);
+  EXPECT_EQ((*lines)[0].runningTicks, 300u);
+}
+
+// DWARF/DIA convention: inlines[0] is at the line-table position, outer frames carry positions inside their
+// own (inlined) function. The physical function's call-site line is not in ResolvedAddress, so the fallback
+// (nearest preceding own-file row) applies, and the outer inline frame's line is never mistaken for it.
+TEST(LinesTest, DwarfStyleInlineChainFallsBackToTheNearestOwnRow) {
+  Probe p;
+  p.samples(p.h.stack({kMain + 0x10, kD + 0x40}), 4);
+  p.finish();
+  QueryContext ctx(p.h.m, *p.h.svc);
+  auto lines = linesForFunction(ctx, {}, fk(kD));
+  ASSERT_TRUE(lines.ok());
+  ASSERT_EQ(lines->size(), 1u);
+  EXPECT_EQ((*lines)[0].line, 10u);
+  EXPECT_EQ((*lines)[0].runningTicks, 400u);
+  // The inline keys still report the chain's own lines.
+  const StringIdx mid = p.h.svc->symbolStrings().find("Mid");
+  ASSERT_TRUE(mid.valid());
+  auto il = linesForFunction(ctx, {}, FunctionKey{ModuleIdx(0), symbols::kInlineKeyBit | mid.get()});
+  ASSERT_TRUE(il.ok());
+  ASSERT_EQ(il->size(), 1u);
+  EXPECT_EQ((*il)[0].line, 33u);
+}
+
 }  // namespace
 }  // namespace tachyon::analysis
