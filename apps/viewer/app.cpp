@@ -261,8 +261,10 @@ void App::toast(ToastLevel level, std::string text) {
 
 void App::rerunSymbolResolution() {
   if (!m_document) return;
-  startSymbolResolution(
-      *m_document);  // fresh service; the old one is released (queries keep it alive if needed)
+  // Stop the old run first: snapshots and in-flight queries may keep the old service alive, and its workers
+  // would otherwise keep loading providers alongside the new run. cancel() keeps lookups usable.
+  if (const std::shared_ptr<symbols::SymbolService>& old = m_document->symbols()) old->cancel();
+  startSymbolResolution(*m_document);  // fresh service; the old one is released once nobody holds it
   ++m_symbolGeneration;
   requestRedraw();
 }

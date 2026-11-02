@@ -39,7 +39,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
 | WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
 | WP-47 | Search and Function Statistics | D | merged | wp/47-function-stats | 2026-10-25 |
-| WP-48 | Status, warnings, symbol progress | D | in progress | wp/48-status-warnings | 2026-11-02 |
+| WP-48 | Status, warnings, symbol progress | D | merged | wp/48-status-warnings | 2026-11-02 |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
 | WP-51 | Client runtime | E | merged (CI green incl. windows; connected overhead 46.9 ns Linux / 68 ns Windows vs 40 ns target, under 80 ns gate; disabled 4.7 / 16 ns) | wp/51-sdk-runtime | 2026-10-25 |
 | WP-51b | SDK runtime fixes (flaky AgentLossFallsBack test, sidecar truncation, perf flake) | E | merged (root cause: fake-agent race; 20× ctest repeats green under load) | wp/51b-sdk-fixes | 2026-10-25 |
@@ -190,7 +190,13 @@ Verifier PASS. Privileged tests ran for real in this container (root with CAP_PE
 
 The verifier passed it; the implementer's report was lost in a container restart. Lane intervals match pairScopes and pairScopesByFiber exactly, frame bars match frames() (max per pixel, over-budget highlighting), and plot min/max per column matches brute force, so single-sample spikes survive. Scope clicks drive Call Graph and Function Statistics. ASan lifetime tests are clean. Perf: medians run at 1.0–1.55× budget, all under the 2× asserts (1M scopes × 64 rows: 6.5–8.5 ms against a 6.0 ms budget; 100k frames: 5.1–8.5 ms against 5.5 ms; 10M plot samples: 6.7–8.5 ms against 6.5 ms). Follow-ups for WP-64: per-pixel merged items take flags from their first interval only, so a lock or unterminated scope mid-group is not marked; the pending look reserves a line in rows without scopes.
 
+## WP-48 notes
+
+The verifier passed it with no blocking defects. The release and ASan builds each passed 1742/1742; the Status* tests passed ×10 under ASan; banner parsing was probed against crafted CaptureInfo; a SymbolService rebuild with 20 rapid retries was ASan-clean. Orchestrator fix: Retry/Add now cancels the old SymbolService before starting a new one, because snapshots kept the old run loading providers in the background.
+
 ## Queued follow-ups
+
+- Viewer polish: the banner shows lost-event and throttle lines twice when the perf converter also writes them as free-text `convert_stats.warnings`. The `*.symbols.json` scan of a symbol directory is unbounded and runs on the UI thread (3000 files took 7.7 s under ASan); cap it or move it to a worker. An unreadable symbol directory is accepted silently.
 
 - CI: on 2026-11-02 the privileged perf step really ran its 6 tests on GitHub's runner (24,907 samples in 3.13 s, 12 before main). The kernel throttled sampling 138 times; that is expected at 8 kHz on a shared runner. The step stays non-gating for now.
 
