@@ -17,7 +17,7 @@ if(TACHYON_ENABLE_LIBDW)
 endif()
 tachyon_add_library(symbols
   SOURCES ${TACHYON_SYMBOLS_DIA_SOURCES} ${TACHYON_SYMBOLS_DWARF_SOURCES} demangle.cpp function_key.cpp http_client.cpp json_symbol_provider.cpp range_table.cpp
-          symbol_keys.cpp symbol_locator.cpp symbol_provider.cpp symbol_service.cpp symbol_strings.cpp
+          source_locator.cpp symbol_keys.cpp symbol_locator.cpp symbol_provider.cpp symbol_service.cpp symbol_strings.cpp
           ${TACHYON_SYMBOLS_HTTP_SOURCES}
   PUBLIC_DEPS tachyon::core tachyon::trace tachyon::model Threads::Threads
   PRIVATE_DEPS nlohmann_json::nlohmann_json)
