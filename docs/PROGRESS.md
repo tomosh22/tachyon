@@ -45,7 +45,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-51b | SDK runtime fixes (flaky AgentLossFallsBack test, sidecar truncation, perf flake) | E | merged (root cause: fake-agent race; 20× ctest repeats green under load) | wp/51b-sdk-fixes | 2026-10-25 |
 | WP-52 | Agent-side ingestion and merge | A | merged (Windows CI ran a real ETW + --instrument capture) | wp/52-ingestion | 2026-10-25 |
 | WP-53 | Scope pairing, blending, fibers | C | merged (WP-53b follow-up) | wp/53-scope-blending | 2026-10-25 |
-| WP-54 | Viewer instrumentation lanes, frame graph, plots | D | in progress | wp/54-inst-viewer | 2026-11-02 |
+| WP-54 | Viewer instrumentation lanes, frame graph, plots | D | merged | wp/54-inst-viewer | 2026-11-02 |
 | WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
 | WP-60 | Flight recorder mode | — | not started | wp/60-flight-recorder | |
 | WP-61 | Remote capture | — | not started | wp/61-remote | |
@@ -185,6 +185,10 @@ Verifier: the core passed. Stats are byte-identical before and after the refacto
 ## WP-70 notes
 
 Verifier PASS. Privileged tests ran for real in this container (root with CAP_PERFMON): testbed spin over 3.16 s gave 24,799 target samples at 7,844/s with events_lost 0; 19–28 samples landed before main; leaf shares hot_a/spin_rest/hot_b/hot_c are 38/29/19/10% (expected 40/30/20/10). Module bases equal /proc maps (ELF rule). The kernel-leaf flag had 0 mismatches. 20k-iteration parser fuzzing under asan was clean; no fd leaks into the child; LOST and RLIMIT errors are clear. Conversion runs at 0.9–1.2 M samples/s (skewed) and 73–90 k/s (all-unique). CI has a new non-gating step that enables perf_event_paranoid=-1 and runs `-L linux_privileged`, failing the step if the tests were skipped. No PMU or tracefs here, so WP-71 sched tracepoints can only be tested on CI or a real host.
+
+## WP-54 notes
+
+The verifier passed it; the implementer's report was lost in a container restart. Lane intervals match pairScopes and pairScopesByFiber exactly, frame bars match frames() (max per pixel, over-budget highlighting), and plot min/max per column matches brute force, so single-sample spikes survive. Scope clicks drive Call Graph and Function Statistics. ASan lifetime tests are clean. Perf: medians run at 1.0–1.55× budget, all under the 2× asserts (1M scopes × 64 rows: 6.5–8.5 ms against a 6.0 ms budget; 100k frames: 5.1–8.5 ms against 5.5 ms; 10M plot samples: 6.7–8.5 ms against 6.5 ms). Follow-ups for WP-64: per-pixel merged items take flags from their first interval only, so a lock or unterminated scope mid-group is not marked; the pending look reserves a line in rows without scopes.
 
 ## Queued follow-ups
 
