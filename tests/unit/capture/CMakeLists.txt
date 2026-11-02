@@ -15,6 +15,7 @@ if(TARGET tachyon::capture_linux_perf)
   tachyon_add_test(capture_linux_perf_tests
     SOURCES linux_perf_records_test.cpp linux_perf_spool_test.cpp linux_perf_proc_test.cpp
             linux_perf_convert_test.cpp linux_perf_backend_test.cpp linux_perf_agent_test.cpp
-    DEPS tachyon::capture_linux_perf tachyon::agent_core tachyon::capture tachyon::control tachyon::model
-         tachyon::symbols tachyon::trace nlohmann_json::nlohmann_json)
+            linux_perf_sched_format_test.cpp linux_perf_sched_convert_test.cpp linux_perf_sched_backend_test.cpp
+    DEPS tachyon::capture_linux_perf tachyon::agent_core tachyon::analysis tachyon::capture tachyon::control
+         tachyon::model tachyon::symbols tachyon::trace nlohmann_json::nlohmann_json)
 endif()

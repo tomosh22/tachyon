@@ -1,0 +1,4 @@
+# sched_wakeup (old layout with success): tb-lock-1 (4321) woken, success=1, cpu 3
+3e 01 00 00 e0 10 00 00 74 62 2d 6c 6f 63 6b 2d
+31 00 00 00 00 00 00 00 e1 10 00 00 78 00 00 00
+01 00 00 00 03 00 00 00

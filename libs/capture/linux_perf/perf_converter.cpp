@@ -1,6 +1,7 @@
 #include "capture/linux_perf/perf_converter.h"
 
 #include "capture/linux_perf/perf_system.h"
+#include "capture/linux_perf/sched_format.h"
 #include "capture/windows_etw/glob_match.h"
 #include "core/hash.h"
 #include "core/log.h"
@@ -15,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <queue>
 #include <set>
 #include <unordered_map>
@@ -197,10 +199,43 @@ class SampleSink {
   trace::SampleBatch m_batch;
 };
 
+// Context-switch and ready records, written time-sorted: the merge delivers them nearly in order, and the
+// newest eighth stays behind at every flush like the sample sink does.
+template <typename Rec>
+class RecordSink {
+ public:
+  explicit RecordSink(trace::TraceWriter& w) : m_writer(w) {}
+
+  void push(const Rec& r) {
+    m_buf.push_back(r);
+    if (m_buf.size() >= kSampleFlushCount) flush(false);
+  }
+
+  void flush(bool final) {
+    const size_t n = m_buf.size();
+    if (n == 0) return;
+    std::stable_sort(m_buf.begin(), m_buf.end(), [](const Rec& a, const Rec& b) { return a.ts < b.ts; });
+    const size_t emit = final ? n : n - n / 8;
+    if (emit == 0) return;
+    m_writer.append(std::span<const Rec>(m_buf.data(), emit));
+    m_buf.erase(m_buf.begin(), m_buf.begin() + static_cast<std::ptrdiff_t>(emit));
+  }
+
+ private:
+  trace::TraceWriter& m_writer;
+  std::vector<Rec> m_buf;
+};
+
 class Converter {
  public:
   Converter(const SpoolSet& set, const ConvertOptions& opt, trace::TraceWriter& writer, ConvertStats& stats)
-      : m_set(set), m_opt(opt), m_writer(writer), m_stats(stats), m_sink(writer) {
+      : m_set(set),
+        m_opt(opt),
+        m_writer(writer),
+        m_stats(stats),
+        m_sink(writer),
+        m_switchSink(writer),
+        m_readySink(writer) {
     m_roots.insert(opt.rootPids.begin(), opt.rootPids.end());
   }
 
@@ -214,7 +249,17 @@ class Converter {
   void onComm(const ParsedRecord& r);
   void onMmap(const ParsedRecord& r);
   void onSample(const ParsedRecord& r);
-  CallstackIdx resolveStack(Proc& p, const ParsedRecord& r, uint16_t& flags);
+  // Scheduler events (WP-71).
+  void onSchedSample(const ParsedRecord& r);
+  void onSchedSwitch(const ParsedRecord& r, const SchedSwitchEvent& ev);
+  void onSchedWake(const ParsedRecord& r, const SchedWakeEvent& ev);
+  void onSwitchRecord(const ParsedRecord& r);
+  void initSched();
+  bool tidKept(uint32_t tid);  // is the thread in the target set (every thread in system mode)
+  void touchThread(uint32_t tid);
+  // The callstack of a sample or tracepoint record; `p == nullptr` resolves the kernel frames only.
+  CallstackIdx cachedStack(Proc* p, const ParsedRecord& r, uint16_t& flags);
+  CallstackIdx resolveStack(Proc* p, const ParsedRecord& r, uint16_t& flags);
   void onThrottle(const ParsedRecord& r, bool unthrottle);
 
   // --- tables
@@ -250,6 +295,20 @@ class Converter {
   trace::TraceWriter& m_writer;
   ConvertStats& m_stats;
   SampleSink m_sink;
+  RecordSink<trace::ContextSwitchRec> m_switchSink;
+  RecordSink<trace::ReadyRec> m_readySink;
+  // Scheduler events: the tracepoint decoders, or the PERF_RECORD_SWITCH fallback.
+  bool m_schedTracepoints = false, m_schedSwitchRecords = false;
+  // Per cpu, the last SWITCH_CPU_WIDE switch-out (old, new): the kernel does not emit one for the idle task,
+  // so a switch-in whose switch-out was not seen is a switch of its own, and one that repeats the switch-out
+  // just seen is a duplicate.
+  struct LastSwitchOut {
+    uint32_t oldTid = 0, newTid = 0;
+    bool valid = false;
+  };
+  std::unordered_map<uint32_t, LastSwitchOut> m_lastSwitchOut;
+  std::optional<SchedSwitchDecoder> m_switchDecoder;
+  std::optional<SchedWakeDecoder> m_wakeDecoder;
 
   std::vector<SpoolFile> m_metaFiles, m_dataFiles;
   RecordLayout m_layout;
@@ -621,6 +680,10 @@ FrameIdx Converter::frameFor(Proc& p, uint64_t addr) {
 }
 
 void Converter::onSample(const ParsedRecord& r) {
+  if (r.rawSize > 4) {  // a tracepoint record (a cpu-clock sample carries an empty 4-byte RAW area)
+    onSchedSample(r);
+    return;
+  }
   ++m_stats.samplesRead;
   if (m_opt.windowStartTs != 0 && r.time < m_opt.windowStartTs) {
     ++m_stats.samplesDroppedWindow;
@@ -637,16 +700,25 @@ void Converter::onSample(const ParsedRecord& r) {
   }
   Proc& p = m_procs[procIdx];
   const uint32_t thrIdx = ensureThread(r.tid, procIdx, r.time);
+  uint16_t flags = 0;
+  const CallstackIdx cs = cachedStack(&p, r, flags);
+  m_sink.push(r.time, r.tid, cs, static_cast<uint16_t>(std::min<uint32_t>(r.cpu, 0xFFFF)), flags);
+  ++m_threads[thrIdx].kept;
+  ++m_stats.samplesWritten;
+}
 
+CallstackIdx Converter::cachedStack(Proc* p, const ParsedRecord& r, uint16_t& flags) {
   const bool kernelMode = r.cpuMode() == kMiscKernel;
   const size_t chainBytes = static_cast<size_t>(r.chainCount) * 8;
   const uint64_t h1 = core::hashBytes(r.chain, chainBytes, core::hashCombine(r.ip, kernelMode ? 1u : 0u));
   const uint64_t h2 = core::hashBytes(r.chain, chainBytes, 0x9E3779B97F4A7C15ull ^ r.chainCount);
+  if (p == nullptr) return resolveStack(nullptr, r, flags);  // kernel frames only: rare, not cached
   StackCacheEntry& slot = m_stackCache[h1 & (kStackCacheSize - 1)];
   CallstackIdx cs;
-  uint16_t flags = 0;
-  if (slot.valid && slot.h1 == h1 && slot.h2 == h2 && slot.asId == p.as->id && slot.asEpoch == p.as->epoch &&
-      slot.ip == r.ip && slot.count == r.chainCount && slot.kernelMode == kernelMode) {
+  flags = 0;
+  if (slot.valid && slot.h1 == h1 && slot.h2 == h2 && slot.asId == p->as->id &&
+      slot.asEpoch == p->as->epoch && slot.ip == r.ip && slot.count == r.chainCount &&
+      slot.kernelMode == kernelMode) {
     cs = CallstackIdx(slot.cs);
     flags = slot.flags;
     m_stats.framesTotal += slot.frames;
@@ -659,8 +731,8 @@ void Converter::onSample(const ParsedRecord& r) {
     slot.h1 = h1;
     slot.h2 = h2;
     slot.ip = r.ip;
-    slot.asId = p.as->id;
-    slot.asEpoch = p.as->epoch;  // read after the resolution: module creation does not change the mappings
+    slot.asId = p->as->id;
+    slot.asEpoch = p->as->epoch;  // read after the resolution: module creation does not change the mappings
     slot.count = static_cast<uint32_t>(r.chainCount);
     slot.kernelMode = kernelMode;
     slot.cs = cs.get();
@@ -670,14 +742,12 @@ void Converter::onSample(const ParsedRecord& r) {
     slot.kernel = static_cast<uint32_t>(m_stats.framesKernel - kernelBefore);
     slot.valid = true;
   }
-  m_sink.push(r.time, r.tid, cs, static_cast<uint16_t>(std::min<uint32_t>(r.cpu, 0xFFFF)), flags);
-  ++m_threads[thrIdx].kept;
-  ++m_stats.samplesWritten;
+  return cs;
 }
 
 // Resolves a sample's raw callchain to a callstack: strips the context markers, resolves user addresses to
 // (module, RVA), leaves kernel and unmapped addresses absolute, and sets the kernel-leaf flag.
-CallstackIdx Converter::resolveStack(Proc& p, const ParsedRecord& r, uint16_t& flags) {
+CallstackIdx Converter::resolveStack(Proc* p, const ParsedRecord& r, uint16_t& flags) {
   // Callchain: strip the context markers; the section a frame belongs to decides kernel vs user.
   m_stack.clear();
   bool kernelSection = r.cpuMode() == kMiscKernel;  // without markers the cpu mode decides
@@ -690,6 +760,7 @@ CallstackIdx Converter::resolveStack(Proc& p, const ParsedRecord& r, uint16_t& f
       kernelSection = v == kContextKernel || v == kContextGuestKernel;
       continue;
     }
+    if (!kernelSection && p == nullptr) continue;  // kernel frames only
     if (first) {
       first = false;
       leafKernel = kernelSection;
@@ -700,7 +771,7 @@ CallstackIdx Converter::resolveStack(Proc& p, const ParsedRecord& r, uint16_t& f
       ++m_stats.framesKernel;
       m_stack.push_back(m_writer.internFrame(ModuleIdx::invalid(), v));
     } else {
-      m_stack.push_back(frameFor(p, v));
+      m_stack.push_back(frameFor(*p, v));
     }
   }
   const bool kernelMode = r.cpuMode() == kMiscKernel;
@@ -709,15 +780,20 @@ CallstackIdx Converter::resolveStack(Proc& p, const ParsedRecord& r, uint16_t& f
     // the kernel, or it does not start at the sampled ip: the ip becomes the leaf.
     const bool kernelIp = kernelMode || r.ip >= 0xFFFF800000000000ull;
     FrameIdx leaf;
+    bool haveLeaf = true;
     if (kernelIp) {
       ++m_stats.framesTotal;
       ++m_stats.framesKernel;
       leaf = m_writer.internFrame(ModuleIdx::invalid(), r.ip);
+    } else if (p != nullptr) {
+      leaf = frameFor(*p, r.ip);
     } else {
-      leaf = frameFor(p, r.ip);
+      haveLeaf = false;
     }
-    m_stack.insert(m_stack.begin(), leaf);
-    leafKernel = kernelIp;
+    if (haveLeaf) {
+      m_stack.insert(m_stack.begin(), leaf);
+      leafKernel = kernelIp;
+    }
   }
   flags = leafKernel ? trace::kSampleFlagKernelLeaf : uint16_t{0};
   return m_writer.internCallstack(std::span<const FrameIdx>(m_stack));
@@ -736,6 +812,209 @@ void Converter::onThrottle(const ParsedRecord& r, bool unthrottle) {
   }
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// scheduler events (WP-71)
+
+void Converter::initSched() {
+  const SchedInfo& si = m_set.info.sched;
+  if (si.mode == "tracepoint") {
+    m_schedTracepoints = true;
+    if (si.switches) {
+      auto fmt = parseTracepointFormat(si.switchFormat);
+      auto dec = fmt.ok() ? SchedSwitchDecoder::create(*fmt) : Result<SchedSwitchDecoder>(fmt.error());
+      if (dec.ok())
+        m_switchDecoder.emplace(*dec);
+      else
+        m_stats.warnings.push_back("the sched_switch format in the spool is unusable (" +
+                                   dec.error().message + "): context switches are missing from this trace");
+    }
+    if (si.wakeups) {
+      auto fmt = parseTracepointFormat(si.wakeFormat);
+      auto dec = fmt.ok() ? SchedWakeDecoder::create(*fmt) : Result<SchedWakeDecoder>(fmt.error());
+      if (dec.ok())
+        m_wakeDecoder.emplace(*dec);
+      else
+        m_stats.warnings.push_back("the wakeup format in the spool is unusable (" + dec.error().message +
+                                   "): ready-thread events are missing from this trace");
+    }
+  } else if (si.mode == "context_switch") {
+    m_schedSwitchRecords = true;
+  }
+}
+
+bool Converter::tidKept(uint32_t tid) {
+  if (m_roots.empty()) return true;
+  auto it = m_tidToThread.find(tid);
+  if (it == m_tidToThread.end()) return false;
+  return isTarget(m_threads[it->second].proc);
+}
+
+// Counts a scheduler event as activity of a known thread, so that system mode writes the thread record.
+void Converter::touchThread(uint32_t tid) {
+  auto it = m_tidToThread.find(tid);
+  if (it != m_tidToThread.end()) ++m_threads[it->second].kept;
+}
+
+void Converter::onSchedSample(const ParsedRecord& r) {
+  const std::span<const uint8_t> raw(r.raw, r.rawSize);
+  const uint32_t type = tracepointCommonType(raw);
+  if (m_switchDecoder && type == m_switchDecoder->id()) {
+    ++m_stats.schedSwitchEvents;
+    SchedSwitchEvent ev;
+    if (!m_switchDecoder->decode(raw, ev)) {
+      ++m_stats.schedMalformed;
+      return;
+    }
+    onSchedSwitch(r, ev);
+  } else if (m_wakeDecoder && type == m_wakeDecoder->id()) {
+    ++m_stats.schedWakeEvents;
+    SchedWakeEvent ev;
+    if (!m_wakeDecoder->decode(raw, ev)) {
+      ++m_stats.schedMalformed;
+      return;
+    }
+    onSchedWake(r, ev);
+  } else {
+    ++m_stats.recordsUnsupported;
+  }
+}
+
+void Converter::onSchedSwitch(const ParsedRecord& r, const SchedSwitchEvent& ev) {
+  if (m_opt.windowStartTs != 0 && r.time < m_opt.windowStartTs) {
+    ++m_stats.schedDroppedWindow;
+    return;
+  }
+  if (ev.prevPid == ev.nextPid) return;
+
+  // The sample is taken by the task that switches out, so its callchain is prev's blocking stack.
+  Proc* stackProc = nullptr;
+  if (r.pid != 0) {
+    const uint32_t procIdx = ensureProc(r.pid, r.time);
+    if (keep(procIdx)) {
+      stackProc = &m_procs[procIdx];
+      ++m_threads[ensureThread(r.tid, procIdx, r.time)].kept;
+    }
+  }
+  const bool oldKept = ev.prevPid == r.tid && r.pid != 0 ? stackProc != nullptr : tidKept(ev.prevPid);
+  const bool newKept = tidKept(ev.nextPid);
+  if (!oldKept && !newKept) {
+    ++m_stats.schedDroppedNotTarget;
+    return;
+  }
+  CallstackIdx stack(0u);
+  uint32_t reserved = 0;
+  if (oldKept && ev.prevPid != 0 && stackProc != nullptr) {
+    uint16_t flags = 0;
+    stack = cachedStack(stackProc, r, flags);
+    if (r.tid != ev.prevPid) reserved |= trace::kSwitchFlagStackFromOtherThread;
+  }
+  const SwitchStateEncoding enc = encodeSwitchState(ev.prevState);
+  trace::ContextSwitchRec rec{};
+  rec.ts = r.time;
+  rec.cpu = r.cpu;
+  rec.old_tid = ev.prevPid;
+  rec.new_tid = ev.nextPid;
+  rec.old_state = enc.oldState;
+  rec.old_wait_reason = enc.oldWaitReason;
+  rec.old_wait_mode = 0;
+  rec.new_priority = static_cast<uint8_t>(std::clamp<int32_t>(ev.nextPrio, 0, 255));
+  rec.old_thread_stack = stack;
+  rec.reserved = reserved;
+  m_switchSink.push(rec);
+  ++m_stats.switchesWritten;
+  if (newKept) touchThread(ev.nextPid);
+}
+
+void Converter::onSchedWake(const ParsedRecord& r, const SchedWakeEvent& ev) {
+  if (m_opt.windowStartTs != 0 && r.time < m_opt.windowStartTs) {
+    ++m_stats.schedDroppedWindow;
+    return;
+  }
+  if (!ev.success || ev.pid == r.tid) return;
+  if (!tidKept(ev.pid)) {
+    ++m_stats.schedDroppedNotTarget;
+    return;
+  }
+  // The waker is the task running the wakeup. Its user frames are resolved only when it belongs to the target
+  // (otherwise its mappings would create modules of unrelated processes); the kernel frames always are.
+  Proc* wakerProc = nullptr;
+  if (r.pid != 0) {
+    const uint32_t procIdx = ensureProc(r.pid, r.time);
+    if (keep(procIdx)) {
+      wakerProc = &m_procs[procIdx];
+      ++m_threads[ensureThread(r.tid, procIdx, r.time)].kept;
+    }
+  }
+  uint16_t flags = 0;
+  trace::ReadyRec rec{};
+  rec.ts = r.time;
+  rec.cpu = r.cpu;
+  rec.readied_tid = ev.pid;
+  rec.readying_tid = r.tid;
+  rec.readying_stack = cachedStack(wakerProc, r, flags);
+  m_readySink.push(rec);
+  ++m_stats.readiesWritten;
+  touchThread(ev.pid);
+}
+
+// Fallback: PERF_RECORD_SWITCH_CPU_WIDE (system-wide plan; a switch-out record names both tasks, a switch-in
+// record both tasks again, but the kernel emits no switch-out record for the idle task, so the switch-in is
+// used when its switch-out was not seen) and PERF_RECORD_SWITCH (per-task events; a record per task and
+// direction, the other task is unknown).
+void Converter::onSwitchRecord(const ParsedRecord& r) {
+  if (!m_schedSwitchRecords) return;
+  const bool out = (r.misc() & kMiscSwitchOut) != 0;
+  uint32_t oldTid = 0, newTid = 0;
+  if (r.type() == kRecordSwitchCpuWide) {
+    LastSwitchOut& last = m_lastSwitchOut[r.cpu];
+    if (out) {
+      oldTid = r.tid;
+      newTid = r.nextPrevTid;
+      last = {oldTid, newTid, true};
+    } else {
+      oldTid = r.nextPrevTid;  // the task that ran before
+      newTid = r.tid;
+      const bool repeatsSwitchOut = last.valid && last.oldTid == oldTid && last.newTid == newTid;
+      last.valid = false;
+      if (repeatsSwitchOut) return;  // the switch-out record already said it
+    }
+  } else if (out) {
+    oldTid = r.tid;
+  } else {
+    newTid = r.tid;
+  }
+  ++m_stats.schedSwitchEvents;
+  if (m_opt.windowStartTs != 0 && r.time < m_opt.windowStartTs) {
+    ++m_stats.schedDroppedWindow;
+    return;
+  }
+  if (oldTid == newTid) return;
+  if (r.pid != 0) {
+    const uint32_t procIdx = ensureProc(r.pid, r.time);
+    if (keep(procIdx)) ++m_threads[ensureThread(r.tid, procIdx, r.time)].kept;
+  }
+  const bool oldKept = oldTid != 0 && tidKept(oldTid);
+  const bool newKept = newTid != 0 && tidKept(newTid);
+  if (!oldKept && !newKept) {
+    ++m_stats.schedDroppedNotTarget;
+    return;
+  }
+  trace::ContextSwitchRec rec{};
+  rec.ts = r.time;
+  rec.cpu = r.cpu;
+  rec.old_tid = oldTid;
+  rec.new_tid = newTid;
+  // Runnable at the switch-out (the kernel sets the PREEMPT flag): Ready; otherwise it blocked. The reason is
+  // unknown without the tracepoint.
+  rec.old_state = out && (r.misc() & kMiscSwitchOutPreempt) != 0 ? uint8_t{1} : uint8_t{5};
+  rec.old_wait_reason = 0;
+  rec.old_thread_stack = CallstackIdx(0u);
+  m_switchSink.push(rec);
+  ++m_stats.switchesWritten;
+  if (oldKept) touchThread(oldTid);
+  if (newKept) touchThread(newTid);
+}
+
 void Converter::onRecord(const ParsedRecord& r) {
   ++m_stats.recordsRead;
   if (r.hasTime) m_lastTs = std::max(m_lastTs, r.time);
@@ -750,7 +1029,8 @@ void Converter::onRecord(const ParsedRecord& r) {
     case kRecordLostSamples: m_stats.eventsLost += r.lost; break;
     case kRecordThrottle: onThrottle(r, false); break;
     case kRecordUnthrottle: onThrottle(r, true); break;
-    // WP-71 hook: kRecordSwitch / kRecordSwitchCpuWide will produce ContextSwitchRec / ReadyRec here.
+    case kRecordSwitch:
+    case kRecordSwitchCpuWide: onSwitchRecord(r); break;
     default: break;
   }
 }
@@ -947,6 +1227,7 @@ Result<void> Converter::run() {
   }
   if (m_startTs == 0) m_startTs = 1;  // never 0: 0 means "before the trace" in the module and thread records
 
+  initSched();
   m_inRundown = true;
   for (int phase = 0; phase < 3; ++phase) TACHYON_TRY(readRundown(phase));
   m_inRundown = false;
@@ -960,6 +1241,8 @@ Result<void> Converter::run() {
 
   TACHYON_TRY(mergeStreams());
   m_sink.flush(true);
+  m_switchSink.flush(true);
+  m_readySink.flush(true);
   return finalize();
 }
 
@@ -1034,6 +1317,21 @@ Result<void> Converter::finalize() {
                  {"max_sample_rate", si.maxSampleRate},
                  {"cpu_time_max_percent", si.cpuTimeMaxPercent},
                  {"clock", "CLOCK_MONOTONIC_RAW"}};
+  doc["sched"] = {{"path", si.sched.mode},
+                  {"switches_requested", si.sched.switches},
+                  {"wakeups_requested", si.sched.wakeups},
+                  {"wake_event", si.sched.wakeEvent},
+                  {"fallback_reason", si.sched.reason},
+                  {"wait_reasons", si.sched.mode == "tracepoint"},
+                  {"blocking_stacks", si.sched.mode == "tracepoint"},
+                  {"wakers", si.sched.mode == "tracepoint" && si.sched.wakeups},
+                  {"switch_events", m_stats.schedSwitchEvents},
+                  {"wake_events", m_stats.schedWakeEvents},
+                  {"context_switches_written", m_stats.switchesWritten},
+                  {"ready_events_written", m_stats.readiesWritten},
+                  {"dropped_not_target", m_stats.schedDroppedNotTarget},
+                  {"dropped_window", m_stats.schedDroppedWindow},
+                  {"malformed", m_stats.schedMalformed}};
   const double missed = static_cast<double>(m_stats.throttledNs) / 1e9 * si.samplingHz;
   doc["throttle"] = {{"events", m_stats.throttleEvents},
                      {"throttled_ms", m_stats.throttledNs / 1'000'000},

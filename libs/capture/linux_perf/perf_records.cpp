@@ -106,6 +106,14 @@ ParseStatus parseSample(std::span<const uint8_t> body, const RecordLayout& layou
     out.chainCount = nr;
     c.skip(static_cast<size_t>(nr) * 8);
   }
+  if ((st & kSampleRaw) != 0) {
+    const uint32_t size = c.get<uint32_t>();
+    if (!c.ok()) return ParseStatus::Malformed;
+    if (size > c.remaining()) return ParseStatus::Malformed;  // would run past the record
+    out.raw = c.here();
+    out.rawSize = size;
+    c.skip(size);
+  }
   return c.ok() ? ParseStatus::Ok : ParseStatus::Malformed;
 }
 
@@ -364,6 +372,15 @@ void RecordBuilder::sample(const Sample& s) {
     putU64(s.chain.size());
     for (uint64_t ip : s.chain) putU64(ip);
   }
+  if ((st & kSampleRaw) != 0) {
+    // The kernel pads the payload so that the u32 size and the data fill a multiple of 8 bytes; a software
+    // event (no payload) writes a 4-byte zero area.
+    size_t n = s.raw.empty() ? 4 : s.raw.size();
+    while (((n + 4) & 7u) != 0) ++n;
+    putU32(static_cast<uint32_t>(n));
+    m_bytes.insert(m_bytes.end(), s.raw.begin(), s.raw.end());
+    m_bytes.insert(m_bytes.end(), n - s.raw.size(), uint8_t{0});
+  }
   end(start);
 }
 
@@ -469,10 +486,21 @@ void RecordBuilder::throttle(bool unthrottle, uint64_t time, uint64_t idValue, u
   end(start);
 }
 
-void RecordBuilder::switchCpuWide(bool out, uint32_t nextPrevPid, uint32_t nextPrevTid, const Id& id) {
-  const size_t start = begin(kRecordSwitchCpuWide, out ? kMiscSwitchOut : uint16_t{0});
+void RecordBuilder::switchCpuWide(bool out, uint32_t nextPrevPid, uint32_t nextPrevTid, const Id& id,
+                                  bool preempt) {
+  uint16_t misc = out ? kMiscSwitchOut : uint16_t{0};
+  if (out && preempt) misc = static_cast<uint16_t>(misc | kMiscSwitchOutPreempt);
+  const size_t start = begin(kRecordSwitchCpuWide, misc);
   putU32(nextPrevPid);
   putU32(nextPrevTid);
+  trailer(id);
+  end(start);
+}
+
+void RecordBuilder::switchTask(bool out, const Id& id, bool preempt) {
+  uint16_t misc = out ? kMiscSwitchOut : uint16_t{0};
+  if (out && preempt) misc = static_cast<uint16_t>(misc | kMiscSwitchOutPreempt);
+  const size_t start = begin(kRecordSwitch, misc);
   trailer(id);
   end(start);
 }

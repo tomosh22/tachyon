@@ -1,0 +1,5 @@
+# sched_switch (narrow prev_state): tb-io (4321) enters uninterruptible sleep (D), tb-lock-0 (4320) runs
+51 01 00 00 e1 10 00 00 74 62 2d 69 6f 00 00 00
+00 00 00 00 00 00 00 00 e1 10 00 00 78 00 00 00
+02 00 00 00 74 62 2d 6c 6f 63 6b 2d 30 00 00 00
+00 00 00 00 e0 10 00 00 78 00 00 00

@@ -39,6 +39,13 @@ std::string SessionInfo::toJson() const {
   j["max_sample_rate"] = maxSampleRate;
   j["cpu_time_max_percent"] = cpuTimeMaxPercent;
   j["circular_mb"] = circularMb;
+  j["sched"] = {{"mode", sched.mode},
+                {"switches", sched.switches},
+                {"wakeups", sched.wakeups},
+                {"switch_format", sched.switchFormat},
+                {"wake_format", sched.wakeFormat},
+                {"wake_event", sched.wakeEvent},
+                {"reason", sched.reason}};
   j["kernel_release"] = kernelRelease;
   j["hostname"] = hostname;
   j["agent_version"] = agentVersion;
@@ -94,6 +101,24 @@ Result<SessionInfo> SessionInfo::fromJson(const std::string& text) {
   num("max_sample_rate", s.maxSampleRate);
   num("cpu_time_max_percent", s.cpuTimeMaxPercent);
   num("circular_mb", s.circularMb);
+  if (auto it = j.find("sched"); it != j.end() && it->is_object()) {
+    const json& o = *it;
+    auto sstr = [&](const char* key, std::string& out) {
+      auto f = o.find(key);
+      if (f != o.end() && f->is_string()) out = f->get<std::string>();
+    };
+    auto sflag = [&](const char* key, bool& out) {
+      auto f = o.find(key);
+      if (f != o.end() && f->is_boolean()) out = f->get<bool>();
+    };
+    sstr("mode", s.sched.mode);
+    sflag("switches", s.sched.switches);
+    sflag("wakeups", s.sched.wakeups);
+    sstr("switch_format", s.sched.switchFormat);
+    sstr("wake_format", s.sched.wakeFormat);
+    sstr("wake_event", s.sched.wakeEvent);
+    sstr("reason", s.sched.reason);
+  }
   str("kernel_release", s.kernelRelease);
   str("hostname", s.hostname);
   str("agent_version", s.agentVersion);

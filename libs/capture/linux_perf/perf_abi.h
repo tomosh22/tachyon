@@ -53,10 +53,14 @@ inline constexpr uint64_t kSampleIdentifier = 1ull << 16;
 // SAMPLE records: see kSupportedSampleTypeMask).
 inline constexpr uint64_t kBackendSampleType =
     kSampleIp | kSampleTid | kSampleTime | kSampleCallchain | kSampleCpu;
-// Bits whose record layout the parser knows. READ, RAW, branch stacks, user regs/stack, ... are not decoded.
-inline constexpr uint64_t kSupportedSampleTypeMask = kSampleIp | kSampleTid | kSampleTime | kSampleAddr |
-                                                     kSampleCallchain | kSampleId | kSampleCpu |
-                                                     kSamplePeriod | kSampleStreamId | kSampleIdentifier;
+// The sample_type of a capture that also records the sched tracepoints (WP-71): every event of the capture
+// uses it, so one layout describes the whole ring (RAW holds the tracepoint payload; a cpu-clock sample
+// carries an empty 4-byte RAW area).
+inline constexpr uint64_t kSchedSampleType = kBackendSampleType | kSampleRaw;
+// Bits whose record layout the parser knows. READ, branch stacks, user regs/stack, ... are not decoded.
+inline constexpr uint64_t kSupportedSampleTypeMask =
+    kSampleIp | kSampleTid | kSampleTime | kSampleAddr | kSampleCallchain | kSampleId | kSampleCpu |
+    kSamplePeriod | kSampleStreamId | kSampleRaw | kSampleIdentifier;
 
 // perf_event_header::misc
 inline constexpr uint16_t kMiscCpuModeMask = 7;

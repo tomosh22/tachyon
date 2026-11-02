@@ -43,6 +43,15 @@
 // (there is no gap, unlike the ETW restart) and discards the consumed segments, so the next flush starts
 // after this one.
 //
+// SCHEDULER EVENTS (WP-71, sched_setup.h). Preferred: sched:sched_switch and sched:sched_waking tracepoint
+// events next to every sampling event, writing into the same ring; they give wait reasons, the blocking stack
+// of the task that switches out and the waker's stack. Without usable tracepoints (no tracefs, not
+// readable, the open is refused) the sampling events ask for PERF_RECORD_SWITCH instead: switches without
+// wait reasons, stacks or wakeups, with a warning. CaptureOptions.stackCSwitch / stackReady turn the two
+// kinds of events on and off. The tracepoints are used in the system-wide plan only: a task-bound
+// sched_switch event misses the switches into the task and a task-bound sched_waking event the wakeups by
+// other tasks, so the per-thread plan records the task-bound PERF_RECORD_SWITCH out / in records.
+//
 // LOST / THROTTLE. PERF_RECORD_LOST counts go to CaptureResult.eventsLost. PERF_RECORD_THROTTLE periods are
 // reported as warnings in the trace's CaptureInfo (and the log) with the sysctl guidance of throttleAdvice();
 // they are not added to eventsLost because the kernel does not say how many samples a throttle cost.
@@ -53,6 +62,7 @@
 #include "capture/linux_perf/launch.h"
 #include "capture/linux_perf/perf_converter.h"
 #include "capture/linux_perf/perf_system.h"
+#include "capture/linux_perf/sched_setup.h"
 #include "capture/windows_etw/session_lifecycle.h"
 #include "capture/windows_etw/target_watch.h"
 
@@ -73,11 +83,17 @@ struct LinuxPerfBackendConfig {
   uint32_t ringPages = 256;     // data pages per ring, a power of two (1 MiB with 4 KiB pages)
   std::string agentVersion = "tachyon-agent";
   std::chrono::milliseconds drainInterval{10};
+  // Where the scheduler tracepoint formats are read (events/sched/...). Empty: IPerfSystem::tracefsRoot().
+  std::filesystem::path tracefsRoot;
+  // Never use the sched tracepoints; record context switches from PERF_RECORD_SWITCH (tests, kernels where
+  // the tracepoints are known to misbehave).
+  bool forceContextSwitchFallback = false;
 };
 
 // What the last start / stop observed; for tests, logs and reports.
 struct LinuxPerfDiagnostics {
-  std::string plan;  // "system-wide" | "per-thread"
+  std::string plan;       // "system-wide" | "per-thread"
+  std::string schedPath;  // "tracepoint" | "context_switch" | "none"
   uint32_t rings = 0;
   uint32_t ringPages = 0;  // pages actually mapped (after any reduction)
   bool kernelBuildId = false;
@@ -129,6 +145,12 @@ class LinuxPerfBackend final : public ICaptureBackend, public ITargetWatch {
   void notify(CaptureState state, float progress);
   Result<void> beginRecording(const CaptureOptions& options, std::unique_ptr<perf::LaunchedProcess> child);
   Result<void> openPlan(Session& session, const CaptureOptions& options, bool systemWide);
+  // Opens the events of the chosen plan (system-wide, else per-thread) for the session's sched plan.
+  Result<void> openEvents(Session& session, const CaptureOptions& options);
+  // Tracepoint sched events next to the cpu-clock event `ownerFd` of (pid, cpu): their records go into its
+  // ring.
+  Result<void> openSchedEvents(Session& session, const perf::EventConfig& base, int pid, int cpu,
+                               int ownerFd);
   Result<void> openSlot(Session& session, const perf::EventConfig& cfg, int pid, int cpu);
   // Per-thread plan: opens `tid` on every cpu; the first task's event of a cpu owns that cpu's ring, the
   // others write into it (PERF_EVENT_IOC_SET_OUTPUT).

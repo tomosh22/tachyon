@@ -57,6 +57,18 @@ struct SpoolBatchHeader {
 static_assert(sizeof(SpoolFileHeader) == 32);
 static_assert(sizeof(SpoolBatchHeader) == 16);
 
+// How the scheduler events were recorded (WP-71). Serialised inside session.json so that the converter needs
+// nothing from the machine it runs on.
+struct SchedInfo {
+  std::string mode = "none";  // "none" | "tracepoint" | "context_switch"
+  bool switches = false;      // context-switch events were requested (and recorded)
+  bool wakeups = false;       // ready-thread (wakeup) events were requested (and recorded)
+  std::string switchFormat;   // tracefs events/sched/sched_switch/format (tracepoint mode)
+  std::string wakeFormat;     // format of the wakeup tracepoint
+  std::string wakeEvent;      // "sched_waking" | "sched_wakeup"
+  std::string reason;         // why the tracepoint path was not used (context_switch / none)
+};
+
 // How the capture was configured and what the drain saw. Serialised as session.json.
 struct SessionInfo {
   uint32_t version = 1;
@@ -79,6 +91,7 @@ struct SessionInfo {
   int64_t maxSampleRate = 0;
   int cpuTimeMaxPercent = 0;
   uint32_t circularMb = 0;
+  SchedInfo sched;
   std::string kernelRelease, hostname, agentVersion;
   // Filled at stop.
   uint64_t drainedBytes = 0;
