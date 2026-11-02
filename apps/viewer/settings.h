@@ -22,6 +22,10 @@ struct Settings {
 
   // Symbol servers (WP-21 locator); none unless configured, so a default install never touches the network.
   std::vector<std::string> symbolServers;
+  // WP-48: explicit symbol search paths added from the Symbols panel (UTF-8). A directory is searched by the
+  // locator and scanned for `*.symbols.json`; a `.json` file is registered as a symbol file override; any
+  // other file is offered to the locator (used when its name matches the wanted symbol file).
+  std::vector<std::string> symbolSearchPaths;
   std::string cacheDir;  // empty = <user cache dir>/tachyon/symbols (paths.h: defaultSymbolCacheDir)
   std::vector<SourcePathMapping> sourcePathMappings;
   ThemeKind theme = ThemeKind::Dark;
@@ -39,6 +43,9 @@ struct Settings {
 
   // Not thread-safe. Moves/adds `path` at the front of recentFiles, de-duplicated, capped.
   void addRecentFile(const std::string& path);
+  // Not thread-safe. Appends `path` to symbolSearchPaths unless present or empty; returns whether it was
+  // added.
+  bool addSymbolSearchPath(const std::string& path);
 };
 
 // Thread-safe: pure functions.

@@ -8,6 +8,8 @@
 #include "symbols/dwarf/dwarf_provider.h"
 #include "viewer/builtin_panels.h"
 #include "viewer/paths.h"
+#include "viewer/status/symbol_paths.h"
+#include "viewer/status/symbols_panel.h"
 #include "viewer/theme.h"
 
 #include <imgui.h>
@@ -46,7 +48,8 @@ void drawSpinner(float radius, float thickness, ImU32 color) {
 App::App(std::unique_ptr<IRenderer> renderer, AppOptions options)
     : m_renderer(std::move(renderer)),
       m_options(std::move(options)),
-      m_queryExecutor(std::make_unique<analysis::QueryExecutor>(analysis::QueryExecutor::Options{2, 16})) {}
+      m_queryExecutor(std::make_unique<analysis::QueryExecutor>(analysis::QueryExecutor::Options{2, 16})),
+      m_toasts(m_options.toastClock) {}
 
 App::~App() {
   m_jobs.cancelAll();
@@ -94,6 +97,14 @@ bool App::init(std::string& error) {
   m_panels.add(makeFunctionListPanel());
   m_panels.add(makeButterflyPanel());
   m_panels.add(makeFunctionStatsPanel(), false);  // opened by Ctrl+F or from the View menu
+  {
+    SymbolsPanelHost host;
+    host.addSymbolPath = [this] { m_commands.run("symbols.addPath"); };
+    host.retry = [this] { rerunSymbolResolution(); };
+    host.toast = [this](ToastLevel level, std::string text) { toast(level, std::move(text)); };
+    m_panels.add(makeSymbolsPanel(std::move(host)), false);  // opened from the status bar or the View menu
+  }
+  registerBuiltinPanelShortcuts(m_shortcuts);
   m_selectionSub = m_selection.subscribe([this](const SelectionState& state, SelectionField field) {
     // WP-46: a panel asked for another panel to be shown (the panel itself takes the focus).
     if (field == SelectionField::PanelRequest) {
@@ -144,6 +155,15 @@ void App::registerCommands() {
   m_commands.add({"stats.search", "Function Statistics: Search Functions", "Ctrl+F",
                   [this] { m_selection.requestPanel(kFunctionStatsPanelName); }});
   m_commands.add({"help.palette", "Help: Command Palette", "Ctrl+P", [this] { m_paletteRequested = true; }});
+  m_commands.add({"help.shortcuts", "Help: Keyboard Shortcuts", "?", [this] { m_shortcutSheet.open(); }});
+  m_commands.add({"symbols.addPath", "Symbols: Add Symbol Path...", "", [this] {
+                    std::filesystem::path start;
+                    if (!m_settings.symbolSearchPaths.empty())
+                      start = pathFromUtf8(m_settings.symbolSearchPaths.back()).parent_path();
+                    if (start.empty() && m_document) start = m_document->path().parent_path();
+                    m_pathPicker.open(start);
+                  }});
+  m_commands.add({"symbols.retry", "Symbols: Retry Resolution", "", [this] { rerunSymbolResolution(); }});
 }
 
 void App::setTheme(ThemeKind theme) {
@@ -208,6 +228,11 @@ void App::startSymbolResolution(Document& document) {
     const Result<void> added = service->addSymbolFileOverride(sidecar);
     if (!added.ok()) TACHYON_LOG_WARN("symbols: {}: {}", pathToUtf8(sidecar), added.error().toString());
   }
+  // WP-48: explicit symbol search paths from the Symbols panel / settings.
+  const SymbolPathReport paths =
+      applySymbolSearchPaths(*service, m_settings.symbolSearchPaths, m_settings.symbolServers, cacheDir);
+  for (const std::string& problem : paths.problems) TACHYON_LOG_WARN("symbols: search path: {}", problem);
+  if (m_options.configureSymbols) m_options.configureSymbols(*service);
   m_symbolMailbox = std::make_shared<SymbolMailbox>();
   IRenderer* renderer = m_renderer.get();
   m_symbolMailbox->wake = [renderer] { renderer->wake(); };
@@ -221,6 +246,36 @@ void App::startSymbolResolution(Document& document) {
     mailbox->dirty.store(true);
     if (mailbox->wake) mailbox->wake();
   });
+}
+
+void App::toast(ToastLevel level, std::string text) {
+  m_toasts.push(level, std::move(text));
+  requestRedraw();
+}
+
+void App::rerunSymbolResolution() {
+  if (!m_document) return;
+  startSymbolResolution(
+      *m_document);  // fresh service; the old one is released (queries keep it alive if needed)
+  ++m_symbolGeneration;
+  requestRedraw();
+}
+
+bool App::addSymbolPath(const std::filesystem::path& path, std::string& error) {
+  const Result<void> valid = validateSymbolPath(path);
+  if (!valid.ok()) {
+    error = valid.error().toString();
+    toast(ToastLevel::Error, "Cannot add symbol path: " + error);
+    return false;
+  }
+  std::error_code ec;
+  const std::filesystem::path absolute = std::filesystem::absolute(path, ec);
+  m_settings.addSymbolSearchPath(pathToUtf8(ec ? path : absolute));
+  if (m_options.persist) saveSettings();
+  toast(ToastLevel::Info,
+        "Added symbol path " + pathToUtf8(path) + (m_document ? "; resolving symbols again" : ""));
+  rerunSymbolResolution();
+  return true;
 }
 
 void App::onDocumentLoaded(std::shared_ptr<Document> document) {
@@ -273,6 +328,7 @@ void App::openFile(const std::filesystem::path& path) {
         if (!r.ok()) {
           m_lastError = "Cannot open " + pathToUtf8(path) + ": " + r.error().toString();
           TACHYON_LOG_ERROR("{}", m_lastError);
+          toast(ToastLevel::Error, m_lastError);
           return;
         }
         auto model = std::make_shared<const model::TraceModel>(std::move(r).value());
@@ -296,7 +352,8 @@ bool App::frame(int waitMs) {
 
   const ImGuiIO& io = ImGui::GetIO();
   if (m_redrawFrames > 0) --m_redrawFrames;
-  if (io.WantTextInput || m_paletteOpen || m_fileBrowser.isOpen())
+  if (io.WantTextInput || m_paletteOpen || m_fileBrowser.isOpen() || m_pathPicker.isOpen() ||
+      m_shortcutSheet.isOpen() || !m_toasts.empty())
     m_redrawFrames = std::max(m_redrawFrames, 1);
   return !m_quit;
 }
@@ -357,6 +414,8 @@ void App::drawUi() {
   }
 
   drawMenuBar();
+  m_banner.update(m_document.get(), m_documentGeneration);
+  m_banner.draw();
   drawStatusBar();
   ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 
@@ -365,8 +424,23 @@ void App::drawUi() {
     if (e.open) e.panel->draw(context, &e.open);
   }
 
+  // Tell panels that were opened or closed since the last frame (window X, View menu, commands).
+  for (PanelEntry& e : m_panels.entries()) {
+    if (e.open != e.notifiedOpen) {
+      e.notifiedOpen = e.open;
+      e.panel->onVisibilityChanged(e.open);
+    }
+  }
+
   if (auto chosen = m_fileBrowser.draw()) openFile(*chosen);
+  if (auto chosen = m_pathPicker.draw()) {
+    std::string error;
+    addSymbolPath(*chosen, error);
+  }
   drawCommandPalette();
+  m_shortcutSheet.draw(m_commands, m_shortcuts,
+                       io.WantTextInput || m_paletteOpen || m_fileBrowser.isOpen() || m_pathPicker.isOpen());
+  m_toasts.draw();
 }
 
 void App::drawMenuBar() {
@@ -405,6 +479,7 @@ void App::drawMenuBar() {
   }
   if (ImGui::BeginMenu("Help")) {
     if (ImGui::MenuItem("Command Palette...", "Ctrl+P")) m_paletteRequested = true;
+    if (ImGui::MenuItem("Keyboard Shortcuts...", "?")) m_shortcutSheet.open();
     ImGui::EndMenu();
   }
   ImGui::EndMainMenuBar();
@@ -416,15 +491,9 @@ void App::drawStatusBar() {
   if (ImGui::BeginViewportSideBar("##StatusBar", ImGui::GetMainViewport(), ImGuiDir_Down,
                                   ImGui::GetFrameHeight(), flags)) {
     if (ImGui::BeginMenuBar()) {
-      if (!m_lastError.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", m_lastError.c_str());
-      } else if (m_document) {
-        const model::TraceModel& m = m_document->model();
-        ImGui::Text("%s  |  %zu threads  |  %llu samples", pathToUtf8(m_document->path().filename()).c_str(),
-                    m.threads.size(), static_cast<unsigned long long>(m_document->totalSamples()));
-      } else {
-        ImGui::TextDisabled("Ready");
-      }
+      m_statusBar.update(m_document.get(), m_documentGeneration);
+      m_statusBar.draw(m_document.get(), m_selection.state(), m_lastError);
+      if (m_statusBar.symbolsClicked()) m_selection.requestPanel(SymbolsPanel::kName);
       const std::vector<JobQueue::Info> jobs = m_jobs.active();
       if (!jobs.empty()) {
         const JobQueue::Info& job = jobs.front();

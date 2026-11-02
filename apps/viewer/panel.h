@@ -71,11 +71,16 @@ class IPanel {
   }
   // Main-thread only. Optional: called when a document finished loading (non-null) or closed (null).
   virtual void onDocumentChanged(const Document* document) { (void)document; }
+  // Main-thread only. Optional: the panel was opened (true) or closed (false) by any route: the window's X,
+  // the View menu, a command or a PanelRequest. App calls it once per change, after the frame's panels were
+  // drawn; closing does not mean the window is merely scrolled out of view or tabbed away.
+  virtual void onVisibilityChanged(bool visible) { (void)visible; }
 };
 
 struct PanelEntry {
   std::unique_ptr<IPanel> panel;
   bool open = true;
+  bool notifiedOpen = false;  // what the panel was last told by onVisibilityChanged (App bookkeeping)
 };
 
 class PanelRegistry {
