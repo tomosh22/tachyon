@@ -39,7 +39,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
 | WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
 | WP-47 | Search and Function Statistics | D | merged | wp/47-function-stats | 2026-10-25 |
-| WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
+| WP-48 | Status, warnings, symbol progress | D | in progress | wp/48-status-warnings | 2026-11-02 |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
 | WP-51 | Client runtime | E | merged (CI green incl. windows; connected overhead 46.9 ns Linux / 68 ns Windows vs 40 ns target, under 80 ns gate; disabled 4.7 / 16 ns) | wp/51-sdk-runtime | 2026-10-25 |
 | WP-51b | SDK runtime fixes (flaky AgentLossFallsBack test, sidecar truncation, perf flake) | E | merged (root cause: fake-agent race; 20× ctest repeats green under load) | wp/51b-sdk-fixes | 2026-10-25 |
@@ -187,6 +187,8 @@ Verifier: the core passed. Stats are byte-identical before and after the refacto
 Verifier PASS. Privileged tests ran for real in this container (root with CAP_PERFMON): testbed spin over 3.16 s gave 24,799 target samples at 7,844/s with events_lost 0; 19–28 samples landed before main; leaf shares hot_a/spin_rest/hot_b/hot_c are 38/29/19/10% (expected 40/30/20/10). Module bases equal /proc maps (ELF rule). The kernel-leaf flag had 0 mismatches. 20k-iteration parser fuzzing under asan was clean; no fd leaks into the child; LOST and RLIMIT errors are clear. Conversion runs at 0.9–1.2 M samples/s (skewed) and 73–90 k/s (all-unique). CI has a new non-gating step that enables perf_event_paranoid=-1 and runs `-L linux_privileged`, failing the step if the tests were skipped. No PMU or tracefs here, so WP-71 sched tracepoints can only be tested on CI or a real host.
 
 ## Queued follow-ups
+
+- CI: on 2026-11-02 the privileged perf step really ran its 6 tests on GitHub's runner (24,907 samples in 3.13 s, 12 before main). The kernel throttled sampling 138 times; that is expected at 8 kHz on a shared runner. The step stays non-gating for now.
 
 - WP-70b: `warnings` in CaptureResult (capture_backend.h, appended at the end of the struct) plumbed into capture_done; block SIGPIPE around the launch release write; pre-check threads × cpus fds against RLIMIT_NOFILE (raise soft to hard, and name the count in the error); "no ETW capture is running" wording in the shared lifecycle.
 - WP-34c: add `callSiteFile`/`callSiteLine` (the physical function's call site of the outermost inline) to ResolvedAddress, filled by DWARF (`sites[n-1]`) and DIA; then `linesForFunction` uses it for exact inline call-site lines. (WP-34b found that providers put callee-internal positions on outer frames, so `inlines.back()` is NOT the physical call site.)
