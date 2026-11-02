@@ -4,6 +4,7 @@
 #include "viewer/common/function_names.h"
 #include "viewer/common/imgui_util.h"
 #include "viewer/common/query_filter.h"
+#include "viewer/common/scope_view_options.h"
 #include "viewer/document.h"
 
 #include <imgui.h>
@@ -95,7 +96,9 @@ void FunctionListPanel::onSelectionChanged(const PanelContext& context, const Se
     }
     context.requestRedraw();
   }
-  if (field == SelectionField::TimeFilter || field == SelectionField::All) context.requestRedraw();
+  if (field == SelectionField::TimeFilter || field == SelectionField::All ||
+      field == SelectionField::ViewOptions)
+    context.requestRedraw();
 }
 
 FunctionListPanel::QuerySpec FunctionListPanel::currentSpec(const PanelContext& context) const {
@@ -104,6 +107,9 @@ FunctionListPanel::QuerySpec FunctionListPanel::currentSpec(const PanelContext& 
                                m_restrictSubtree);
   spec.expandInline = m_inline;
   spec.kernelFrames = m_kernel;
+  const common::EffectiveScopeOptions scope = common::effectiveScopeOptions(context);
+  spec.blendScopes = scope.blendScopes;
+  spec.groupByFiber = scope.groupByFiber;
   spec.documentGeneration = context.documentGeneration;
   spec.symbolGeneration = context.symbolGeneration;
   return spec;
@@ -113,6 +119,8 @@ void FunctionListPanel::issue(const PanelContext& context, const QuerySpec& spec
   analysis::AggregationOptions options;
   options.expandInline = spec.expandInline;
   options.kernelFrames = spec.kernelFrames;
+  options.blendScopes = spec.blendScopes;
+  options.groupByFiber = spec.groupByFiber;
   const Document& doc = *context.document;
   std::shared_ptr<const AnalysisSnapshot> snapshot =
       doc.analysis().snapshot(options, spec.symbolGeneration, context.queryExecutor);
@@ -493,7 +501,14 @@ void FunctionListPanel::drawTable(const PanelContext& context, float height) {
           doubleClicked = item.entry;
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) rightClicked = item.entry;
         ImGui::SetCursorScreenPos(ImVec2(cell.x + (m_grouped ? em : 0.0f), cell.y));
-        ImGui::TextUnformatted(e.function.c_str());
+        if (e.scope) {  // WP-54: instrumentation scopes get an icon and their own colour
+          common::drawScopeIcon(em * 0.8f);
+          ImGui::PushStyleColor(ImGuiCol_Text, common::scopeTextColor());
+          ImGui::TextUnformatted(e.function.c_str());
+          ImGui::PopStyleColor();
+        } else {
+          ImGui::TextUnformatted(e.function.c_str());
+        }
         if (e.inlined) {
           ImGui::SameLine(0.0f, 4.0f);
           ImGui::TextDisabled("[inline]");

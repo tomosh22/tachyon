@@ -83,6 +83,20 @@ Settings Settings::load(const std::filesystem::path& path) {
       TACHYON_LOG_WARN("settings: 'uiScale' is not a number, using default");
     }
   }
+  if (const auto it = j.find("blendScopes"); it != j.end()) {
+    if (it->is_boolean()) {
+      s.blendScopes = it->get<bool>();
+    } else {
+      TACHYON_LOG_WARN("settings: 'blendScopes' is not a boolean, using default");
+    }
+  }
+  if (const auto it = j.find("frameBudgetMs"); it != j.end()) {
+    if (it->is_number() && std::isfinite(it->get<double>()) && it->get<double>() > 0.0) {
+      s.frameBudgetMs = std::clamp(it->get<double>(), 0.1, 10000.0);
+    } else {
+      TACHYON_LOG_WARN("settings: 'frameBudgetMs' is not a positive number, using default");
+    }
+  }
   if (const auto it = j.find("sourcePathMappings"); it != j.end()) {
     if (it->is_array()) {
       s.sourcePathMappings.clear();
@@ -112,6 +126,8 @@ Result<void> Settings::save(const std::filesystem::path& path) const {
   j["theme"] = themeName(theme);
   j["uiScale"] = uiScale;
   j["recentFiles"] = recentFiles;
+  j["blendScopes"] = blendScopes;
+  j["frameBudgetMs"] = frameBudgetMs;
 
   std::error_code ec;
   if (path.has_parent_path()) {

@@ -105,7 +105,13 @@ bool App::init(std::string& error) {
     m_panels.add(makeSymbolsPanel(std::move(host)), false);  // opened from the status bar or the View menu
   }
   registerBuiltinPanelShortcuts(m_shortcuts);
+  m_selection.setBlendScopes(m_settings.blendScopes);  // before the first subscriber: nobody to notify
   m_selectionSub = m_selection.subscribe([this](const SelectionState& state, SelectionField field) {
+    // WP-54: the blend choice is a preference, whichever panel changed it.
+    if (field == SelectionField::ViewOptions && m_settings.blendScopes != state.viewOptions.blendScopes) {
+      m_settings.blendScopes = state.viewOptions.blendScopes;
+      if (m_options.persist) saveSettings();
+    }
     // WP-46: a panel asked for another panel to be shown (the panel itself takes the focus).
     if (field == SelectionField::PanelRequest) {
       if (PanelEntry* p = m_panels.find(state.panelRequest.name)) p->open = true;
@@ -461,6 +467,18 @@ void App::drawMenuBar() {
   }
   if (ImGui::BeginMenu("View")) {
     for (PanelEntry& e : m_panels.entries()) ImGui::MenuItem(e.panel->name(), nullptr, &e.open);
+    ImGui::Separator();
+    {
+      // WP-54: analysis options that every panel follows (through the SelectionBus).
+      const bool hasScopes = m_document && !m_document->model().scopeEvents.empty();
+      const bool hasFibers = m_document && !m_document->model().fiberSwitches.empty();
+      bool blend = m_selection.state().viewOptions.blendScopes;
+      if (ImGui::MenuItem("Blend instrumentation scopes into sampled stacks", nullptr, &blend, hasScopes)) {
+        m_selection.setBlendScopes(blend);  // the subscription below keeps the setting (and saves it)
+      }
+      bool group = m_selection.state().viewOptions.groupByFiber;
+      if (ImGui::MenuItem("Group by fiber", nullptr, &group, hasFibers)) m_selection.setGroupByFiber(group);
+    }
     ImGui::Separator();
     if (ImGui::BeginMenu("Theme")) {
       if (ImGui::MenuItem("Dark", nullptr, m_settings.theme == ThemeKind::Dark)) setTheme(ThemeKind::Dark);

@@ -2,6 +2,8 @@
 
 #include "analysis/thread_states.h"
 #include "analysis/wait_reasons.h"
+#include "viewer/common/rect_batch.h"
+#include "viewer/common/scope_view_options.h"
 #include "viewer/document.h"
 
 #include <imgui_internal.h>
@@ -25,44 +27,7 @@ ImU32 toIm(Color32 c) {
   return static_cast<ImU32>(c);
 }
 
-// Appends many filled rectangles to a draw list with one PrimReserve per chunk instead of one per rectangle.
-// Nothing else may be added to the draw list while a batch is alive.
-class RectBatch {
- public:
-  RectBatch(ImDrawList* dl, size_t upperBound) : m_dl(dl), m_remaining(upperBound) { refill(); }
-  ~RectBatch() { release(); }
-  RectBatch(const RectBatch&) = delete;
-  RectBatch& operator=(const RectBatch&) = delete;
-
-  void add(float x0, float y0, float x1, float y1, ImU32 color) {
-    if (m_used == m_reserved) {
-      release();
-      refill();
-    }
-    m_dl->PrimRect(ImVec2(x0, y0), ImVec2(x1, y1), color);
-    ++m_used;
-  }
-
- private:
-  static constexpr size_t kChunk = 4096;  // 16384 vertices: far below the 16-bit index limit
-  void refill() {
-    m_reserved = std::min(m_remaining, kChunk);
-    m_used = 0;
-    if (m_reserved > 0) m_dl->PrimReserve(static_cast<int>(m_reserved * 6), static_cast<int>(m_reserved * 4));
-  }
-  void release() {
-    if (m_reserved > m_used) {
-      m_dl->PrimUnreserve(static_cast<int>((m_reserved - m_used) * 6),
-                          static_cast<int>((m_reserved - m_used) * 4));
-    }
-    m_remaining -= std::min(m_remaining, m_used);
-    m_reserved = m_used = 0;
-  }
-
-  ImDrawList* m_dl;
-  size_t m_remaining;
-  size_t m_reserved = 0, m_used = 0;
-};
+using common::RectBatch;
 
 }  // namespace
 
@@ -110,6 +75,15 @@ struct TimelineWidget::DocState {
   float rowsScrollY = 0;
   float rowsViewHeight = 0;
   float contentHeight = 0;
+
+  // WP-54.
+  ScopeLanesView scopes;
+  FrameGraphView frames;
+  PlotLanesView plots;
+  bool hasScopes = false, hasFibers = false, hasFrameMarks = false;
+  float threadsHeight = 0;  // content height of the thread rows (the markers / plot section starts here)
+
+  ~DocState() { plots.reset(); }
 };
 
 struct TimelineWidget::Hit {
@@ -125,6 +99,11 @@ struct TimelineWidget::Hit {
   const analysis::TimelineSpan* span = nullptr;
   bool pending = false;
   float share = 0;
+  // WP-54.
+  uint32_t scopeLine = 0;
+  std::optional<ScopeHit> scope;
+  bool inSection = false;  // below the thread rows: the markers / plot section
+  float sectionY = 0;      // y relative to the section top
 };
 
 TimelineWidget::TimelineWidget() = default;
@@ -271,8 +250,14 @@ void TimelineWidget::startDocument(const PanelContext& context) {
   doc->flags.assign(model.threads.size(), RowFlags{});
   doc->flameDepth.assign(model.threads.size(), 0);
   doc->rows.resize(model.threads.size());
+  doc->hasScopes = common::traceHasScopes(model);
+  doc->hasFibers = common::traceHasFibers(model);
+  doc->hasFrameMarks = !model.frameMarks.empty();
+  doc->frames.reset(context.settings ? context.settings->frameBudgetMs : kDefaultFrameBudgetMs);
+  doc->plots.start(context, doc->shared->model, m_options.buildInline);
 
   m_doc = std::move(doc);
+  m_hoveredScope.reset();
 }
 
 void TimelineWidget::startBuild(const PanelContext& context) {
@@ -385,7 +370,7 @@ void TimelineWidget::refreshRow(const PanelContext& context, const RowLayout& ro
   const uint32_t columns = std::clamp<uint32_t>(
       static_cast<uint32_t>(m_geometry.plotWidth / static_cast<float>(std::max(m_options.columnPixels, 1u))),
       1u, analysis::kMaxPixelWidth);
-  const uint32_t depths = row.expanded ? row.flameDepths : 0;
+  const uint32_t depths = row.expanded && modeHasSampled(row.mode) ? row.flameDepths : 0;
 
   const bool sameKey = cache.valid && cache.t0 == window.t0 && cache.t1 == window.t1 &&
                        cache.columns == columns && cache.depths == depths;
@@ -458,6 +443,14 @@ void TimelineWidget::draw(const PanelContext& context) {
   m_rowGeometry.flameDepthHeight *= ui;
   m_rowGeometry.flameGap *= ui;
   m_rowGeometry.rowSpacing *= ui;
+  m_rowGeometry.scopeLineHeight *= ui;
+  m_rowGeometry.scopeGap *= ui;
+  m_globalGeometry = GlobalGeometry{};
+  m_globalGeometry.markerLaneHeight *= ui;
+  m_globalGeometry.plotHeaderHeight *= ui;
+  m_globalGeometry.plotLaneHeight *= ui;
+  m_globalGeometry.gap *= ui;
+  m_globalGeometry.sectionGap *= ui;
 
   if (m_doc->symbolGeneration != context.symbolGeneration) {
     // Function keys (selection highlight, by-function colours, labels) change when modules resolve: drop the
@@ -476,6 +469,7 @@ void TimelineWidget::draw(const PanelContext& context) {
   applyNavigation();
   updateOrder();
   updateFlameDepths();
+  updateInstrumentation(context);
   m_anyHovered = false;
 
   drawToolbar(context);
@@ -490,6 +484,7 @@ void TimelineWidget::draw(const PanelContext& context) {
 
   drawOverview(context);
   drawHeader(context);
+  drawFrameGraphStrip(context);
   drawRows(context);
   handleKeys(context);
 }
@@ -570,7 +565,51 @@ void TimelineWidget::drawToolbar(const PanelContext& context) {
         "Up/Down: previous/next thread   E: expand   P: pin   PgUp/PgDn: scroll\n"
         "Double-click a thread name or right-click for pin / hide / expand");
   }
-  (void)context;
+  // WP-54: instrumentation controls, only for traces that have something to control.
+  const bool anyFrames = d.hasFrameMarks;
+  const bool anyPlots = d.plots.hasContent();
+  if (d.hasScopes || d.hasFibers || anyFrames || anyPlots) {
+    ImGui::BeginDisabled(!d.hasScopes);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+    if (ImGui::BeginCombo("Rows", rowModeName(m_options.rowMode))) {
+      for (const RowMode k : {RowMode::Sampled, RowMode::Scopes, RowMode::Both}) {
+        if (ImGui::Selectable(rowModeName(k), k == m_options.rowMode)) setGlobalRowMode(k);
+      }
+      ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::SetTooltip(
+          "What rows show: the sampled strip / flame chart, the instrumentation scope lanes, or both.\n"
+          "Right-click a row to set it for that row only.");
+    }
+    SelectionBus* bus = context.selection;
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!d.hasScopes || !bus);
+    bool blend = bus ? bus->state().viewOptions.blendScopes : false;
+    if (ImGui::Checkbox("Blend scopes", &blend) && bus) bus->setBlendScopes(blend);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::SetTooltip("Blend instrumentation scopes into sampled stacks (Call Graph, Function List, ...).");
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!d.hasFibers || !bus);
+    bool group = bus ? bus->state().viewOptions.groupByFiber : false;
+    if (ImGui::Checkbox("Group by fiber", &group) && bus) bus->setGroupByFiber(group);
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::SetTooltip(d.hasFibers ? "Pair and blend scopes per fiber, for every panel."
+                                    : "The trace has no fiber events.");
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!anyFrames);
+    ImGui::Checkbox("Frame graph", &m_options.showFrameGraph);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!anyPlots);
+    ImGui::Checkbox("Plots / markers", &m_options.showPlots);
+    ImGui::EndDisabled();
+  }
 }
 
 void TimelineWidget::drawStatusLine(const PanelContext& context) {
@@ -839,8 +878,20 @@ void TimelineWidget::drawRows(const PanelContext& context) {
   for (uint32_t& v : depths) {
     if (v == 0) v = kDefaultFlameDepths;
   }
-  d.layout = layoutRows(d.order, d.flags, depths, geom);
-  d.contentHeight = contentHeight(d.layout, geom);
+  std::vector<RowExtra> extras;
+  if (d.hasScopes) {
+    extras.resize(d.model->threads.size());
+    for (const ThreadIdx t : d.order) {
+      RowExtra& e = extras[t.get()];
+      e.mode = rowModeOf(t, true);
+      const bool expanded = d.flags[t.get()].expanded;
+      e.scopeLines = modeHasScopes(e.mode) && d.scopes.mayHaveScopes(t) ? d.scopes.linesFor(t, expanded) : 0;
+    }
+  }
+  d.layout = layoutRows(d.order, d.flags, depths, geom, extras);
+  d.threadsHeight = contentHeight(d.layout, geom);
+  d.plots.setVisible(m_options.showPlots);
+  d.contentHeight = d.threadsHeight + d.plots.layout(m_globalGeometry).height;
   if (m_scrollToThread.valid()) {
     for (const RowLayout& r : d.layout) {
       if (r.thread != m_scrollToThread) continue;
@@ -905,6 +956,13 @@ void TimelineWidget::drawRows(const PanelContext& context) {
         f.hidden = true;
         d.orderDirty = true;
       }
+      if (d.hasScopes && ImGui::BeginMenu("Row shows")) {
+        if (ImGui::MenuItem("Follow the toolbar", nullptr, !f.mode.has_value())) f.mode.reset();
+        for (const RowMode k : {RowMode::Sampled, RowMode::Scopes, RowMode::Both}) {
+          if (ImGui::MenuItem(rowModeName(k), nullptr, f.mode == k)) f.mode = k;
+        }
+        ImGui::EndMenu();
+      }
       if (ImGui::MenuItem("Select") && context.selection)
         context.selection->setSelectedThread(m_contextThread);
     }
@@ -916,6 +974,16 @@ void TimelineWidget::drawRows(const PanelContext& context) {
   m_stats.rowsTotal = static_cast<uint32_t>(d.layout.size());
   const ThreadIdx selectedThread =
       context.selection ? context.selection->state().selectedThread : ThreadIdx();
+  d.scopes.beginFrame();
+  d.scopes.setRecordItems(m_options.recordDrawnItems);
+  {
+    std::optional<StringIdx> highlighted;
+    if (context.selection) {
+      const auto& sf = context.selection->state().selectedFunction;
+      if (sf && sf->isScope()) highlighted = StringIdx(static_cast<uint32_t>(sf->value));
+    }
+    d.scopes.setHighlightedId(highlighted);
+  }
   for (size_t i = vis.first; i < vis.last; ++i) {
     const RowLayout& row = d.layout[i];
     RowCache& cache = d.rows[row.thread.get()];
@@ -929,6 +997,19 @@ void TimelineWidget::drawRows(const PanelContext& context) {
     drawRowContents(dl, context, i, top, cache);
     ++m_stats.rowsDrawn;
     if (cache.pending) ++m_stats.rowsPending;
+  }
+  {
+    const ScopeFrameStats& ss = d.scopes.frameStats();
+    m_stats.scopeRows = ss.rows;
+    m_stats.scopeLines = ss.lines;
+    m_stats.scopeItems = ss.items;
+    m_stats.scopeLabels = ss.labels;
+  }
+  {
+    const bool overCanvas = canvasHovered && m_drag.mode == Drag::Mode::None &&
+                            !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+    const ImVec2 mouse = io.MousePos;
+    drawSection(dl, context, origin.y, overCanvas ? &mouse : nullptr);
   }
   drawInstanceHighlights(dl, context, vis, origin.y);
   drawRangeOverlays(dl, context, m_geometry.rowsY0, m_geometry.rowsY1);
@@ -984,10 +1065,11 @@ void TimelineWidget::drawRowContents(ImDrawList* dl, const PanelContext& context
                 ImGui::GetColorU32(ImGuiCol_Text), label, nullptr, 0.0f, &clip);
   }
 
+  const bool sampled = modeHasSampled(row.mode);
   dl->PushClipRect(ImVec2(x0, rowTop), ImVec2(x0 + w, rowTop + row.height), true);
   if (cache.pending || cache.band.columns.empty()) {
     drawPendingLook(dl, x0, bandY0, x0 + w, bandY1);
-    drawPendingLook(dl, x0, stripY0, x0 + w, stripY1);
+    if (sampled) drawPendingLook(dl, x0, stripY0, x0 + w, stripY1);
   } else {
     // State band: merge neighbouring columns of equal colour into one rectangle.
     {
@@ -1009,7 +1091,7 @@ void TimelineWidget::drawRowContents(ImDrawList* dl, const PanelContext& context
     }
     // Sample strip.
     const uint32_t scols = static_cast<uint32_t>(cache.strip.columns.size());
-    if (scols > 0) {
+    if (scols > 0 && sampled) {
       const float sw = w / static_cast<float>(scols);
       RectBatch batch(dl, scols);
       uint32_t start = 0;
@@ -1030,7 +1112,11 @@ void TimelineWidget::drawRowContents(ImDrawList* dl, const PanelContext& context
       }
     }
   }
-  if (row.expanded) drawFlame(dl, context, row, rowTop, cache);
+  if (row.expanded && sampled) drawFlame(dl, context, row, rowTop, cache);
+  if (row.scopeLines > 0) {
+    if (!d.scopes.ready()) ++m_stats.scopeRowsPending;
+    d.scopes.drawRow(dl, model, row, geom, rowTop, plotArea(), m_geometry.gutterX0);
+  }
   dl->PopClipRect();
 }
 
@@ -1105,7 +1191,18 @@ TimelineWidget::Hit TimelineWidget::hitTest(const PanelContext& context, float m
   const DocState& d = *m_doc;
   const float cy = my - m_geometry.rowsContentY0;
   const size_t i = rowAt(d.layout, m_rowGeometry, cy);
-  if (i == kNoRow) return h;
+  if (i == kNoRow) {
+    // WP-54: below the thread rows lies the markers / plot section.
+    if (cy >= d.threadsHeight && cy < d.contentHeight) {
+      h.inSection = true;
+      h.sectionY = cy - d.threadsHeight;
+      h.inGutter = mx < m_geometry.plotX0;
+      h.inPlot = mx >= m_geometry.plotX0 && mx < m_geometry.plotX0 + m_geometry.plotWidth;
+      if (h.inPlot)
+        h.ts = toAbsolute(d.limits, xToRelTick(d.view, mx, m_geometry.plotX0, m_geometry.plotWidth));
+    }
+    return h;
+  }
   const RowLayout& row = d.layout[i];
   if (cy >= row.y0 + row.height) return h;  // row spacing
   h.layoutIndex = i;
@@ -1117,6 +1214,12 @@ TimelineWidget::Hit TimelineWidget::hitTest(const PanelContext& context, float m
   h.depth = rh.depth;
   if (!h.inPlot) return h;
   h.ts = toAbsolute(d.limits, xToRelTick(d.view, mx, m_geometry.plotX0, m_geometry.plotWidth));
+  if (rh.section == RowSection::Scope) {  // WP-54: the scope lines have their own data
+    h.scopeLine = rh.depth;
+    h.pending = !d.scopes.ready();
+    h.scope = d.scopes.hit(row, rh.depth, plotArea(), mx);
+    return h;
+  }
   const RowCache& cache = d.rows[row.thread.get()];
   h.pending = !cache.valid || cache.pending;
   if (!cache.valid || cache.pending) return h;
@@ -1136,6 +1239,16 @@ TimelineWidget::Hit TimelineWidget::hitTest(const PanelContext& context, float m
 }
 
 void TimelineWidget::drawTooltip(const PanelContext& context, const Hit& hit) {
+  if (m_doc && hit.inSection) {  // WP-54: markers and plots describe themselves while they are drawn
+    const PlotHover& hover = m_doc->plots.hover();
+    if (hover.kind != PlotHover::Kind::None && !hover.lines.empty()) {
+      m_tooltip = hover.lines;
+      ImGui::BeginTooltip();
+      for (const std::string& line : m_tooltip) ImGui::TextUnformatted(line.c_str());
+      ImGui::EndTooltip();
+    }
+    return;
+  }
   if (!m_doc || hit.layoutIndex == kNoRow || !hit.thread.valid()) return;
   const DocState& d = *m_doc;
   const model::TraceModel& model = *d.model;
@@ -1156,6 +1269,27 @@ void TimelineWidget::drawTooltip(const PanelContext& context, const Hit& hit) {
     return;
   }
   if (!hit.inPlot) return;
+  if (hit.section == RowSection::Scope) {  // WP-54
+    if (!d.scopes.ready()) {
+      m_tooltip = {"Scopes: pairing the Begin / End events..."};
+    } else if (hit.scope) {
+      ScopeTooltipInput sin;
+      sin.model = &model;
+      sin.set = d.scopes.set().get();
+      sin.lane = hit.scope->lane;
+      sin.track = hit.scope->trackPtr;
+      sin.hit = hit.scope->track;
+      sin.clockHz = d.clockHz;
+      m_tooltip = scopeTooltipLines(sin);
+      if (hit.scope->track.count == 1)
+        m_tooltip.push_back("Click: select the scope (Call Graph, Function Statistics)");
+    }
+    if (m_tooltip.empty()) return;
+    ImGui::BeginTooltip();
+    for (const std::string& line : m_tooltip) ImGui::TextUnformatted(line.c_str());
+    ImGui::EndTooltip();
+    return;
+  }
   TooltipInput in;
   in.model = &model;
   in.symbols = context.symbols;
@@ -1189,18 +1323,42 @@ void TimelineWidget::publishHover(const PanelContext& context, const Hit& hit) {
     item.thread = hit.thread;
     item.callstack = hit.stack;
     item.function = functionKeyForNode(*m_doc->model, context.symbols, hit.stack, hit.stackPosition);
+    m_hoveredScope.reset();
+    if (hit.section == RowSection::Scope && hit.scope && hit.scope->track.count == 1) {
+      const analysis::ScopeInstance& inst = *hit.scope->trackPtr->instance[hit.scope->track.first];
+      item.kind = HoveredItem::Kind::Scope;
+      item.function = FunctionKey::scope(inst.id);
+      m_hoveredScope = item.function;
+    }
     item.ts = hit.ts;
     context.selection->setHovered(item);
     m_hoverPublished = true;
   } else if (m_hoverPublished) {
     context.selection->setHovered(HoveredItem{});
     m_hoverPublished = false;
+    m_hoveredScope.reset();
   }
 }
 
 void TimelineWidget::applyClick(const PanelContext& context, const Hit& hit) {
-  if (!context.selection || !m_doc || !hit.thread.valid()) return;
+  if (!context.selection || !m_doc) return;
+  if (hit.inSection) {  // WP-54: the plot group header collapses / expands the plot lanes
+    const GlobalLane* lane = globalLaneAt(m_doc->plots.layout(m_globalGeometry), hit.sectionY);
+    if (lane && lane->kind == GlobalLane::Kind::PlotsHeader)
+      m_doc->plots.setCollapsed(!m_doc->plots.collapsed());
+    return;
+  }
+  if (!hit.thread.valid()) return;
   context.selection->setSelectedThread(hit.thread);
+  if (hit.section == RowSection::Scope) {  // WP-54: a click on a scope selects it as the function
+    if (hit.scope && hit.scope->track.count == 1) {
+      const analysis::ScopeInstance& inst = *hit.scope->trackPtr->instance[hit.scope->track.first];
+      m_selectedNode = CallstackIdx();
+      m_publishedFunction = FunctionKey::scope(inst.id);
+      context.selection->setSelectedFunction(m_publishedFunction);
+    }
+    return;
+  }
   if (hit.inPlot && hit.stack.valid()) {
     m_selectedNode = hit.stack;
     m_selectedPosition = hit.stackPosition;
@@ -1447,6 +1605,134 @@ void TimelineWidget::drawWakeArrow(ImDrawList* dl, const PanelContext& context,
     dl->AddText(ImVec2(text.x + 1.0f, text.y + 1.0f), IM_COL32(0, 0, 0, 255), info.wakerLabel.c_str());
     dl->AddText(text, color, info.wakerLabel.c_str());
   }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// WP-54: instrumentation lanes, frame graph, plots
+
+PlotArea TimelineWidget::plotArea() const {
+  PlotArea a;
+  a.x0 = m_geometry.plotX0;
+  a.width = m_geometry.plotWidth;
+  if (m_doc) {
+    a.view = m_doc->view;
+    a.limits = m_doc->limits;
+    a.clockHz = m_doc->clockHz;
+  }
+  return a;
+}
+
+RowMode TimelineWidget::rowModeOf(ThreadIdx thread, bool hasScopes) const {
+  if (!hasScopes || !m_doc) return RowMode::Sampled;
+  if (thread.valid() && thread.get() < m_doc->flags.size() && m_doc->flags[thread.get()].mode) {
+    return *m_doc->flags[thread.get()].mode;
+  }
+  return m_options.rowMode;
+}
+
+RowMode TimelineWidget::effectiveRowMode(ThreadIdx thread) const {
+  return m_doc ? rowModeOf(thread, m_doc->hasScopes) : RowMode::Sampled;
+}
+
+void TimelineWidget::setRowMode(ThreadIdx thread, std::optional<RowMode> mode) {
+  if (m_doc && thread.valid() && thread.get() < m_doc->flags.size()) m_doc->flags[thread.get()].mode = mode;
+}
+
+void TimelineWidget::setGlobalRowMode(RowMode mode) {
+  m_options.rowMode = mode;
+  if (!m_doc) return;
+  for (RowFlags& f : m_doc->flags) f.mode.reset();
+}
+
+const RowLayout* TimelineWidget::rowLayoutOf(ThreadIdx thread) const {
+  if (!m_doc) return nullptr;
+  for (const RowLayout& r : m_doc->layout) {
+    if (r.thread == thread) return &r;
+  }
+  return nullptr;
+}
+
+std::optional<float> TimelineWidget::scopeLineCenterY(ThreadIdx thread, uint32_t line) const {
+  const RowLayout* r = rowLayoutOf(thread);
+  if (!r || line >= r->scopeLines) return std::nullopt;
+  return m_geometry.rowsContentY0 + r->y0 + scopeLineTop(*r, m_rowGeometry, line) +
+         m_rowGeometry.scopeLineHeight * 0.5f;
+}
+
+std::optional<float> TimelineWidget::sectionLaneCenterY(GlobalLane::Kind kind, uint32_t index) const {
+  if (!m_doc) return std::nullopt;
+  for (const GlobalLane& l : m_doc->plots.layout(m_globalGeometry).lanes) {
+    if (l.kind == kind && (kind != GlobalLane::Kind::Plot || l.index == index)) {
+      return m_geometry.rowsContentY0 + m_doc->threadsHeight + l.y0 + l.height * 0.5f;
+    }
+  }
+  return std::nullopt;
+}
+
+namespace {
+ScopeLanesView gNoScopes;
+FrameGraphView gNoFrames;
+PlotLanesView gNoPlots;
+}  // namespace
+
+ScopeLanesView& TimelineWidget::scopeLanes() {
+  return m_doc ? m_doc->scopes : gNoScopes;
+}
+const ScopeLanesView& TimelineWidget::scopeLanes() const {
+  return m_doc ? m_doc->scopes : gNoScopes;
+}
+FrameGraphView& TimelineWidget::frameGraph() {
+  return m_doc ? m_doc->frames : gNoFrames;
+}
+const FrameGraphView& TimelineWidget::frameGraph() const {
+  return m_doc ? m_doc->frames : gNoFrames;
+}
+PlotLanesView& TimelineWidget::plotLanes() {
+  return m_doc ? m_doc->plots : gNoPlots;
+}
+const PlotLanesView& TimelineWidget::plotLanes() const {
+  return m_doc ? m_doc->plots : gNoPlots;
+}
+
+void TimelineWidget::updateInstrumentation(const PanelContext& context) {
+  DocState& d = *m_doc;
+  if (d.hasScopes) {
+    bool needed = m_options.rowMode != RowMode::Sampled;
+    for (size_t i = 0; !needed && i < d.flags.size(); ++i) {
+      needed = d.flags[i].mode && *d.flags[i].mode != RowMode::Sampled;
+    }
+    if (needed) d.scopes.update(context, common::effectiveScopeOptions(context).groupByFiber);
+  }
+  if (d.hasFrameMarks && m_options.showFrameGraph) d.frames.update(context);
+}
+
+void TimelineWidget::drawFrameGraphStrip(const PanelContext& context) {
+  DocState& d = *m_doc;
+  m_geometry.frameGraphY0 = m_geometry.frameGraphY1 = 0;
+  if (!m_options.showFrameGraph || !d.hasFrameMarks) return;
+  const float ui = std::max(0.5f, ImGui::GetFontSize() / kBaseUi);
+  d.frames.draw(context, *d.model, plotArea(), m_geometry.gutterX0, m_options.frameGraphHeight * ui);
+  const FrameGraphView::Rect& r = d.frames.canvasRect();
+  m_geometry.frameGraphY0 = r.y0;
+  m_geometry.frameGraphY1 = r.y1;
+  m_stats.frameBars = static_cast<uint32_t>(d.frames.lastBars().size());
+  if (ImGui::IsItemHovered()) m_anyHovered = true;
+}
+
+void TimelineWidget::drawSection(ImDrawList* dl, const PanelContext& context, float originY,
+                                 const ImVec2* mouse) {
+  (void)context;
+  DocState& d = *m_doc;
+  m_geometry.sectionY0 = originY + d.threadsHeight;
+  const GlobalLayout& gl = d.plots.layout(m_globalGeometry);
+  if (gl.lanes.empty()) return;
+  const float top = originY + d.threadsHeight;
+  if (top > m_geometry.rowsY1 || top + gl.height < m_geometry.rowsY0) return;  // off screen
+  d.plots.draw(dl, *d.model, plotArea(), top, m_geometry.gutterX0, m_globalGeometry, mouse);
+  const PlotFrameStats& ps = d.plots.frameStats();
+  m_stats.plotLanes = ps.plotLanes;
+  m_stats.plotColumns = ps.plotColumns;
+  m_stats.markerTicks = ps.markerTicks;
 }
 
 }  // namespace tachyon::viewer::timeline

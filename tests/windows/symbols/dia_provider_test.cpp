@@ -187,6 +187,7 @@ TEST_F(DiaWindows, InlineScenarioYieldsInlineChains) {
   const auto it = m_byName.find("inline_hot_loop");
   ASSERT_NE(it, m_byName.end());
   const uint64_t loopStart = it->second.beginRva;
+  const uint32_t loopDef = lineOf(fs::path(TACHYON_TESTBED_SCENARIOS_CPP), "inline_hot_loop(");
   // The optimizer splits the loop into several blocks; every .pdata block that belongs to the function
   // counts.
   std::vector<etlconvert::PeFunctionRange> blocks;
@@ -206,6 +207,13 @@ TEST_F(DiaWindows, InlineScenarioYieldsInlineChains) {
       EXPECT_EQ(m_strings.get(a.function), "inline_hot_loop");  // the physical frame, never the inlinee
       if (a.inlines.empty()) continue;
       ++withInlines;
+      // The call site of the chain is a position in the physical function's own source file.
+      EXPECT_GT(a.callSiteLine, 0u) << "rva " << std::hex << rva;
+      EXPECT_NE(lower(std::string(m_strings.get(a.callSiteFile))).find("scenarios.cpp"), std::string::npos);
+      if (loopDef != 0) {
+        EXPECT_GE(a.callSiteLine, loopDef);
+        EXPECT_LE(a.callSiteLine, loopDef + 40);
+      }
       std::string chain;
       int burnAt = -1;
       int inlineAAt = -1;

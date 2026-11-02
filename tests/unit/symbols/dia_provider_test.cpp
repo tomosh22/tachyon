@@ -82,7 +82,11 @@ class FakeSession final : public IDiaSymbolSession {
   Result<std::vector<DiaRawLine>> findLines(uint64_t rva, uint64_t size) override {
     Guard g(*m_s);
     for (const FakeFunction& f : m_s->functions) {
-      if (f.fn.startRva == rva && f.fn.size == size) return f.lines;
+      if (f.fn.startRva != rva || size > f.fn.size) continue;
+      std::vector<DiaRawLine> out;
+      for (const DiaRawLine& l : f.lines)
+        if (l.rva < rva + size && l.rva + l.size > rva) out.push_back(l);
+      return out;
     }
     return std::vector<DiaRawLine>{};
   }
@@ -215,6 +219,11 @@ TEST(DiaProvider, ResolvesFunctionFileLineAndInlines) {
   EXPECT_EQ(f.strings.get(r.inlines[1].function), "inl_outer");
   EXPECT_EQ(r.inlines[1].line, 12u);
   EXPECT_EQ(f.strings.get(r.inlines[1].file), "C:\\src\\a.cpp");
+  // Best-effort call site: the last row of the function's own file (a.cpp) at or before the address; the
+  // b.h row of the inline expansion is skipped.
+  EXPECT_EQ(f.strings.get(r.callSiteFile), "C:\\src\\a.cpp");
+  EXPECT_EQ(r.callSiteLine, 11u);
+  EXPECT_EQ(f.provider.resolve(0x1012).callSiteLine, 0u);  // not inside an inline site
 }
 
 TEST(DiaProvider, DecoratedNamesGoThroughTheNameFunction) {
@@ -300,6 +309,8 @@ TEST(DiaProvider, InlineFramesWithoutALineTakeTheNextOuterPosition) {
   ASSERT_EQ(r.inlines.size(), 1u);
   EXPECT_EQ(r.inlines[0].line, 77u);  // outermost: the physical function's line-table position
   EXPECT_EQ(f.strings.get(r.inlines[0].file), "C:\\src\\c.cpp");
+  EXPECT_EQ(f.strings.get(r.callSiteFile), "C:\\src\\c.cpp");
+  EXPECT_EQ(r.callSiteLine, 77u);
 }
 
 TEST(DiaProvider, FunctionBoundsAndLines) {

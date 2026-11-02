@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -468,6 +469,9 @@ TEST_F(BackendTest, LostRecordsAreReportedAsEventsLost) {
   auto result = backend->stop();
   ASSERT_TRUE(result.ok());
   EXPECT_EQ(result->eventsLost, 123u);
+  bool lostAdvice = false;
+  for (const std::string& w : result->warnings) lostAdvice |= w.find("PERF_RECORD_LOST") != std::string::npos;
+  EXPECT_TRUE(lostAdvice) << "CaptureResult carries the lost-record guidance";
   auto reader = trace::TraceReader::open(result->tracePath);
   ASSERT_TRUE(reader.ok());
   auto info = reader->readCaptureInfo();
@@ -632,6 +636,66 @@ TEST_F(BackendTest, AttachOpensEveryThreadAndSurvivesTheProcessGoingAway) {
   ASSERT_EQ(model->modules.size(), 1u);
   EXPECT_EQ(model->modules[0].path, "/gone/target");
   EXPECT_EQ(model->modules[0].base, 0x400000u);
+}
+
+TEST_F(BackendTest, PerThreadAttachChecksDescriptorsAgainstTheLimit) {
+  TempDir proc;
+  m_fake->proc = proc.path();
+  m_fake->cpus = {0, 1, 2, 3};
+  std::vector<uint32_t> tids;
+  for (uint32_t t = 600; t < 640; ++t) tids.push_back(t);  // 40 threads x 4 cpus = 160 descriptors
+  perf::ptest::writeFakeProcess(proc.path(), 600, 1, "wide", tids, {});
+  m_config.forcePerThread = true;
+  CaptureOptions o;
+  o.mode = CaptureMode::Attach;
+  o.pid = 600;
+  o.outPath = m_dir.path() / "wide.tachyon";
+
+  // Run in a child so the lowered limits cannot leak into the other tests (the hard limit cannot be raised
+  // again without privileges).
+  auto runWithLimits = [&](rlim_t soft, rlim_t hard) -> int {
+    const pid_t child = ::fork();
+    if (child == 0) {
+      rlimit lim{hard, hard};
+      lim.rlim_cur = soft;
+      if (::setrlimit(RLIMIT_NOFILE, &lim) != 0) ::_exit(90);
+      LinuxPerfBackend backend(m_config);
+      auto r = backend.start(o);
+      int code = 0;
+      if (r.ok()) {
+        rlimit now{};
+        ::getrlimit(RLIMIT_NOFILE, &now);
+        code = now.rlim_cur >= 160 + 128 ? 0 : 91;  // the soft limit was raised enough
+        (void)backend.stop();
+      } else {
+        code = r.error().message.find("160 descriptors needed (40 threads x 4 cpus") != std::string::npos
+                   ? 2
+                   : 92;
+      }
+      ::_exit(code);
+    }
+    int st = 0;
+    ::waitpid(child, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 100;
+  };
+  rlimit cur{};
+  ::getrlimit(RLIMIT_NOFILE, &cur);
+  const rlim_t hard = cur.rlim_max == RLIM_INFINITY ? 4096 : cur.rlim_max;
+  if (hard < 400) GTEST_SKIP() << "hard descriptor limit too low for the test";
+  // Soft limit below the need, hard limit above it: the backend raises the soft limit and succeeds.
+  EXPECT_EQ(runWithLimits(100, std::min<rlim_t>(hard, 4096)), 0);
+  // Hard limit below the need as well: a clear error naming the count, nothing opened.
+  EXPECT_EQ(runWithLimits(150, 150), 2);
+}
+
+TEST_F(BackendTest, LifecycleMessagesAreBackendNeutral) {
+  auto backend = make();
+  EXPECT_NE(backend->stop().error().message.find("no capture is running"), std::string::npos);
+  ASSERT_TRUE(backend->start(launchOptions()).ok());
+  m_toKill.push_back(backend->rootPid());
+  EXPECT_NE(backend->start(launchOptions()).error().message.find("a capture is already in progress"),
+            std::string::npos);
+  ASSERT_TRUE(backend->stop().ok());
 }
 
 TEST_F(BackendTest, AttachToAGoneProcessFailsWithNotFound) {

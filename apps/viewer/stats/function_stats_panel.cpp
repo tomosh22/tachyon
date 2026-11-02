@@ -4,6 +4,7 @@
 #include "viewer/common/function_names.h"
 #include "viewer/common/imgui_util.h"
 #include "viewer/common/query_filter.h"
+#include "viewer/common/scope_view_options.h"
 #include "viewer/document.h"
 #include "viewer/functions/function_list_model.h"
 
@@ -104,7 +105,7 @@ void FunctionStatsPanel::onSelectionChanged(const PanelContext& context, const S
     m_publishedHighlight = false;
     context.requestRedraw();
   }
-  if (field == SelectionField::TimeFilter) context.requestRedraw();
+  if (field == SelectionField::TimeFilter || field == SelectionField::ViewOptions) context.requestRedraw();
 }
 
 bool FunctionStatsPanel::symbolBurst(const PanelContext& context) const {
@@ -120,7 +121,9 @@ FunctionStatsPanel::StatsSpec FunctionStatsPanel::statsSpecFor(const PanelContex
   spec.filter =
       common::toQueryFilter(context.selection ? context.selection->state().timeFilter : std::nullopt);
   spec.filter.subtreeRoot.reset();  // the Call Graph subtree does not restrict function statistics
-  spec.options = functions::effectiveOptions(false, analysis::KernelFrames::Show, entry.key);
+  const common::EffectiveScopeOptions scope = common::effectiveScopeOptions(context);
+  spec.options = functions::effectiveOptions(false, analysis::KernelFrames::Show, entry.key,
+                                             scope.blendScopes, scope.groupByFiber);
   spec.documentGeneration = context.documentGeneration;
   spec.symbolGeneration = context.symbolGeneration;
   return spec;

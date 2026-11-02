@@ -191,6 +191,10 @@ ResolvedAddress DwarfSymbolProvider::resolve(uint64_t rva) {
     if (p.line == 0) p.line = outer.line;
     if (p.file.empty()) p.file = outer.file;
   }
+  if (sites[n - 1].callLine != 0 && !sites[n - 1].callFile.empty()) {
+    out.callSiteFile = internFile(sites[n - 1].callFile);
+    out.callSiteLine = sites[n - 1].callLine;
+  }
   out.inlines.reserve(n);
   for (size_t k = 0; k < n; ++k) {
     InlineFrame frame;

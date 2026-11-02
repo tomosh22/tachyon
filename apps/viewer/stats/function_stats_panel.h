@@ -60,7 +60,8 @@ class FunctionStatsPanel final : public IPanel {
     uint64_t symbolGeneration = 0;
     bool operator==(const StatsSpec& o) const {
       return key == o.key && filter == o.filter && options.expandInline == o.options.expandInline &&
-             options.kernelFrames == o.options.kernelFrames && documentGeneration == o.documentGeneration &&
+             options.kernelFrames == o.options.kernelFrames && options.blendScopes == o.options.blendScopes &&
+             options.groupByFiber == o.options.groupByFiber && documentGeneration == o.documentGeneration &&
              symbolGeneration == o.symbolGeneration;
     }
   };

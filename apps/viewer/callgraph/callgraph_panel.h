@@ -48,10 +48,13 @@ class CallGraphPanel final : public IPanel {
     analysis::Filter filter;
     bool expandInline = false;
     analysis::KernelFrames kernelFrames = analysis::KernelFrames::Show;
+    bool blendScopes = false;  // WP-54: effective values (common::effectiveScopeOptions)
+    bool groupByFiber = false;
     uint64_t documentGeneration = 0;
     uint64_t symbolGeneration = 0;
     bool operator==(const QuerySpec& o) const {
       return filter == o.filter && expandInline == o.expandInline && kernelFrames == o.kernelFrames &&
+             blendScopes == o.blendScopes && groupByFiber == o.groupByFiber &&
              documentGeneration == o.documentGeneration && symbolGeneration == o.symbolGeneration;
     }
   };

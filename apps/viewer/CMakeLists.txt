@@ -17,6 +17,7 @@ add_library(tachyon_viewer_core STATIC
   common/function_names.cpp
   common/imgui_util.cpp
   common/query_filter.cpp
+  common/scope_view_options.cpp
   command_registry.cpp
   document.cpp
   file_browser.cpp
@@ -49,6 +50,9 @@ add_library(tachyon_viewer_core STATIC
   status/toast.cpp
   status/warnings_banner.cpp
   theme.cpp
+  timeline/frame_graph.cpp
+  timeline/plot_lanes.cpp
+  timeline/scope_lanes.cpp
   timeline/timeline_colors.cpp
   timeline/timeline_data.cpp
   timeline/timeline_math.cpp
