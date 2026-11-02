@@ -49,12 +49,12 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
 | WP-60 | Flight recorder mode | — | not started | wp/60-flight-recorder | |
 | WP-61 | Remote capture | — | not started | wp/61-remote | |
-| WP-62 | CI report tool | — | not started | wp/62-report | |
+| WP-62 | CI report tool | E | in progress | wp/62-ci-report | 2026-11-02 |
 | WP-63 | Exporters | — | not started | wp/63-exporters | |
 | WP-64 | Large-trace performance pass | — | not started | wp/64-perf-pass | |
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
-| WP-71 | Scheduler events | — | not started | wp/71-sched | |
+| WP-71 | Scheduler events | A | in progress | wp/71-sched-events | 2026-11-02 |
 | WP-72 | DWARF symbol provider | B | merged (WP-72b follow-up) | wp/72-dwarf-provider | 2026-10-25 |
 | WP-73 | Linux SDK transport and privileges | — | not started | wp/73-linux-sdk | |
 
