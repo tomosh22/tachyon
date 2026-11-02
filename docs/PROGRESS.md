@@ -38,7 +38,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-44 | Function list and butterfly | D | merged | wp/44-function-list | 2026-10-25 |
 | WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
 | WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
-| WP-47 | Search and Function Statistics | D | in progress | wp/47-function-stats | 2026-10-25 |
+| WP-47 | Search and Function Statistics | D | merged | wp/47-function-stats | 2026-10-25 |
 | WP-48 | Status, warnings, symbol progress | D | not started | wp/48-status | |
 | WP-50 | Public SDK header and loader | E | merged (CI green incl. windows-release; caller-address test skipped on MSVC, no labels-as-values) | wp/50-sdk-header | 2026-10-25 |
 | WP-51 | Client runtime | E | merged (CI green incl. windows; connected overhead 46.9 ns Linux / 68 ns Windows vs 40 ns target, under 80 ns gate; disabled 4.7 / 16 ns) | wp/51-sdk-runtime | 2026-10-25 |
@@ -177,6 +177,10 @@ Verifier PASS. An independent llvm-symbolizer oracle on 2000 testbed and 2000 li
 ## WP-34 notes
 
 Verifier PASS. A randomized independent oracle ran 9,600 checks with 0 mismatches: running/ready/waiting split, recursion, the return-address rule, blocking-stack attribution and filters. On medium, the sum of line runningTicks equals inclusive time for 202 functions. Disassembly agrees with objdump on 44,849 + 213 instructions (counts and boundaries identical, only cosmetic spelling differs), and readImageBytes matches `objdump -s` byte for byte. The decoder is fuzz-clean under asan. The Windows test disassembled hot_a with real DIA and sample hits landed inside its bounds. Timings: linesForFunction 22 ms (budget 100 ms); disassembling 64 KB takes 4.1 ms (budget 20 ms).
+
+## WP-47 notes
+
+Verifier: the core passed. Stats are byte-identical before and after the refactor over 27,636 results × all option variants, including the WP-53 port. Instances match Stats in 2,352 checks. Fuzzy ranking matches a brute-force top-200, and the bus highlight is O(1) per publish. The verifier's FAIL items were all fixed in 1e67988: the merge conflict, flaky overlay asserts, whitespace and UTF-8 matching, wide instances dropped in dense cells, highlight cleanup on panel close, and the current-instance outline. Fuzzy search over 200k names: worst keystroke 11.9 ms (budget 15 ms); the pathological all-subsequence query takes about 50 ms. Overlay with 3.2 M instances: median about 10 ms (asserted < 16 ms). Follow-ups: closing the panel from the View menu does not clear the highlight (needs an App close hook); the InstanceIndex for a huge list is built on the UI thread (about 200 ms, once).
 
 ## Queued follow-ups
 
