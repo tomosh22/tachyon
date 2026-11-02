@@ -26,7 +26,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-32 | Attribution and aggregation | C | merged | wp/32-attribution | 2026-10-25 |
 | WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | merged | wp/32b-return-address | 2026-10-25 |
 | WP-33 | Filters, cancellation, query cache | C | merged | wp/33-query-cache | 2026-10-25 |
-| WP-34 | Line/instruction attribution, disassembly | C | merged (WP-34b follow-up) | wp/34-lines-disasm | 2026-10-25 |
+| WP-34 | Line/instruction attribution, disassembly | C | merged (WP-34b merged; WP-34c call-site field) | wp/34-lines-disasm | 2026-10-25 |
 | WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
@@ -53,7 +53,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-63 | Exporters | — | not started | wp/63-exporters | |
 | WP-64 | Large-trace performance pass | — | not started | wp/64-perf-pass | |
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
-| WP-70 | `perf_event_open` backend | A | in progress | wp/70-perf-backend | 2026-10-25 |
+| WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
 | WP-71 | Scheduler events | — | not started | wp/71-sched | |
 | WP-72 | DWARF symbol provider | B | merged (WP-72b follow-up) | wp/72-dwarf-provider | 2026-10-25 |
 | WP-73 | Linux SDK transport and privileges | — | not started | wp/73-linux-sdk | |
@@ -182,7 +182,14 @@ Verifier PASS. A randomized independent oracle ran 9,600 checks with 0 mismatche
 
 Verifier: the core passed. Stats are byte-identical before and after the refactor over 27,636 results × all option variants, including the WP-53 port. Instances match Stats in 2,352 checks. Fuzzy ranking matches a brute-force top-200, and the bus highlight is O(1) per publish. The verifier's FAIL items were all fixed in 1e67988: the merge conflict, flaky overlay asserts, whitespace and UTF-8 matching, wide instances dropped in dense cells, highlight cleanup on panel close, and the current-instance outline. Fuzzy search over 200k names: worst keystroke 11.9 ms (budget 15 ms); the pathological all-subsequence query takes about 50 ms. Overlay with 3.2 M instances: median about 10 ms (asserted < 16 ms). Follow-ups: closing the panel from the View menu does not clear the highlight (needs an App close hook); the InstanceIndex for a huge list is built on the UI thread (about 200 ms, once).
 
+## WP-70 notes
+
+Verifier PASS. Privileged tests ran for real in this container (root with CAP_PERFMON): testbed spin over 3.16 s gave 24,799 target samples at 7,844/s with events_lost 0; 19–28 samples landed before main; leaf shares hot_a/spin_rest/hot_b/hot_c are 38/29/19/10% (expected 40/30/20/10). Module bases equal /proc maps (ELF rule). The kernel-leaf flag had 0 mismatches. 20k-iteration parser fuzzing under asan was clean; no fd leaks into the child; LOST and RLIMIT errors are clear. Conversion runs at 0.9–1.2 M samples/s (skewed) and 73–90 k/s (all-unique). CI has a new non-gating step that enables perf_event_paranoid=-1 and runs `-L linux_privileged`, failing the step if the tests were skipped. No PMU or tracefs here, so WP-71 sched tracepoints can only be tested on CI or a real host.
+
 ## Queued follow-ups
+
+- WP-70b: `warnings` in CaptureResult (capture_backend.h, appended at the end of the struct) plumbed into capture_done; block SIGPIPE around the launch release write; pre-check threads × cpus fds against RLIMIT_NOFILE (raise soft to hard, and name the count in the error); "no ETW capture is running" wording in the shared lifecycle.
+- WP-34c: add `callSiteFile`/`callSiteLine` (the physical function's call site of the outermost inline) to ResolvedAddress, filled by DWARF (`sites[n-1]`) and DIA; then `linesForFunction` uses it for exact inline call-site lines. (WP-34b found that providers put callee-internal positions on outer frames, so `inlines.back()` is NOT the physical call site.)
 
 - WP-34b: use the exact inline call-site line (`ra.inlines.back()` when its file is the function's file; providers already put call-site lines on outer frames) instead of the nearest-preceding-row approximation; handle a same-file inlined callee; clamp `readImageBytes` size so a hostile image cannot cause a huge allocation (bad_alloc); bound the SourceLocator cache.
 - SdkOverheadPerf on the Windows runner now consistently measures 95–110 ns (it was 68 ns on 2026-10-25; the SDK code is unchanged, so the runner is slower). The orchestrator set the Windows gate to 160 ns, which is 2× the proposed 80 ns binding budget, until the user decides the 40 ns plan concern. Linux stays at 80 ns.

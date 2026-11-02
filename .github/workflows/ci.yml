@@ -39,6 +39,15 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }}
       - name: Test
         run: ctest --preset ${{ matrix.preset }} -LE perf
+      - name: Privileged perf_event_open capture tests (non-gating)
+        if: matrix.preset == 'linux-release'
+        continue-on-error: true
+        run: |
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.perf_event_mlock_kb=8192
+          ctest --preset ${{ matrix.preset }} -L linux_privileged -V 2>&1 | tee privileged.log
+          # A skipped test counts as passed in ctest: fail the step if nothing actually ran.
+          if grep -q '\[  SKIPPED \]' privileged.log; then echo "privileged capture tests were skipped"; exit 1; fi
+          grep -q '\[  PASSED  \]' privileged.log
       - name: Perf budget tests (verbose, prints measured numbers)
         if: matrix.preset == 'linux-release'
         run: ctest --preset ${{ matrix.preset }} -L perf -V
