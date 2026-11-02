@@ -12,7 +12,7 @@ Error wrongPhase(ErrorCode code, const char* what, SessionPhase phase) {
 
 Result<void> SessionLifecycle::beginStart() {
   if (m_phase != SessionPhase::Idle)
-    return wrongPhase(ErrorCode::Busy, "an ETW capture is already in progress", m_phase);
+    return wrongPhase(ErrorCode::Busy, "a capture is already in progress", m_phase);
   m_phase = SessionPhase::Starting;
   return ok();
 }
@@ -31,7 +31,7 @@ void SessionLifecycle::startFailed() {
 Result<void> SessionLifecycle::beginFlush() {
   switch (m_phase) {
     case SessionPhase::Idle:
-    case SessionPhase::Faulted: return wrongPhase(ErrorCode::NotFound, "no ETW capture is running", m_phase);
+    case SessionPhase::Faulted: return wrongPhase(ErrorCode::NotFound, "no capture is running", m_phase);
     case SessionPhase::Starting:
     case SessionPhase::Flushing:
     case SessionPhase::Stopping: return wrongPhase(ErrorCode::Busy, "capture is busy", m_phase);
@@ -55,7 +55,7 @@ void SessionLifecycle::flushRestartFailed() {
 
 Result<StopKind> SessionLifecycle::beginStop() {
   switch (m_phase) {
-    case SessionPhase::Idle: return wrongPhase(ErrorCode::NotFound, "no ETW capture is running", m_phase);
+    case SessionPhase::Idle: return wrongPhase(ErrorCode::NotFound, "no capture is running", m_phase);
     case SessionPhase::Starting:
     case SessionPhase::Flushing:
     case SessionPhase::Stopping: return wrongPhase(ErrorCode::Busy, "capture is busy", m_phase);

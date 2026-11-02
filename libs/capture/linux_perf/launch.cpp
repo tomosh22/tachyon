@@ -1,6 +1,7 @@
 #include "capture/linux_perf/launch.h"
 
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -192,17 +193,31 @@ Result<LaunchedProcess> LaunchedProcess::spawnParked(const LaunchSpec& spec) {
 Result<void> LaunchedProcess::release() {
   if (m_state != State::Parked) return makeError(ErrorCode::Busy, "the process was already released");
   const char go = 1;
+  // A child that already died has closed the read end: write() would raise SIGPIPE, which kills a process
+  // that does not ignore it. Block it for this thread around the write and consume the pending one.
+  sigset_t pipeSig, oldMask;
+  sigemptyset(&pipeSig);
+  sigaddset(&pipeSig, SIGPIPE);
+  pthread_sigmask(SIG_BLOCK, &pipeSig, &oldMask);
   ssize_t w;
   do {
     w = ::write(m_releaseFd, &go, 1);
   } while (w < 0 && errno == EINTR);
   const int writeErr = errno;
+  if (w < 0 && writeErr == EPIPE) {
+    const timespec none{0, 0};
+    while (::sigtimedwait(&pipeSig, nullptr, &none) == SIGPIPE) {
+    }
+  }
+  pthread_sigmask(SIG_SETMASK, &oldMask, nullptr);
   ::close(m_releaseFd);
   m_releaseFd = -1;
   if (w != 1) {
     terminate();
     return makeError(ErrorCode::IoError,
-                     std::string("cannot release the launched process: ") + std::strerror(writeErr));
+                     std::string("cannot release the launched process") +
+                         (writeErr == EPIPE ? " (it exited before it was released)" : "") + ": " +
+                         std::strerror(writeErr));
   }
   int childErr = 0;
   ssize_t r;

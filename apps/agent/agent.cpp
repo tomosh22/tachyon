@@ -22,7 +22,10 @@ CaptureSummary toSummary(const capture::CaptureResult& r, std::vector<std::strin
   s.path = r.tracePath.string();
   s.events_lost = r.eventsLost;
   s.duration_s = r.durationS;
-  s.warnings = capSummaryWarnings(std::move(warnings));
+  // The backend's own warnings come first, then the instrumentation merge's; the cap applies to the total.
+  std::vector<std::string> all = r.warnings;
+  all.insert(all.end(), std::make_move_iterator(warnings.begin()), std::make_move_iterator(warnings.end()));
+  s.warnings = capSummaryWarnings(std::move(all));
   return s;
 }
 

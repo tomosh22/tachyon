@@ -132,6 +132,9 @@ class LinuxPerfBackend final : public ICaptureBackend, public ITargetWatch {
   Result<void> openSlot(Session& session, const perf::EventConfig& cfg, int pid, int cpu);
   // Per-thread plan: opens `tid` on every cpu; the first task's event of a cpu owns that cpu's ring, the
   // others write into it (PERF_EVENT_IOC_SET_OUTPUT).
+  // Makes sure threads x cpus descriptors (plus slack) fit RLIMIT_NOFILE: raises the soft limit up to the
+  // hard one, else fails early with the number needed.
+  Result<void> ensureDescriptors(size_t threads, size_t cpus);
   Result<void> openTask(Session& session, const perf::EventConfig& cfg, int tid);
   void teardown(Session& session);
   perf::ConvertOptions convertOptionsFor(const CaptureOptions& options, const Session& session) const;
