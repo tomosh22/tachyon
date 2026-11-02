@@ -54,6 +54,7 @@ Settings Settings::load(const std::filesystem::path& path) {
   }
 
   s.symbolServers = readStringArray(j, "symbolServers", s.symbolServers);
+  s.symbolSearchPaths = readStringArray(j, "symbolSearchPaths", s.symbolSearchPaths);
   s.recentFiles = readStringArray(j, "recentFiles", s.recentFiles);
   if (s.recentFiles.size() > kMaxRecentFiles) s.recentFiles.resize(kMaxRecentFiles);
 
@@ -117,6 +118,7 @@ Settings Settings::load(const std::filesystem::path& path) {
 Result<void> Settings::save(const std::filesystem::path& path) const {
   json j;
   j["symbolServers"] = symbolServers;
+  j["symbolSearchPaths"] = symbolSearchPaths;
   j["cacheDir"] = cacheDir;
   json mappings = json::array();
   for (const SourcePathMapping& m : sourcePathMappings) mappings.push_back({{"from", m.from}, {"to", m.to}});
@@ -147,6 +149,14 @@ Result<void> Settings::save(const std::filesystem::path& path) const {
     return makeError(ErrorCode::IoError, "cannot replace " + pathToUtf8(path));
   }
   return ok();
+}
+
+bool Settings::addSymbolSearchPath(const std::string& path) {
+  if (path.empty() ||
+      std::find(symbolSearchPaths.begin(), symbolSearchPaths.end(), path) != symbolSearchPaths.end())
+    return false;
+  symbolSearchPaths.push_back(path);
+  return true;
 }
 
 void Settings::addRecentFile(const std::string& path) {

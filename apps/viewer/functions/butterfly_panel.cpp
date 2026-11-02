@@ -40,6 +40,7 @@ void ButterflyPanel::resetDocumentState() {
   m_haveRequested = false;
   m_requested = {};
   m_shown = {};
+  m_forcedInline = m_forcedKernel = false;
   m_message.clear();
   m_drawnRows.clear();
   m_haveDocument = false;
@@ -141,6 +142,9 @@ void ButterflyPanel::update(const PanelContext& context) {
   }
 
   const QuerySpec spec = currentSpec(context);
+  // The selection may force an option on (inline key, merged kernel key); the toolbar says so.
+  m_forcedInline = spec.key && spec.base.expandInline && !m_inline;
+  m_forcedKernel = spec.key && spec.base.kernelFrames != m_kernel;
   if (!spec.key) {
     // Nothing selected: nothing to show and nothing to wait for.
     m_query.cancel();
@@ -277,6 +281,14 @@ void ButterflyPanel::drawToolbar(const PanelContext& context) {
   int kernel = static_cast<int>(m_kernel);
   if (ImGui::Combo("##bfkernel", &kernel, kKernelNames, 3))
     setKernelFrames(static_cast<analysis::KernelFrames>(kernel));
+  if (m_forcedInline) {
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "%s", kInlineForcedHint);
+  }
+  if (m_forcedKernel) {
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "%s", kKernelForcedHint);
+  }
   if (m_query.pending()) {
     ImGui::SameLine();
     drawSpinner(ImGui::GetFontSize() * 0.4f, ImGui::GetColorU32(ImGuiCol_PlotHistogram));

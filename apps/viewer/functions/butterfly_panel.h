@@ -33,6 +33,10 @@ class ButterflyPanel final : public IPanel {
   static constexpr const char* kName = "Butterfly";
   static constexpr const char* kCallGraphPanel = "Call Graph";
   static constexpr const char* kSourcePanel = "Source";
+  // Toolbar hints shown while the selected key forces an option on (the toggles keep showing the user's own
+  // setting).
+  static constexpr const char* kInlineForcedHint = "inline frames on for this selection";
+  static constexpr const char* kKernelForcedHint = "kernel grouped for this selection";
 
   // The result a query delivers: the display lines plus the clock for the ms columns.
   struct Data {
@@ -83,6 +87,9 @@ class ButterflyPanel final : public IPanel {
   bool restrictToSubtree() const { return m_restrictSubtree; }
   bool inlineExpansion() const { return m_inline; }
   analysis::KernelFrames kernelFrames() const { return m_kernel; }
+  // True while the selected key forces inline expansion / kernel grouping on against the toggles.
+  bool inlineForced() const { return m_forcedInline; }
+  bool kernelForced() const { return m_forcedKernel; }
   bool pending() const { return m_query.pending(); }
   uint64_t issuedQueries() const { return m_query.issued(); }
   uint64_t deliveredResults() const { return m_delivered; }
@@ -129,6 +136,7 @@ class ButterflyPanel final : public IPanel {
 
   bool m_restrictSubtree = true;
   bool m_inline = false;
+  bool m_forcedInline = false, m_forcedKernel = false;
   analysis::KernelFrames m_kernel = analysis::KernelFrames::Show;
 
   std::optional<functions::Line> m_menuLine;

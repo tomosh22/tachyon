@@ -201,7 +201,16 @@ void FunctionStatsPanel::issueStats(const PanelContext& context, const StatsSpec
   });
 }
 
+void FunctionStatsPanel::onVisibilityChanged(bool visible) {
+  if (visible) return;
+  // Closed (window X, View menu, command): the highlight goes with the panel; reopening queries again.
+  PanelContext context;
+  context.selection = m_bus;
+  clearHighlight(context, true);
+}
+
 void FunctionStatsPanel::update(const PanelContext& context) {
+  if (context.selection) m_bus = context.selection;
   if (!context.document) {
     if (m_haveDocument || m_index) resetDocumentState();
     return;

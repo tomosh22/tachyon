@@ -24,6 +24,11 @@ namespace {
 
 constexpr auto kThrottleWhileResolving = std::chrono::milliseconds(200);
 constexpr size_t kFilterBufferSize = 256;
+// Tooltip of the per-module inclusive cells (ms and %).
+constexpr const char* kModuleInclusiveNote =
+    "Per-module inclusive is the sum of the function inclusives; it counts a sample once per\n"
+    "function of the module on its stack and may exceed the real time spent in the module.\n"
+    "The exclusive sum is exact.";
 
 // Table column of the first column that sorts by `column`.
 int columnOf(fl::SortColumn column) {
@@ -468,14 +473,11 @@ void FunctionListPanel::drawTable(const PanelContext& context, float height) {
           ImGui::TableSetColumnIndex(2);
           std::snprintf(buf, sizeof buf, "%.3f ms", common::ticksToMs(g.inclusiveSum, clockHz));
           textRight(buf);
-          if (ImGui::IsItemHovered())
-            ImGui::SetTooltip(
-                "Per-module inclusive is the sum of the function inclusives; it counts a sample once per\n"
-                "function of the module on its stack and may exceed the real time spent in the module.\n"
-                "The exclusive sum is exact.");
+          if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kModuleInclusiveNote);
           ImGui::TableSetColumnIndex(3);
           std::snprintf(buf, sizeof buf, "%.1f%%", fl::percentOfTotal(g.inclusiveSum, table.totalTicks));
           textRight(buf);
+          if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", kModuleInclusiveNote);
           ImGui::TableSetColumnIndex(4);
           std::snprintf(buf, sizeof buf, "%.3f ms", common::ticksToMs(g.exclusiveSum, clockHz));
           textRight(buf);

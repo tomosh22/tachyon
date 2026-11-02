@@ -9,6 +9,11 @@
 #include "viewer/renderer.h"
 #include "viewer/selection_bus.h"
 #include "viewer/settings.h"
+#include "viewer/status/path_picker.h"
+#include "viewer/status/shortcut_sheet.h"
+#include "viewer/status/status_bar.h"
+#include "viewer/status/toast.h"
+#include "viewer/status/warnings_banner.h"
 
 #include <algorithm>
 #include <array>
@@ -48,6 +53,11 @@ struct AppOptions {
   bool pacing = true;
   int idleTimeoutMs = 250;
   int targetFps = 60;
+  // WP-48 (tests): clock of the toast queue, in seconds; empty = steady_clock.
+  ToastQueue::ClockFn toastClock;
+  // WP-48 (tests): called with every document's new SymbolService after the viewer configured it and before
+  // resolution starts (e.g. to install a slow fake provider factory).
+  std::function<void(symbols::SymbolService&)> configureSymbols;
 };
 
 class App {
@@ -101,6 +111,23 @@ class App {
   void setTheme(ThemeKind theme);
   void setUserScale(float scale);
 
+  // ---- WP-48: status, warnings, symbol paths, toasts, shortcut sheet ----
+  // Main-thread only. Shows a message in the bottom-right corner (5 s, at most 5 stacked).
+  void toast(ToastLevel level, std::string text);
+  ToastQueue& toasts() { return m_toasts; }
+  StatusBar& statusBar() { return m_statusBar; }
+  WarningsBanner& warningsBanner() { return m_banner; }
+  ShortcutRegistry& shortcuts() { return m_shortcuts; }
+  ShortcutSheet& shortcutSheet() { return m_shortcutSheet; }
+  PathPicker& symbolPathPicker() { return m_pathPicker; }
+  // Main-thread only. Adds `path` (a directory or a symbol file) to Settings::symbolSearchPaths (persisted
+  // unless persist is off), then re-runs the symbol resolution of the open document. Returns false and sets
+  // `error` (also toasted) if the path is unusable. Cost: resolution runs again for ALL modules.
+  bool addSymbolPath(const std::filesystem::path& path, std::string& error);
+  // Main-thread only. Starts the symbol resolution of the open document again with a fresh SymbolService
+  // (current settings and search paths); no-op without a document. Same cost note as addSymbolPath().
+  void rerunSymbolResolution();
+
  private:
   PanelContext panelContext() const;
   void registerCommands();
@@ -143,6 +170,13 @@ class App {
   bool m_quit = false;
   uint64_t m_frameCount = 0;
   int m_redrawFrames = 3;  // frames still to draw after the last input (ImGui needs a few to settle)
+
+  ToastQueue m_toasts;
+  StatusBar m_statusBar;
+  WarningsBanner m_banner;
+  ShortcutRegistry m_shortcuts;
+  ShortcutSheet m_shortcutSheet;
+  PathPicker m_pathPicker;
 
   bool m_paletteRequested = false;
   bool m_paletteOpen = false;

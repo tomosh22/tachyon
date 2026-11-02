@@ -75,6 +75,9 @@ class FunctionStatsPanel final : public IPanel {
   void onSelectionChanged(const PanelContext& context, const SelectionState& state,
                           SelectionField field) override;
   void onDocumentChanged(const Document* document) override;
+  // Main-thread only. Closing the panel by any route (X, View menu) takes the instance highlight off the
+  // timeline.
+  void onVisibilityChanged(bool visible) override;
 
   // Main-thread only. Delivers finished queries and starts the ones the state requires. draw() calls it
   // first; headless tests call it directly.
@@ -172,6 +175,7 @@ class FunctionStatsPanel final : public IPanel {
 
   common::LatestQuery<stats::SearchIndex> m_indexQuery;
   common::LatestQuery<StatsResult> m_statsQuery;
+  SelectionBus* m_bus = nullptr;  // the app's bus, remembered for onVisibilityChanged (outlives the panel)
   bool m_haveDocument = false;
   uint64_t m_documentGeneration = 0;
   uint64_t m_requestedIndexSymbols = 0;

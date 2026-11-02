@@ -40,6 +40,15 @@ add_library(tachyon_viewer_core STATIC
   stats/function_stats_panel.cpp
   stats/instance_index.cpp
   stats/stats_model.cpp
+  status/capture_warnings.cpp
+  status/path_picker.cpp
+  status/shortcut_sheet.cpp
+  status/status_bar.cpp
+  status/symbol_paths.cpp
+  status/symbol_status.cpp
+  status/symbols_panel.cpp
+  status/toast.cpp
+  status/warnings_banner.cpp
   theme.cpp
   timeline/frame_graph.cpp
   timeline/plot_lanes.cpp
