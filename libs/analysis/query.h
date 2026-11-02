@@ -1,6 +1,6 @@
 // Analysis query API (spec 3.7). WP-32 implements topDownTree, bottomUpFunctions and butterfly; the remaining
 // 3.7 queries are added by their own work packages and are intentionally not declared here yet:
-//   WP-33: linesForFunction, instructionsForFunction (LineAgg, InstructionAgg)
+//   WP-34 (declared below): linesForFunction, instructionsForFunction (LineAgg, InstructionAgg)
 //   WP-35 (declared below): functionStats, scopeStats, threadStateTotals, frames, slowestFrames
 //
 // Deviation from 3.7 (see the WP-32 report): the queries need symbols to turn frames into FunctionKeys, so
@@ -390,6 +390,59 @@ Result<std::shared_ptr<const LockSummary>> lockSummaryShared(const QueryContext&
                                                              Cancel cancel = {});
 // Thread-safe. Per lock address summary of the lock-wait scopes (see above).
 Result<LockSummary> lockSummary(const QueryContext& ctx, const Filter& filter, Cancel cancel = {});
+
+// ---------------------------------------------------------------------------------------------------------
+// WP-34: line and instruction attribution of one function.
+//
+// Matching: the function is `key` (a resolved {module, functionStartRva}, an unresolved {module, rva} or an
+// unmapped {invalid, address} key; or, with an inline key, the inlined function whatever the context's
+// expandInline option says). A stack "contains" the function when one of its frames resolves to the key by
+// the return-address rule (the leaf at its exact address, outer frames at address - 1; the first user frame
+// of a kernel-leaf sample is exact). A sample counts once, for the frame holding the OUTERMOST occurrence of
+// the function (recursion counted once). Filter: samples with t0 <= ts < t1 on the selected threads whose
+// stack passes subtreeRoot and Filter::function exactly as for the other queries; the stack is cut at
+// subtreeRoot, so only frames at or below it can match. Scope blending and kernel frame options do not change
+// the results. Scope keys, kRootKey and kKernelKey match nothing and give an empty list.
+struct LineAgg {
+  uint32_t line = 0;   // source line in the function's own file; 0 = no line information for those samples
+  uint64_t ticks = 0;  // runningTicks + readyTicks + waitingTicks
+  uint64_t runningTicks = 0, readyTicks = 0, waitingTicks = 0;
+};
+
+// One instruction address with the weight of the samples at it.
+struct InstructionAgg {
+  uint64_t rva = 0;  // module-relative address (the absolute address for an unmapped key)
+  uint64_t ticks = 0;
+};
+
+// Thread-safe. Time per source line of `key`, sorted by line ascending, only lines with ticks > 0.
+//  * runningTicks: the weight (rule 1) of the samples whose matching frame is on that line. The line of a
+//    frame is the line-table line of its (return-address-rule) address when that is in the function's own
+//    file; code that belongs to an inlined callee is attributed to the call site in the function's own file
+//    (the providers give the line-table position when it lies in the function's file, else the nearest
+//    preceding own-file line of the function). With an inline key the line is the position inside that
+//    inlined function, as reported in the inline chain (InlineFrame::line).
+//  * waitingTicks / readyTicks: the clipped duration (to [t0, t1)) of Waiting / Ready intervals of the
+//    selected threads whose blocking stack contains the function (leaf exact, outer frames address - 1), on
+//    the line of the outermost matching frame of that blocking stack. subtreeRoot and function apply to the
+//    blocking stack in the same way as to a sample's stack.
+// Needs the symbols resolved (the context's usual precondition); unresolved frames give line 0.
+Result<std::vector<LineAgg>> linesForFunction(const QueryContext& ctx, const Filter& filter, FunctionKey key,
+                                              Cancel cancel = {});
+Result<std::shared_ptr<const std::vector<LineAgg>>> linesForFunctionShared(const QueryContext& ctx,
+                                                                           const Filter& filter,
+                                                                           FunctionKey key,
+                                                                           Cancel cancel = {});
+
+// Thread-safe. Running-sample weight per instruction address of `key`, sorted by rva ascending, only
+// addresses with ticks > 0. The address is the frame's exact address: for a leaf frame the instruction that
+// was executing, for a non-leaf frame the RETURN ADDRESS itself (the instruction after the call; the
+// return-address rule only moves the symbol lookup to address - 1, it does not move the attribution). A
+// disassembly view therefore shows a caller's time on the instruction following its call.
+Result<std::vector<InstructionAgg>> instructionsForFunction(const QueryContext& ctx, const Filter& filter,
+                                                            FunctionKey key, Cancel cancel = {});
+Result<std::shared_ptr<const std::vector<InstructionAgg>>> instructionsForFunctionShared(
+    const QueryContext& ctx, const Filter& filter, FunctionKey key, Cancel cancel = {});
 
 // Thread-safe. Display name: "module!function", "module!0x<rva>" for unresolved frames,
 // "<unmapped>!0x<addr>",
