@@ -4,6 +4,7 @@
 #include "viewer/common/function_names.h"
 #include "viewer/common/imgui_util.h"
 #include "viewer/common/query_filter.h"
+#include "viewer/common/scope_view_options.h"
 #include "viewer/document.h"
 
 #include <imgui.h>
@@ -55,7 +56,7 @@ void ButterflyPanel::onSelectionChanged(const PanelContext& context, const Selec
     ++m_focusRequests;
   }
   if (field == SelectionField::SelectedFunction || field == SelectionField::TimeFilter ||
-      field == SelectionField::All)
+      field == SelectionField::All || field == SelectionField::ViewOptions)
     context.requestRedraw();
 }
 
@@ -66,9 +67,13 @@ ButterflyPanel::QuerySpec ButterflyPanel::currentSpec(const PanelContext& contex
   spec.key = state.selectedFunction;
   if (spec.key && *spec.key == analysis::kRootKey) spec.key.reset();
   spec.base.filter = fl::makeFilter(state.timeFilter, m_restrictSubtree);
-  const analysis::AggregationOptions options = fl::effectiveOptions(m_inline, m_kernel, spec.key);
+  const common::EffectiveScopeOptions scope = common::effectiveScopeOptions(context);
+  const analysis::AggregationOptions options =
+      fl::effectiveOptions(m_inline, m_kernel, spec.key, scope.blendScopes, scope.groupByFiber);
   spec.base.expandInline = options.expandInline;
   spec.base.kernelFrames = options.kernelFrames;
+  spec.base.blendScopes = options.blendScopes;
+  spec.base.groupByFiber = options.groupByFiber;
   spec.base.documentGeneration = context.documentGeneration;
   spec.base.symbolGeneration = context.symbolGeneration;
   return spec;
@@ -78,6 +83,8 @@ void ButterflyPanel::issue(const PanelContext& context, const QuerySpec& spec) {
   analysis::AggregationOptions options;
   options.expandInline = spec.base.expandInline;
   options.kernelFrames = spec.base.kernelFrames;
+  options.blendScopes = spec.base.blendScopes;
+  options.groupByFiber = spec.base.groupByFiber;
   const Document& doc = *context.document;
   std::shared_ptr<const AnalysisSnapshot> snapshot =
       doc.analysis().snapshot(options, spec.base.symbolGeneration, context.queryExecutor);
@@ -330,7 +337,12 @@ void ButterflyPanel::drawTable(const PanelContext& context, float height) {
         if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !self) clicked = line;
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) rightClicked = line;
         ImGui::SetCursorScreenPos(ImVec2(cell.x + (self ? 0.0f : em), cell.y));
-        if (line.navigable) {
+        if (line.name.scope) {  // WP-54: instrumentation scopes get an icon and their own colour
+          common::drawScopeIcon(em * 0.8f);
+          ImGui::PushStyleColor(ImGuiCol_Text, common::scopeTextColor());
+          ImGui::TextUnformatted(line.name.function.c_str());
+          ImGui::PopStyleColor();
+        } else if (line.navigable) {
           ImGui::TextUnformatted(line.name.function.c_str());
         } else {
           ImGui::TextDisabled("%s", line.name.function.c_str());

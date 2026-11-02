@@ -4,6 +4,7 @@
 #include "viewer/callgraph/subtree_resolver.h"
 #include "viewer/common/function_names.h"
 #include "viewer/common/imgui_util.h"
+#include "viewer/common/scope_view_options.h"
 #include "viewer/document.h"
 
 #include <imgui.h>
@@ -96,7 +97,9 @@ void CallGraphPanel::onSelectionChanged(const PanelContext& context, const Selec
     }
     context.requestRedraw();
   }
-  if (field == SelectionField::TimeFilter || field == SelectionField::All) context.requestRedraw();
+  if (field == SelectionField::TimeFilter || field == SelectionField::All ||
+      field == SelectionField::ViewOptions)
+    context.requestRedraw();
 }
 
 CallGraphPanel::QuerySpec CallGraphPanel::currentSpec(const PanelContext& context) const {
@@ -104,6 +107,9 @@ CallGraphPanel::QuerySpec CallGraphPanel::currentSpec(const PanelContext& contex
   spec.filter = cg::toQueryFilter(context.selection ? context.selection->state().timeFilter : std::nullopt);
   spec.expandInline = m_inline;
   spec.kernelFrames = m_kernel;
+  const common::EffectiveScopeOptions scope = common::effectiveScopeOptions(context);
+  spec.blendScopes = scope.blendScopes;
+  spec.groupByFiber = scope.groupByFiber;
   spec.documentGeneration = context.documentGeneration;
   spec.symbolGeneration = context.symbolGeneration;
   return spec;
@@ -113,6 +119,8 @@ void CallGraphPanel::issue(const PanelContext& context, const QuerySpec& spec) {
   analysis::AggregationOptions options;
   options.expandInline = spec.expandInline;
   options.kernelFrames = spec.kernelFrames;
+  options.blendScopes = spec.blendScopes;
+  options.groupByFiber = spec.groupByFiber;
   const Document& doc = *context.document;
   std::shared_ptr<const AnalysisSnapshot> snapshot =
       doc.analysis().snapshot(options, spec.symbolGeneration, context.queryExecutor);
@@ -156,6 +164,8 @@ void CallGraphPanel::update(const PanelContext& context) {
       const bool reset = m_firstTree || m_shown.filter.subtreeRoot != m_requested.filter.subtreeRoot ||
                          m_shown.expandInline != m_requested.expandInline ||
                          m_shown.kernelFrames != m_requested.kernelFrames ||
+                         m_shown.blendScopes != m_requested.blendScopes ||
+                         m_shown.groupByFiber != m_requested.groupByFiber ||
                          m_shown.symbolGeneration != m_requested.symbolGeneration;  // keys changed: ids too
       m_shown = m_requested;
       m_message.clear();
@@ -601,7 +611,14 @@ void CallGraphPanel::drawTable(const PanelContext& context, float height) {
           }
         }
         ImGui::SetCursorScreenPos(ImVec2(arrowRight, cell.y));
-        ImGui::TextUnformatted(np.function.c_str());
+        if (np.scope) {  // WP-54: instrumentation scopes get an icon and their own colour
+          common::drawScopeIcon(em * 0.8f);
+          ImGui::PushStyleColor(ImGuiCol_Text, common::scopeTextColor());
+          ImGui::TextUnformatted(np.function.c_str());
+          ImGui::PopStyleColor();
+        } else {
+          ImGui::TextUnformatted(np.function.c_str());
+        }
         if (np.inlined) {
           ImGui::SameLine(0.0f, 4.0f);
           ImGui::TextDisabled("[inline]");

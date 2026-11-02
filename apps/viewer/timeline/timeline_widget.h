@@ -13,6 +13,9 @@
 #include "viewer/interaction/interaction_model.h"
 #include "viewer/panel.h"
 #include "viewer/stats/instance_index.h"
+#include "viewer/timeline/frame_graph.h"
+#include "viewer/timeline/plot_lanes.h"
+#include "viewer/timeline/scope_lanes.h"
 #include "viewer/timeline/timeline_colors.h"
 #include "viewer/timeline/timeline_data.h"
 #include "viewer/timeline/timeline_math.h"
@@ -43,6 +46,16 @@ struct TimelineOptions {
   bool buildInline = false;
   // Test hook: do not start the LOD build (every row stays pending) until this is cleared.
   bool deferLodBuild = false;
+  // WP-54: what rows show below the state band. Effective only for traces with scope events (others are
+  // always Sampled); a row's own mode (RowFlags::mode) wins over this global one.
+  RowMode rowMode = RowMode::Both;
+  // WP-54: the frame-time strip above the rows and the markers / plot lanes below them (each only when the
+  // trace has frame marks / markers or plots).
+  bool showFrameGraph = true;
+  bool showPlots = true;
+  float frameGraphHeight = 44.0f;  // canvas height at the base font size
+  // Test hook (WP-54): record the scope items drawn in each frame (ScopeLanesView::drawnItems()).
+  bool recordDrawnItems = false;
 };
 
 // Counters of the last drawn frame (tests and the perf budget).
@@ -53,6 +66,10 @@ struct TimelineFrameStats {
   uint32_t flameSpans = 0;
   uint32_t frameMarksDrawn = 0;
   uint32_t highlightRects = 0;  // WP-47: instance highlight rects drawn
+  // WP-54.
+  uint32_t scopeRows = 0, scopeLines = 0, scopeItems = 0, scopeLabels = 0, scopeRowsPending = 0;
+  uint32_t frameBars = 0;
+  uint32_t plotLanes = 0, plotColumns = 0, markerTicks = 0;
 };
 
 // One wake-up arrow drawn in the last frame (WP-46; tests).
@@ -80,6 +97,8 @@ struct TimelineScreenGeometry {
   float rowsY0 = 0, rowsY1 = 0;      // visible part of the rows child window
   float rowsContentY0 = 0;           // screen y of content-space 0 (scroll applied)
   float gutterX0 = 0;
+  float frameGraphY0 = 0, frameGraphY1 = 0;  // WP-54: the frame-time canvas (0 / 0 when not drawn)
+  float sectionY0 = 0;                       // WP-54: screen y of the markers / plot section's top
 };
 
 class TimelineWidget {
@@ -136,6 +155,28 @@ class TimelineWidget {
   const std::vector<HighlightRectInfo>& lastHighlightRects() const { return m_highlightRects; }
   // Screen y of the centre of the state band of `thread`'s row in the last frame (nullopt: no such row).
   std::optional<float> bandCenterY(ThreadIdx thread) const;
+
+  // ---- WP-54: instrumentation lanes, frame graph, plots ----
+  // The mode a row shows now: its own, else the global one; Sampled for traces without scope events.
+  RowMode effectiveRowMode(ThreadIdx thread) const;
+  // Sets one row's mode (nullopt: follow the global mode).
+  void setRowMode(ThreadIdx thread, std::optional<RowMode> mode);
+  // Sets the global mode and lets every row follow it.
+  void setGlobalRowMode(RowMode mode);
+  // Screen y of the centre of scope line `line` of `thread`'s row in the last frame (nullopt: no such line).
+  std::optional<float> scopeLineCenterY(ThreadIdx thread, uint32_t line) const;
+  // Screen y of the centre of a lane of the markers / plot section in the last frame.
+  std::optional<float> sectionLaneCenterY(GlobalLane::Kind kind, uint32_t index = 0) const;
+  // The row layout of the last frame for `thread` (nullptr: not shown).
+  const RowLayout* rowLayoutOf(ThreadIdx thread) const;
+  ScopeLanesView& scopeLanes();
+  const ScopeLanesView& scopeLanes() const;
+  FrameGraphView& frameGraph();
+  const FrameGraphView& frameGraph() const;
+  PlotLanesView& plotLanes();
+  const PlotLanesView& plotLanes() const;
+  // The scope or section item the tooltip of the last frame described (tests).
+  const std::optional<FunctionKey>& lastHoveredScope() const { return m_hoveredScope; }
   // Block until the background build is done, pumping nothing (only valid with buildInline or after the job
   // completed); test helper.
   const std::string& lodError() const;
@@ -174,6 +215,11 @@ class TimelineWidget {
   void drawInstanceHighlights(ImDrawList* dl, const PanelContext& context, const RowRange& visible,
                               float originY);
   void drawRangeOverlays(ImDrawList* dl, const PanelContext& context, float y0, float y1);
+  void drawFrameGraphStrip(const PanelContext& context);
+  void drawSection(ImDrawList* dl, const PanelContext& context, float originY, const ImVec2* mouse);
+  void updateInstrumentation(const PanelContext& context);
+  PlotArea plotArea() const;
+  RowMode rowModeOf(ThreadIdx thread, bool hasScopes) const;
   uint32_t flameDepthFor(ThreadIdx thread) const;
 
   TimelineOptions m_options;
@@ -212,6 +258,8 @@ class TimelineWidget {
   std::unique_ptr<stats::InstanceIndex> m_highlightIndex;
   uint64_t m_highlightGeneration = 0;
   std::vector<HighlightRectInfo> m_highlightRects;
+  std::optional<FunctionKey> m_hoveredScope;  // WP-54
+  GlobalGeometry m_globalGeometry;
 };
 
 }  // namespace tachyon::viewer::timeline

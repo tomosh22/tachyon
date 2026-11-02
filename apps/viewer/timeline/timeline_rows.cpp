@@ -62,8 +62,23 @@ float flameDepthTop(const RowGeometry& geom, uint32_t depth) {
   return flameTop(geom) + static_cast<float>(depth > 0 ? depth - 1 : 0) * geom.flameDepthHeight;
 }
 
+float scopeTop(const RowLayout& row, const RowGeometry& geom) {
+  float y = stripTop(geom);
+  if (modeHasSampled(row.mode)) {
+    y += geom.stripHeight;
+    if (row.expanded && row.flameDepths > 0)
+      y += geom.flameGap + static_cast<float>(row.flameDepths) * geom.flameDepthHeight;
+  }
+  return y + geom.scopeGap;
+}
+
+float scopeLineTop(const RowLayout& row, const RowGeometry& geom, uint32_t line) {
+  return scopeTop(row, geom) + static_cast<float>(line) * geom.scopeLineHeight;
+}
+
 std::vector<RowLayout> layoutRows(const std::vector<ThreadIdx>& order, const std::vector<RowFlags>& flags,
-                                  const std::vector<uint32_t>& flameDepthsByThread, const RowGeometry& geom) {
+                                  const std::vector<uint32_t>& flameDepthsByThread, const RowGeometry& geom,
+                                  const std::vector<RowExtra>& extras) {
   std::vector<RowLayout> out;
   out.reserve(order.size());
   float y = 0;
@@ -73,10 +88,19 @@ std::vector<RowLayout> layoutRows(const std::vector<ThreadIdx>& order, const std
     r.y0 = y;
     r.expanded = t.get() < flags.size() && flags[t.get()].expanded;
     r.flameDepths = t.get() < flameDepthsByThread.size() ? flameDepthsByThread[t.get()] : 0;
-    r.height = geom.rowPadding * 2 + geom.bandHeight + geom.stripHeight;
-    if (r.expanded && r.flameDepths > 0) {
-      r.height += geom.flameGap + static_cast<float>(r.flameDepths) * geom.flameDepthHeight;
+    if (t.get() < extras.size()) {
+      r.mode = extras[t.get()].mode;
+      r.scopeLines = extras[t.get()].scopeLines;
     }
+    r.height = geom.rowPadding * 2 + geom.bandHeight;
+    if (modeHasSampled(r.mode)) {
+      r.height += geom.stripHeight;
+      if (r.expanded && r.flameDepths > 0) {
+        r.height += geom.flameGap + static_cast<float>(r.flameDepths) * geom.flameDepthHeight;
+      }
+    }
+    if (!modeHasScopes(r.mode)) r.scopeLines = 0;
+    if (r.scopeLines > 0) r.height += geom.scopeGap + static_cast<float>(r.scopeLines) * geom.scopeLineHeight;
     y += r.height + geom.rowSpacing;
     out.push_back(r);
   }
@@ -131,7 +155,22 @@ RowHit hitRowSection(const RowLayout& row, const RowGeometry& geom, float yInRow
   if (yInRow < 0 || yInRow >= row.height) return hit;
   if (yInRow < stripTop(geom)) {
     hit.section = RowSection::Band;  // includes the top padding: the band is the primary target
-  } else if (yInRow < stripTop(geom) + geom.stripHeight + (row.expanded ? 0.0f : geom.rowPadding)) {
+    return hit;
+  }
+  if (row.scopeLines > 0 && yInRow >= scopeTop(row, geom)) {
+    const float dy = yInRow - scopeTop(row, geom);
+    const uint32_t line = static_cast<uint32_t>(dy / geom.scopeLineHeight);
+    if (line < row.scopeLines) {
+      hit.section = RowSection::Scope;
+      hit.depth = line;
+    }
+    return hit;
+  }
+  if (!modeHasSampled(row.mode)) {
+    if (row.scopeLines == 0) hit.section = RowSection::Band;  // a band-only row
+    return hit;
+  }
+  if (yInRow < stripTop(geom) + geom.stripHeight + (row.expanded ? 0.0f : geom.rowPadding)) {
     hit.section = RowSection::Strip;
   } else if (row.expanded && row.flameDepths > 0 && yInRow >= flameTop(geom)) {
     const float dy = yInRow - flameTop(geom);

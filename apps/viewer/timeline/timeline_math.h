@@ -6,6 +6,7 @@
 // edges (queries, selection bus).
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -64,6 +65,22 @@ double toRelative(const TimeLimits& limits, uint64_t absTick);
 
 // Integer query window for TimelineLod: t1 > t0, within the trace, span <= 2^47.
 TickRange queryWindow(const TimeView& view, const TimeLimits& limits);
+
+// WP-54: the plot area of the timeline on screen (x extent) and what it shows. The instrumentation lanes, the
+// frame graph and the plot lanes lay out against this one description.
+struct PlotArea {
+  float x0 = 0, width = 1;
+  TimeView view;
+  TimeLimits limits;
+  double clockHz = 1e9;
+
+  // Thread-safe (value type). Screen x of an absolute tick (not clamped).
+  double xOf(uint64_t absTick) const { return relTickToX(view, toRelative(limits, absTick), x0, width); }
+  // Absolute tick under screen x (clamped to the trace).
+  uint64_t tickAt(double x) const { return toAbsolute(limits, xToRelTick(view, x, x0, width)); }
+  // Ticks per screen pixel.
+  double ticksPerPixel() const { return view.span / std::max(1.0f, width); }
+};
 
 // ---- ruler ----
 struct RulerTick {

@@ -80,8 +80,22 @@ void SelectionBus::setHighlightCurrent(std::optional<uint32_t> index) {
   publish(SelectionField::InstanceHighlight);
 }
 
+void SelectionBus::setBlendScopes(bool on) {
+  if (m_state.viewOptions.blendScopes == on) return;
+  m_state.viewOptions.blendScopes = on;
+  publish(SelectionField::ViewOptions);
+}
+
+void SelectionBus::setGroupByFiber(bool on) {
+  if (m_state.viewOptions.groupByFiber == on) return;
+  m_state.viewOptions.groupByFiber = on;
+  publish(SelectionField::ViewOptions);
+}
+
 void SelectionBus::clear() {
+  const ViewOptions keep = m_state.viewOptions;
   m_state = SelectionState{};
+  m_state.viewOptions = keep;
   publish(SelectionField::All);
 }
 
