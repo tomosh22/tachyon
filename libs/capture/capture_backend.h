@@ -78,6 +78,9 @@ struct CaptureResult {
   uint64_t eventsLost = 0;
   std::filesystem::path rawPath;
   double durationS = 0.0;
+  // Problems that did not fail the capture (lost samples, throttling, ...) with advice on what to change. The
+  // agent adds them to capture_done.warnings. Appended last so positional initialisers keep working.
+  std::vector<std::string> warnings;
 };
 
 class ICaptureBackend {

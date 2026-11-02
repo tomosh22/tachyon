@@ -383,6 +383,35 @@ TEST(LaunchHandshake, TargetDoesNotInheritIgnoredSigpipeAndSignalMask) {
   EXPECT_EQ(ignored & (1ull << (SIGPIPE - 1)), 0u) << line;
 }
 
+TEST(LaunchHandshake, ReleasingAChildThatAlreadyDiedIsACleanErrorNotASigpipe) {
+  // SIGPIPE has its default disposition here: an unguarded write() to the dead child's pipe would kill the
+  // whole test process.
+  struct sigaction dfl {};
+  dfl.sa_handler = SIG_DFL;
+  sigemptyset(&dfl.sa_mask);
+  struct sigaction old {};
+  ::sigaction(SIGPIPE, &dfl, &old);
+  LaunchSpec spec;
+  spec.exe = "/bin/sleep";
+  spec.args = {"30"};
+  auto spawned = LaunchedProcess::spawnParked(spec);
+  ASSERT_TRUE(spawned.ok());
+  ::kill(static_cast<pid_t>(spawned->pid()), SIGKILL);
+  ASSERT_TRUE(waitFor([&] { return !processAlive("/proc", spawned->pid()); }));
+  auto released = spawned->release();
+  ASSERT_FALSE(released.ok());
+  EXPECT_NE(released.error().message.find("exited before it was released"), std::string::npos)
+      << released.error().message;
+  // The pending SIGPIPE was consumed and the mask restored: nothing is delivered later.
+  sigset_t pending;
+  sigpending(&pending);
+  EXPECT_EQ(sigismember(&pending, SIGPIPE), 0);
+  sigset_t cur;
+  pthread_sigmask(SIG_SETMASK, nullptr, &cur);
+  EXPECT_EQ(sigismember(&cur, SIGPIPE), 0) << "the thread's signal mask is restored";
+  ::sigaction(SIGPIPE, &old, nullptr);
+}
+
 TEST(LaunchHandshake, DestroyingAParkedProcessKillsItAndAReleasedOneSurvives) {
   uint32_t parkedPid = 0, runningPid = 0;
   {

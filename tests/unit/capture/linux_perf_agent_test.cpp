@@ -135,6 +135,31 @@ TEST(AgentPerf, DeferredLaunchStartsOnTheSecondStartAndStopEndsIt) {
   rig.killRecordedTarget();  // the target outlives the capture
 }
 
+TEST(AgentPerf, BackendWarningsReachCaptureDone) {
+  Rig rig;
+  StartRequest s = rig.shell("echo $$ > pid.txt; exec sleep 30");
+  ASSERT_TRUE(rig.call(s).ok);
+  capture::perf::RecordBuilder b;
+  const uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                 std::chrono::steady_clock::now().time_since_epoch())
+                                                 .count());
+  b.lost(0, 77, {0, 0, now, 0, 0, 0});
+  rig.fake->ring(rig.fake->events().size() - 1)->push(b.bytes());  // event 0 is the privilege probe
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  ASSERT_TRUE(rig.call(StopRequest{}).ok);
+  ASSERT_TRUE(rig.waitForState(CaptureState::Idle));
+  const auto done = rig.doneEvent();
+  ASSERT_TRUE(done.has_value());
+  EXPECT_EQ(done->summary.events_lost, 77u);
+  bool found = false;
+  for (const std::string& w : done->summary.warnings)
+    found |= w.find("PERF_RECORD_LOST") != std::string::npos;
+  EXPECT_TRUE(found) << "the lost-record advice is in capture_done.warnings";
+  EXPECT_LE(done->summary.warnings.size(), kMaxSummaryWarnings);
+  for (const std::string& w : done->summary.warnings) EXPECT_LE(w.size(), kMaxSummaryWarningChars);
+  rig.killRecordedTarget();
+}
+
 TEST(AgentPerf, StartFailuresMapToProtocolCodes) {
   Rig rig;
   rig.fake->failSystemWideWith = EACCES;

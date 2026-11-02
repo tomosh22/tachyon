@@ -4,6 +4,7 @@
 #include "capture/windows_etw/session_config.h"
 #include "core/log.h"
 
+#include <sys/resource.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
@@ -219,6 +220,32 @@ Result<void> LinuxPerfBackend::openSlot(Session& session, const EventConfig& cfg
   }
 }
 
+Result<void> LinuxPerfBackend::ensureDescriptors(size_t threads, size_t cpus) {
+  constexpr size_t kSlack = 128;  // the spool, pipes, sockets, the agent's own connections
+  const size_t needed = threads * cpus;
+  rlimit lim{};
+  if (::getrlimit(RLIMIT_NOFILE, &lim) != 0) return ok();  // cannot tell: the open itself will report EMFILE
+  if (lim.rlim_cur == RLIM_INFINITY || needed + kSlack <= lim.rlim_cur) return ok();
+  const rlim_t want = static_cast<rlim_t>(needed + kSlack);
+  if (lim.rlim_max == RLIM_INFINITY || want <= lim.rlim_max) {
+    rlimit raised = lim;
+    raised.rlim_cur = want;
+    if (::setrlimit(RLIMIT_NOFILE, &raised) == 0) return ok();
+  } else if (lim.rlim_cur < lim.rlim_max) {
+    rlimit raised = lim;
+    raised.rlim_cur = lim.rlim_max;
+    (void)::setrlimit(RLIMIT_NOFILE, &raised);
+  }
+  ::getrlimit(RLIMIT_NOFILE, &lim);
+  return makeError(ErrorCode::Internal,
+                   std::to_string(needed) + " descriptors needed (" + std::to_string(threads) +
+                       " threads x " + std::to_string(cpus) + " cpus, plus " + std::to_string(kSlack) +
+                       " spare) but the limit is " + std::to_string(lim.rlim_cur) + " (hard limit " +
+                       std::to_string(lim.rlim_max) +
+                       "): raise it with `ulimit -n`, sample fewer cpus' worth of threads, or run with "
+                       "CAP_PERFMON for the system-wide plan, which needs one descriptor per cpu");
+}
+
 Result<void> LinuxPerfBackend::openTask(Session& session, const EventConfig& cfg, int tid) {
   for (uint32_t cpu : m_system->onlineCpus()) {
     auto owner = session.ownerByCpu.find(static_cast<int>(cpu));
@@ -270,6 +297,11 @@ Result<void> LinuxPerfBackend::openPlan(Session& session, const CaptureOptions& 
         " and the process lacks CAP_PERFMON: kernel-mode samples and kernel frames are "
         "excluded (lower it to 1 or grant CAP_PERFMON to include them)");
   std::vector<uint32_t> opened;
+  {
+    const size_t threads =
+        options.mode == CaptureMode::Launch ? 1 : perf::listThreads(m_system->procRoot(), options.pid).size();
+    TACHYON_TRY(ensureDescriptors(threads, m_system->onlineCpus().size()));
+  }
   if (options.mode == CaptureMode::Launch) {
     TACHYON_TRY(openTask(session, cfg, static_cast<int>(options.pid)));
     opened.push_back(options.pid);
@@ -604,6 +636,7 @@ Result<CaptureResult> LinuxPerfBackend::stop() {
   CaptureResult result;
   result.tracePath = options.outPath;
   result.eventsLost = std::max<uint64_t>(stats->eventsLost, drain.lostEvents);
+  result.warnings = stats->warnings;
   result.durationS = durationS;
   if (m_config.keepRawSpool) {
     result.rawPath = session->spoolDir;
@@ -678,6 +711,7 @@ Result<CaptureResult> LinuxPerfBackend::flush(std::string name, uint32_t seconds
   CaptureResult result;
   result.tracePath = outTrace;
   result.eventsLost = stats->eventsLost;
+  result.warnings = stats->warnings;
   result.durationS = static_cast<double>(stats->endTs - std::max(stats->startTs, co.windowStartTs)) / 1e9;
   std::error_code ec;
   if (m_config.keepRawSpool) {
