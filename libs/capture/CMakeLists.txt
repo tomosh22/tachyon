@@ -8,3 +8,8 @@ tachyon_add_library(capture
 if(WIN32)
   target_link_libraries(tachyon_capture PUBLIC advapi32)
 endif()
+
+# WP-70: the Linux perf_event_open backend (own library so non-Linux builds never see it).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_subdirectory(linux_perf)
+endif()

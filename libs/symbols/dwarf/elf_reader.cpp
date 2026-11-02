@@ -140,6 +140,13 @@ Result<ElfFile> ElfFile::open(const fs::path& path) {
       const uint8_t* p = ph.data() + static_cast<size_t>(i) * phentsize;
       if (load<uint32_t>(p) != kPtLoad) continue;
       const uint64_t vaddr = load<uint64_t>(p + 16);
+      ElfLoadSegment seg;
+      seg.flags = load<uint32_t>(p + 4);
+      seg.offset = load<uint64_t>(p + 8);
+      seg.vaddr = vaddr;
+      seg.filesz = load<uint64_t>(p + 32);
+      seg.memsz = load<uint64_t>(p + 40);
+      out.m_loadSegments.push_back(seg);
       lowest = any ? std::min(lowest, vaddr) : vaddr;
       any = true;
     }

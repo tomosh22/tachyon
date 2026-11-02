@@ -4,6 +4,9 @@
 #include "agent/stub_backend.h"
 #include "capture/mock/mock_backend.h"
 #include "capture/windows_etw/windows_etw_backend.h"
+#if TACHYON_HAVE_PERF_BACKEND
+#include "capture/linux_perf/linux_perf_backend.h"
+#endif
 #include "control/server.h"
 #include "control/transport.h"
 #include "core/log.h"
@@ -74,11 +77,15 @@ void printUsage() {
       "usage: tachyon-agent [--backend mock|etw|perf] [--socket PATH | --pipe NAME]\n"
       "                     [--log-level trace|debug|info|warn|error]\n"
       "                     [--mock-fixture FILE] [--mock-duration-ms N] [--mock-steps N] "
-      "[--etw-delete-raw]\n"
+      "[--etw-delete-raw] [--perf-delete-raw] [--perf-ring-pages N]\n"
       "                     [--inst-spool-mb N] [--inst-spool-dir DIR] [--keep-inst-spool]\n"
       "The address defaults to $TACHYON_AGENT_PIPE or the platform default. The mock backend copies\n"
       "$TACHYON_MOCK_FIXTURE (or --mock-fixture) to the requested output path. The etw backend keeps the\n"
-      "raw <out>.etl next to the trace unless --etw-delete-raw is given. Instrumentation from SDK clients "
+      "raw <out>.etl next to the trace unless --etw-delete-raw is given. The perf backend (Linux) keeps its "
+      "raw\n"
+      "spool directory <out>.perfspool unless --perf-delete-raw is given; --perf-ring-pages sets the ring "
+      "size per\n"
+      "cpu (a power of two, default 256 = 1 MiB). Instrumentation from SDK clients "
       "is\n"
       "spooled per process (default cap 1024 MiB, --inst-spool-mb) in <out>.inst/ (or under "
       "--inst-spool-dir)\n"
@@ -93,6 +100,8 @@ struct Options {
   long mockDurationMs = 0;
   long mockSteps = 4;
   bool etwDeleteRaw = false;
+  bool perfDeleteRaw = false;
+  long perfRingPages = 256;
   long instSpoolMb = 1024;
   std::string instSpoolDir;
   bool keepInstSpool = false;
@@ -119,6 +128,14 @@ bool parseArgs(int argc, char** argv, Options& o) {
       if (!value(o.logLevel)) return false;
     } else if (a == "--etw-delete-raw") {
       o.etwDeleteRaw = true;
+    } else if (a == "--perf-delete-raw") {
+      o.perfDeleteRaw = true;
+    } else if (a == "--perf-ring-pages") {
+      if (!value(tmp)) return false;
+      o.perfRingPages = std::strtol(tmp.c_str(), nullptr, 10);
+      if (o.perfRingPages < 2 || o.perfRingPages > (1l << 20) ||
+          (o.perfRingPages & (o.perfRingPages - 1)) != 0)
+        return false;  // the kernel wants a power-of-two number of data pages
     } else if (a == "--inst-spool-mb") {
       if (!value(tmp)) return false;
       o.instSpoolMb = std::strtol(tmp.c_str(), nullptr, 10);
@@ -210,7 +227,14 @@ int main(int argc, char** argv) {
       etwCfg.keepRawEtl = !opt.etwDeleteRaw;
       backend = std::make_unique<capture::WindowsEtwBackend>(etwCfg);
     } else {
+#if TACHYON_HAVE_PERF_BACKEND
+      capture::LinuxPerfBackendConfig perfCfg;
+      perfCfg.keepRawSpool = !opt.perfDeleteRaw;
+      perfCfg.ringPages = static_cast<uint32_t>(opt.perfRingPages);
+      backend = std::make_unique<capture::LinuxPerfBackend>(perfCfg);
+#else
       backend = std::make_unique<agent::StubBackend>(opt.backend);
+#endif
     }
   } else {
     std::fprintf(stderr, "tachyon-agent: unknown backend '%s' (expected mock|etw|perf)\n",
