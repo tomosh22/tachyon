@@ -276,6 +276,8 @@ ResolvedAddress JsonSymbolProvider::resolve(uint64_t rva) {
     --it;
     if (rva - it->rva < it->size) {
       out.inlines = it->chain;
+      out.callSiteFile = out.file;  // the line table is in the function's own file here
+      out.callSiteLine = out.line;
       break;
     }
   }

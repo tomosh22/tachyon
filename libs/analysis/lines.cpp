@@ -140,6 +140,10 @@ uint32_t FunctionMatcher::lineOf(const FunctionHit& hit) {
       if (ra.inlines[i].function.get() == m_inlineName) return ra.inlines[i].line;
     return 0;
   }
+  if (!ra.inlines.empty() && ra.callSiteLine != 0 && ra.callSiteFile.valid()) {
+    ensureOwnLines();
+    if (!m_haveFile || ra.callSiteFile == m_file) return ra.callSiteLine;
+  }
   if (!ra.file.valid()) return 0;  // no line row at all: report "unknown" instead of approximating
   ensureOwnLines();
   if (!m_haveFile || ra.file == m_file) return ra.line;

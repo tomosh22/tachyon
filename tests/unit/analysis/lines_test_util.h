@@ -24,6 +24,8 @@ struct InlineSpec {
   const char* function;
   const char* file;
   uint32_t line;
+  uint32_t callSiteLine = 0;  // the physical function's call site of the chain (0 = provider can't tell)
+  const char* callSiteFile = nullptr;
 };
 struct FnSpec {
   const char* name;
@@ -55,9 +57,14 @@ class LineProvider final : public symbols::ISymbolProvider {
       }
     }
     for (const InlineSpec& in : f->inlines) {
-      if (rva >= f->start + in.off && rva < f->start + in.off + in.size)
+      if (rva >= f->start + in.off && rva < f->start + in.off + in.size) {
         r.inlines.push_back(
             symbols::InlineFrame{m_strings.intern(in.function), m_strings.intern(in.file), in.line});
+        if (in.callSiteLine != 0) {
+          r.callSiteFile = m_strings.intern(in.callSiteFile);
+          r.callSiteLine = in.callSiteLine;
+        }
+      }
     }
     return r;
   }
@@ -90,10 +97,32 @@ class LineProvider final : public symbols::ISymbolProvider {
   std::vector<FnSpec> m_fns;
 };
 
-constexpr uint64_t kMain = 0x2000, kF = 0x1000, kG = 0x3000, kH = 0x4000, kN = 0x5000, kD = 0x6000;
+constexpr uint64_t kMain = 0x2000, kF = 0x1000, kG = 0x3000, kH = 0x4000, kN = 0x5000, kD = 0x6000,
+                   kE = 0x7000, kS = 0x8000, kM = 0x9000;
 
 inline std::vector<FnSpec> specs() {
   return {
+      // E: DWARF convention with an exact call site (e.cpp:25) for the whole chain.
+      {"E",
+       "e.cpp",
+       kE,
+       0x100,
+       {{0x00, 0x30, 20, nullptr}, {0x30, 0x30, 7, "callee.h"}, {0x60, 0xA0, 60, nullptr}},
+       {{0x30, 0x30, "Callee", "callee.h", 7, 25, "e.cpp"}, {0x30, 0x30, "Mid", "mid.h", 33, 25, "e.cpp"}}},
+      // S: the inlined callee lives in the function's own file; the line-table row (200) is the callee body.
+      {"S",
+       "s.cpp",
+       kS,
+       0x100,
+       {{0x00, 0x20, 100, nullptr}, {0x20, 0x20, 200, nullptr}, {0x40, 0xC0, 110, nullptr}},
+       {{0x20, 0x20, "Callee", "s.cpp", 200, 105, "s.cpp"}}},
+      // M: the call site is reported in another file than the function's: not usable, fall back.
+      {"M",
+       "m.cpp",
+       kM,
+       0x100,
+       {{0x00, 0x30, 10, nullptr}, {0x30, 0x30, 7, "callee.h"}, {0x60, 0xA0, 60, nullptr}},
+       {{0x30, 0x30, "Callee", "callee.h", 7, 99, "other.cpp"}}},
       // N: no line information at all (ResolvedAddress::file stays invalid).
       {"N", nullptr, kN, 0x100, {}, {}},
       // D: DWARF/DIA convention. inlines[0] sits at the line-table position (callee.h:7); the outer frame

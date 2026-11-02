@@ -95,6 +95,24 @@ ResolvedAddress DiaSymbolProvider::resolve(uint64_t rva) {
     frame.line = in.line;
     out.inlines.push_back(frame);
   }
+  if (!out.inlines.empty() && rva >= fn->raw.startRva) {
+    // The PDB does not store where the physical function called its outermost inline site. Best effort: the
+    // last line row of the function's own file (the file of its first row) at or before the address; the rows
+    // inside inline expansions belong to the inlinee's file and are skipped.
+    auto rows = m_session->findLines(fn->raw.startRva, rva - fn->raw.startRva + 1);
+    if (rows.ok() && !rows.value().empty()) {
+      std::vector<DiaRawLine> sorted = rows.value();
+      std::stable_sort(sorted.begin(), sorted.end(),
+                       [](const DiaRawLine& a, const DiaRawLine& b) { return a.rva < b.rva; });
+      const std::string& ownFile = sorted.front().file;
+      for (size_t i = sorted.size(); i-- > 0;) {
+        if (sorted[i].rva > rva || sorted[i].file != ownFile || sorted[i].line == 0) continue;
+        out.callSiteFile = internFile(sorted[i].file);
+        out.callSiteLine = sorted[i].line;
+        break;
+      }
+    }
+  }
   return out;
 }
 
