@@ -27,3 +27,13 @@ Headers `libs/symbols/symbol_provider.h` and `libs/symbols/function_key.h` (`tac
 
 ## Clarification added with WP-72 (2026-10-25, binding)
 - ELF modules: `ModuleRec.base` is the load address of the module's lowest PT_LOAD segment (not the executable segment's mmap address). RVA = address − base. The DWARF provider maps RVA → ELF vaddr as `rva + (lowest PT_LOAD p_vaddr aligned down to 4096)`. The perf backend (WP-70) must fill `base` accordingly.
+
+## Clarification added with WP-34c (2026-11-02, binding)
+- `ResolvedAddress::callSiteFile`/`callSiteLine`: when `inlines` is non-empty, the position in the physical function's own source of the call that the outermost inline frame was expanded from. It is 0/invalid when unknown. Per provider:
+  - JSON: the line-table position.
+  - DWARF: DW_AT_call_file/line of the outermost inline site.
+  - DIA: best effort, the last own-file line row at or before the address.
+- Conventions:
+  - `file`/`line` is the line-table position, inside the innermost inlinee for DWARF and DIA.
+  - `inlines[k].line` for k ≥ 1 is a position inside that frame's function.
+- `linesForFunction` uses the call site for the physical-function key.
