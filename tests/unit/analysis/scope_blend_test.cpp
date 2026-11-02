@@ -229,11 +229,11 @@ TEST(ScopeBlend, ScopeOpenAcrossASampleBoundaryAppliesToTheSamplesInside) {
 TEST(ScopeBlend, ReturnAddressRuleDecidesWhichFunctionANonLeafFrameBelongsTo) {
   Probe p;
   // Frame 1 is 0x1100 = the first byte of A, but as a return address it is the instruction after the last one
-  // of Main: it belongs to Main, so a scope whose caller is in A has no matching frame.
+  // of Main: it belongs to Main.
   const CallstackIdx s = p.h.stack({0x1010, 0x1100, 0x1210});
   p.sc.begin(0, "InMain", 0x10F0);
   p.sc.end(50000);
-  p.sc.begin(50000, "InA", 0x1100);
+  p.sc.begin(50000, "AtMainEnd", 0x1100);  // a return address one past Main's last byte: Main's call
   p.sc.end(100000);
   p.ts = 0;
   for (int i = 0; i < 4; ++i, p.ts += 200) p.h.sample(0, p.ts, s);
@@ -244,38 +244,50 @@ TEST(ScopeBlend, ReturnAddressRuleDecidesWhichFunctionANonLeafFrameBelongsTo) {
   auto tree = topDownTree(ctx, {});
   ASSERT_TRUE(tree.ok());
   const auto paths = pathsOf(ctx, *tree);
-  // Frames: Main, Main (return address), B. InMain matches both Main frames: deepest = the second (slot 2).
+  // Frames: Main, Main (return address), B. Both scopes match both Main frames: deepest = the second (slot
+  // 2).
   EXPECT_EQ(paths.at("Main/Main/scope:InMain/B"), 400u);
-  // InA's caller 0x1100 lies in A, but no frame of the stack is attributed to A: above the root frame.
-  EXPECT_EQ(paths.at("Main/scope:InA/Main/B"), 400u);
+  EXPECT_EQ(paths.at("Main/Main/scope:AtMainEnd/B"), 400u);
 }
 
-TEST(ScopeBlend, CallerAtTheLastByteOfAFunctionMatchesItButOnePastDoesNot) {
+// caller_addr is a return address: a mapped frame matches lo < caller <= hi of the whole function.
+TEST(ScopeBlend, CallerAtTheFunctionEndMatchesItAndAtTheFunctionStartMatchesThePrecedingFunction) {
   Probe p;
-  p.sc.begin(0, "Last", 0x11FF);  // last byte of A
-  p.sc.begin(0, "Past", 0x1200);  // first byte of B
+  p.sc.begin(0, "AtEnd", 0x1200);   // one past A's last byte = A's end
+  p.sc.begin(0, "AtLast", 0x11FF);  // last byte of A
   p.sc.end(100000);
   p.sc.end(100000);
-  p.samples(p.h.stack({0x1010, 0x1110}), 2);  // Main -> A (leaf)
+  p.samples(p.h.stack({0x1010, 0x1110, 0x1210}), 2);  // Main -> A -> B
   p.finish();
   QueryContext ctx(p.h.m, *p.h.svc, blendOn());
   auto tree = topDownTree(ctx, {});
   ASSERT_TRUE(tree.ok());
-  // Last matches A (slot 2); Past matches nothing -> monotonic slot 2.
-  EXPECT_EQ(pathsOf(ctx, *tree).at("Main/A/scope:Last/scope:Past"), 200u);
+  EXPECT_EQ(pathsOf(ctx, *tree).at("Main/A/scope:AtEnd/scope:AtLast/B"), 200u);
 
-  // Reversed order: the outer scope matches nothing (above the root frame), the inner one matches A.
   Probe q;
-  q.sc.begin(0, "Past", 0x1200);
-  q.sc.begin(0, "Last", 0x11FF);
+  q.sc.begin(0, "AtStartOfA", 0x1100);  // A's first byte: not inside A, it is the end of Main's range
+  q.sc.begin(0, "AtStartOfB", 0x1200);  // B's first byte: the end of A's range
   q.sc.end(100000);
   q.sc.end(100000);
-  q.samples(q.h.stack({0x1010, 0x1110}), 2);
+  q.samples(q.h.stack({0x1010, 0x1110, 0x1210}), 2);
   q.finish();
   QueryContext ctx2(q.h.m, *q.h.svc, blendOn());
   auto tree2 = topDownTree(ctx2, {});
   ASSERT_TRUE(tree2.ok());
-  EXPECT_EQ(pathsOf(ctx2, *tree2).at("Main/scope:Past/A/scope:Last"), 200u);
+  // AtStartOfA matches Main (slot 1); AtStartOfB matches A (slot 2); neither matches the frame that starts
+  // there.
+  EXPECT_EQ(pathsOf(ctx2, *tree2).at("Main/scope:AtStartOfA/A/scope:AtStartOfB/B"), 200u);
+
+  Probe r;  // the function's very first byte as the leaf's caller: not part of the leaf function's range
+  r.sc.begin(0, "AtLeafStart", 0x1200);
+  r.sc.end(100000);
+  r.samples(r.h.stack({0x1010, 0x1210}), 2);  // Main -> B (leaf)
+  r.finish();
+  QueryContext ctx3(r.h.m, *r.h.svc, blendOn());
+  auto tree3 = topDownTree(ctx3, {});
+  ASSERT_TRUE(tree3.ok());
+  // 0x1200 matches neither Main (ends at 0x1100) nor B (starts after it): above the root frame.
+  EXPECT_EQ(pathsOf(ctx3, *tree3).at("Main/scope:AtLeafStart/B"), 200u);
 }
 
 TEST(ScopeBlend, SamplesOutsideAnyScopeAreUnchanged) {

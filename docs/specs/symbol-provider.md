@@ -24,3 +24,6 @@ Headers `libs/symbols/symbol_provider.h` and `libs/symbols/function_key.h` (`tac
 
 ## Clarification added after the WP-32 review (2026-10-25)
 - **Return-address rule:** see docs/specs/analysis-query.md. `SymbolService` gains `const ResolvedAddress& lookupCaller(FrameIdx) const` (lock-free and memoized, with the same publication rules as `lookup`). It resolves `addr_or_rva - 1`. `functionKeyFor` gets a caller variant. Leaf frames, and the interrupted user frame of a kernel-leaf sample, use `lookup`.
+
+## Clarification added with WP-72 (2026-10-25, binding)
+- ELF modules: `ModuleRec.base` is the load address of the module's lowest PT_LOAD segment (not the executable segment's mmap address). RVA = address − base. The DWARF provider maps RVA → ELF vaddr as `rva + (lowest PT_LOAD p_vaddr aligned down to 4096)`. The perf backend (WP-70) must fill `base` accordingly.

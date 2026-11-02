@@ -85,7 +85,7 @@ std::vector<std::string> naiveBlend(const std::vector<NaiveFrame>& frames,
       if (!frames[i].mapped)
         hit = frames[i].addr == s.caller;
       else
-        hit = fn[i] != nullptr && s.caller >= fn[i]->start && s.caller < fn[i]->start + fn[i]->size;
+        hit = fn[i] != nullptr && s.caller > fn[i]->start && s.caller <= fn[i]->start + fn[i]->size;
       if (hit) m = i + 1;
     }
     prev = std::max(prev, m);
@@ -155,9 +155,12 @@ TEST_P(RandomBlend, MatchesTheNaiveReference) {
         s.end = 0;
         s.depth = static_cast<uint32_t>(open.size());
         const uint32_t kind = rnd(4);
-        s.caller = kind == 0   ? kAbs + 4 * rnd(3)
-                   : kind == 1 ? kNaive[rnd(6)].start + 0xFF  // last byte of a function
-                               : 0x1000 + rnd(0x1c00);
+        s.caller =
+            kind == 0 ? kAbs + 4 * rnd(3)
+            : kind == 1
+                ? kNaive[rnd(6)].start +
+                      0x100  // one past the last byte: the return address of a call ending the function
+                : 0x1000 + rnd(0x1c00);
         open.push_back(scopes[t].size());
         scopes[t].push_back(s);
         sc.begin(ts, s.id.c_str(), s.caller, 100 + t);

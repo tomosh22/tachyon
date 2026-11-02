@@ -384,6 +384,8 @@ struct LockSummary {
 };
 inline constexpr size_t kMaxLockWaiters = 5;
 
+// Thread-safe. Shared-result variant of lockSummary: the cache's immutable copy (same contract as the other
+// *Shared queries above).
 Result<std::shared_ptr<const LockSummary>> lockSummaryShared(const QueryContext& ctx, const Filter& filter,
                                                              Cancel cancel = {});
 // Thread-safe. Per lock address summary of the lock-wait scopes (see above).

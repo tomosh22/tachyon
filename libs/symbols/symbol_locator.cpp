@@ -1,6 +1,7 @@
 #include "symbols/symbol_locator.h"
 
 #include "core/log.h"
+#include "symbols/dwarf/elf_reader.h"
 #include "symbols/symbol_keys.h"
 
 #include <algorithm>
@@ -310,6 +311,38 @@ struct SymbolLocator::Impl {
     return std::nullopt;
   }
 
+  static bool imageCarriesDebugInfo(const fs::path& image) {
+    Result<ElfFile> elf = ElfFile::open(image);
+    return elf.ok() && elf.value().hasDebugInfo();
+  }
+
+  // The file named by the image's .gnu_debuglink, searched like gdb does: next to the image, in its `.debug`
+  // subdirectory, and below each debug directory (default /usr/lib/debug) under the image's own directory.
+  // Candidates must match the CRC32 recorded in the link; the image itself is never returned.
+  std::optional<fs::path> findDebugLink(const fs::path& image) const {
+    Result<ElfFile> elf = ElfFile::open(image);
+    if (!elf.ok()) return std::nullopt;
+    const std::optional<ElfDebugLink> link = elf.value().debugLink();
+    if (!link) return std::nullopt;
+    // Only a plain file name is followed: no separators, no traversal out of the search directories.
+    if (link->name.find('/') != std::string::npos || link->name.find('\\') != std::string::npos ||
+        link->name == "." || link->name == "..") {
+      return std::nullopt;
+    }
+    const fs::path dir = normalizedAbsolute(image).parent_path();
+    std::vector<fs::path> candidates{dir / link->name, dir / ".debug" / link->name};
+    for (const fs::path& dbg : config.debugDirs) {
+      candidates.push_back(dbg / dir.relative_path() / link->name);
+    }
+    std::error_code ec;
+    for (const fs::path& cand : candidates) {
+      if (!fileExists(cand) || fs::equivalent(cand, image, ec)) continue;
+      const std::optional<uint32_t> crc = elfFileCrc32(cand);
+      if (crc && *crc == link->crc) return cand;
+    }
+    return std::nullopt;
+  }
+
   std::optional<fs::path> searchNextToModule(const Module& module, const std::optional<SymbolKey>& key,
                                              std::vector<std::string>& reasons) const {
     if (module.path.empty()) return std::nullopt;
@@ -317,6 +350,8 @@ struct SymbolLocator::Impl {
     if (image.has_parent_path()) {
       const fs::path dir = image.parent_path();
       for (const std::string& name : candidateNames(module)) {
+        // The image itself (ELF) is handled below: a stripped one only wins after its debuglink / build-id.
+        if (module.id.kind == 2 && name == pathFileName(module.path)) continue;
         if (fileExists(dir / name)) return dir / name;
       }
       if (module.id.kind == 2) {
@@ -325,14 +360,20 @@ struct SymbolLocator::Impl {
       }
     }
     if (module.id.kind == 2) {
-      // The debug info may be in the binary itself.
-      if (fileExists(image)) return image;
+      // The debug info may be in the binary itself. A stripped binary is only the last resort (its symbol
+      // table still resolves function names): first its .gnu_debuglink target, then the build-id debug trees.
+      const bool haveImage = fileExists(image);
+      if (haveImage && imageCarriesDebugInfo(image)) return image;
+      if (haveImage) {
+        if (auto linked = findDebugLink(image)) return linked;
+      }
       if (key) {
         const std::string rel = buildIdRelative(key->key);
         for (const fs::path& dbg : config.debugDirs) {
           if (!rel.empty() && fileExists(dbg / rel)) return dbg / rel;
         }
       }
+      if (haveImage) return image;
     }
     (void)reasons;
     return std::nullopt;

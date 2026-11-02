@@ -20,6 +20,11 @@ if(TACHYON_ENABLE_DIA AND NOT WIN32)
   message(FATAL_ERROR "TACHYON_ENABLE_DIA requires Windows")
 endif()
 
+if(TACHYON_ENABLE_LIBDW AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  message(STATUS "TACHYON_ENABLE_LIBDW is Linux only: the libdw DWARF provider is not built")
+  set(TACHYON_ENABLE_LIBDW OFF)
+endif()
+
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 include(warnings)
 include(tachyon_helpers)

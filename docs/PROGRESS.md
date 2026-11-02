@@ -26,7 +26,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-32 | Attribution and aggregation | C | merged | wp/32-attribution | 2026-10-25 |
 | WP-32b | Return-address rule (lookupCaller), NodeAgg iterative destructor, Hide-all-kernel totals | C | merged | wp/32b-return-address | 2026-10-25 |
 | WP-33 | Filters, cancellation, query cache | C | merged | wp/33-query-cache | 2026-10-25 |
-| WP-34 | Line/instruction attribution, disassembly | C | not started | wp/34-lines-disasm | |
+| WP-34 | Line/instruction attribution, disassembly | C | in progress | wp/34-lines-disasm | 2026-10-25 |
 | WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
@@ -53,9 +53,9 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-63 | Exporters | — | not started | wp/63-exporters | |
 | WP-64 | Large-trace performance pass | — | not started | wp/64-perf-pass | |
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
-| WP-70 | `perf_event_open` backend | — | not started | wp/70-perf-backend | |
+| WP-70 | `perf_event_open` backend | A | in progress | wp/70-perf-backend | 2026-10-25 |
 | WP-71 | Scheduler events | — | not started | wp/71-sched | |
-| WP-72 | DWARF symbol provider | B | in progress | wp/72-dwarf-provider | 2026-10-25 |
+| WP-72 | DWARF symbol provider | B | merged (WP-72b follow-up) | wp/72-dwarf-provider | 2026-10-25 |
 | WP-73 | Linux SDK transport and privileges | — | not started | wp/73-linux-sdk | |
 
 ## Milestone gates
@@ -170,9 +170,17 @@ Verifier PASS. Rows match bottomUpFunctions. The Butterfly matches analysis::but
 
 Verifier PASS (conditional on D1). Rule-5 placement matches a brute-force oracle written from the spec in 10,800 comparisons, and the oracle catches mutations. With blending off, results are byte-identical to main over 294 configurations. Fibers match the fixture field by field. Lock summary is exact. Blended, warm, 5 M samples / 1 M scopes: bottomUp 58–70 ms, topDown 42–90 ms. Cold (pairing, index and query): 0.23–0.26 s, or 0.55–0.80 s fiber-aware. BlendIndex memory for 1 M scopes: 38 MB; PairedFibers: 184 MB. Orchestrator fix: the viewer's AnalysisContext snapshot now keys on blendScopes and groupByFiber.
 
+## WP-72 notes
+
+Verifier PASS. An independent llvm-symbolizer oracle on 2000 testbed and 2000 libc addresses shows 0 chain-length, function-start, file or line mismatches; the remaining differences are demangler style or an intended line fallback. Fuzzing at scale 10 under ASan is clean, TSan is clean with 8 threads, and memory is about 4–7 KB per function. 1 M RVAs resolve in 0.16 s warm (budget 20 s).
+
 ## Queued follow-ups
 
-- WP-53b (in progress): poll cancellation in the fiber piece computation and the blend-index sorts (cold fiber-aware cancel took 134–212 ms); replace the 3× ratio with absolute budgets (warm blended bottomUp/topDown/butterfly ≤ 100 ms, assert 200 ms; cold ≤ 1 s, assert 2 s, on the 5 M / 1 M model); match mapped frames with `lo < caller_addr <= hi`, since caller_addr is a return address; thread-safety comment on lockSummaryShared.
+- Test hygiene (orchestrator, done): the testbed share checks skip when the load average exceeds the core count; the cancellation-latency tests assert at 2× their 50 ms budget. Both only failed when parallel agents overloaded the 4-core dev box.
+
+- WP-72b: MERGED. Piece-based bounds (every .text byte is inside its own bounds); DIA-style names; LRU line cache, 64 MiB per provider (libdw's own decoded copy is not bounded). 0 mismatches against llvm-symbolizer on 14,016 addresses. Original item: `functionBounds(rva)` returns the piece that contains rva (split functions); names are stripped of parameter lists to match DIA (prefer the DIE qualified name, and strip symtab names); cap and evict per-CU line rows.
+
+- WP-53b: MERGED. Cold fiber-aware cancel now takes 10–33 ms (was 134–212 ms). Absolute blend budgets are met (warm bottomUp 45–70 ms, topDown 55–130 ms, butterfly 64 ms; cold 0.2 s and 0.4 s fiber-aware). caller_addr uses `lo < caller <= hi`. Orchestrator change: the latency test asserts at 2× its 50 ms budget, like the other perf budgets. Original item: poll cancellation in the fiber piece computation and the blend-index sorts (cold fiber-aware cancel took 134–212 ms); replace the 3× ratio with absolute budgets (warm blended bottomUp/topDown/butterfly ≤ 100 ms, assert 200 ms; cold ≤ 1 s, assert 2 s, on the 5 M / 1 M model); match mapped frames with `lo < caller_addr <= hi`, since caller_addr is a return address; thread-safety comment on lockSummaryShared.
 
 - WP-33b (also): empty-stack samples are counted in topDown's root exclusive but dropped by bottomUp under KernelFrames::Show/Group. Result: Function List % ≠ Call Graph % on traces with frameless samples (repro: 80% vs 100%). Fix in libs/analysis with a `<no stack>` row (kRootKey) in bottomUp, or by excluding the samples from topDown, consistently in both.
 - Viewer polish (with WP-48): the Butterfly forces inline/kernel mode for inline or `<kernel>` keys without showing it in its toggles. Add a "forced for this selection" hint. Put the module-inclusive double-count note on the % cell too.
