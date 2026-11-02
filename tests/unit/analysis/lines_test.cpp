@@ -291,7 +291,7 @@ TEST(LinesTest, LinesSumToTheFunctionsInclusiveTime) {
 TEST(LinesTest, UnresolvedScopeAndPseudoKeysAreHandled) {
   Probe p;
   p.samples(p.h.stack({kMain + 0x10, kF + 0x05}), 3);
-  p.samples(p.h.stack({kMain + 0x10, 0x9000}), 2);  // unresolved frame {module 0, rva 0x9000}
+  p.samples(p.h.stack({kMain + 0x10, 0xB000}), 2);  // unresolved frame {module 0, rva 0xB000}
   p.finish();
   QueryContext ctx(p.h.m, *p.h.svc);
   for (const FunctionKey k : {FunctionKey::scope(StringIdx(1)), kRootKey, kKernelKey, fk(0x7777)}) {
@@ -303,15 +303,15 @@ TEST(LinesTest, UnresolvedScopeAndPseudoKeysAreHandled) {
     EXPECT_TRUE(i->empty());
   }
   // An unresolved {module, rva} key matches its frames: line 0, instruction = the rva.
-  auto l = linesForFunction(ctx, {}, fk(0x9000));
+  auto l = linesForFunction(ctx, {}, fk(0xB000));
   ASSERT_TRUE(l.ok());
   ASSERT_EQ(l->size(), 1u);
   EXPECT_EQ((*l)[0].line, 0u);
   EXPECT_EQ((*l)[0].runningTicks, 200u);
-  auto i = instructionsForFunction(ctx, {}, fk(0x9000));
+  auto i = instructionsForFunction(ctx, {}, fk(0xB000));
   ASSERT_TRUE(i.ok());
   ASSERT_EQ(i->size(), 1u);
-  EXPECT_EQ((*i)[0].rva, 0x9000u);
+  EXPECT_EQ((*i)[0].rva, 0xB000u);
 }
 
 TEST(LinesTest, EmptyRangeCancelAndCaching) {
@@ -341,6 +341,31 @@ TEST(LinesTest, EmptyRangeCancelAndCaching) {
   auto i2 = instructionsForFunctionShared(ctx, {}, fk(kF));
   ASSERT_TRUE(i1.ok());
   EXPECT_EQ(i1->get(), i2->get());
+}
+
+TEST(LinesTest, ProviderCallSiteIsUsedForThePhysicalFunction) {
+  Probe p;
+  p.samples(p.h.stack({kMain + 0x10, kE + 0x40}), 3);  // DWARF convention, exact call site e.cpp:25
+  p.samples(p.h.stack({kMain + 0x10, kS + 0x30}), 2);  // same-file inline: call site 105, not the body (200)
+  p.samples(p.h.stack({kMain + 0x10, kM + 0x40}), 4);  // call site in another file: nearest own row (10)
+  p.samples(p.h.stack({kMain + 0x10, kS + 0x50}), 1);  // outside the inline range: the plain row (110)
+  p.finish();
+  QueryContext ctx(p.h.m, *p.h.svc);
+  auto e = linesForFunction(ctx, {}, fk(kE));
+  ASSERT_TRUE(e.ok());
+  ASSERT_EQ(e->size(), 1u);
+  EXPECT_EQ((*e)[0].line, 25u);
+  EXPECT_EQ((*e)[0].runningTicks, 300u);
+  auto s = linesForFunction(ctx, {}, fk(kS));
+  ASSERT_TRUE(s.ok());
+  const auto sm = byLine(*s);
+  ASSERT_EQ(sm.size(), 2u);
+  EXPECT_EQ(sm.at(105).runningTicks, 200u);
+  EXPECT_EQ(sm.at(110).runningTicks, 100u);
+  auto m = linesForFunction(ctx, {}, fk(kM));
+  ASSERT_TRUE(m.ok());
+  ASSERT_EQ(m->size(), 1u);
+  EXPECT_EQ((*m)[0].line, 10u);
 }
 
 TEST(LinesTest, NoLineRowGivesLineZero) {

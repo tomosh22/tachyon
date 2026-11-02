@@ -263,6 +263,9 @@ TEST(DwarfProviderLogic, InlineChainsAreInnermostFirstWithCallSitePositions) {
   EXPECT_EQ(e.name(r.inlines[1].file), "/src/mid.h");
   EXPECT_EQ(r.inlines[1].line, 20u);
   EXPECT_EQ(r.line, 3u);
+  // The call site of the whole chain is the outermost site's DW_AT_call_file/line, in the physical function.
+  EXPECT_EQ(e.name(r.callSiteFile), "/src/top.cpp");
+  EXPECT_EQ(r.callSiteLine, 55u);
 
   // No positions at all: everything takes the line-table position of the address (/src/low.h:5).
   r = e.provider->resolve(0x30064);
@@ -271,6 +274,8 @@ TEST(DwarfProviderLogic, InlineChainsAreInnermostFirstWithCallSitePositions) {
     EXPECT_EQ(f.line, 5u);
     EXPECT_EQ(e.name(f.file), "/src/low.h");
   }
+  EXPECT_EQ(r.callSiteLine, 0u);  // the DWARF carries no call site: absent, not invented
+  EXPECT_FALSE(r.callSiteFile.valid());
 
   // Frame 0 lacks a call-site-independent position but has the line table; frame 1 has the call site of frame
   // 0 missing -> the next outer one (none) -> the table.
@@ -278,10 +283,13 @@ TEST(DwarfProviderLogic, InlineChainsAreInnermostFirstWithCallSitePositions) {
   ASSERT_EQ(r.inlines.size(), 2u);
   EXPECT_EQ(r.inlines[0].line, 5u);
   EXPECT_EQ(r.inlines[1].line, 5u);
+  EXPECT_EQ(e.name(r.callSiteFile), "/src/x.cpp");
+  EXPECT_EQ(r.callSiteLine, 9u);
 
   r = e.provider->resolve(0x30010);
   EXPECT_TRUE(r.resolved);
   EXPECT_TRUE(r.inlines.empty());
+  EXPECT_EQ(r.callSiteLine, 0u);
 }
 
 TEST(DwarfProviderLogic, NamesAreDemangledAndCachedPerFunction) {

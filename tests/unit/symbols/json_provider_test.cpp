@@ -81,6 +81,10 @@ TEST(JsonSymbolProviderTest, InlineChainsAreInnermostFirst) {
   EXPECT_EQ(a.inlines[0].line, 3u);
   EXPECT_EQ(strings.get(a.inlines[1].function), "outer");
   EXPECT_EQ(a.inlines[1].line, 9u);
+  // JSON line tables are in the function's own file: the call site is the line-table position.
+  EXPECT_EQ(a.callSiteFile, a.file);
+  EXPECT_EQ(a.callSiteLine, a.line);
+  EXPECT_EQ(p.resolve(100).callSiteLine, 0u);  // no inlines: no call site
 
   EXPECT_EQ(p.resolve(336).inlines.size(), 2u);  // first byte of the inline range
   EXPECT_EQ(p.resolve(351).inlines.size(), 2u);  // last byte

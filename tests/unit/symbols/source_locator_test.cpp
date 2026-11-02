@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <fstream>
 
 namespace tachyon::symbols {
@@ -14,9 +15,10 @@ struct Tree {
   fs::path root;
   Tree() {
     static int counter = 0;
-    root = fs::temp_directory_path() /
-           ("tachyon_wp34_src_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()) + "_" +
-            std::to_string(counter++));
+    root =
+        fs::temp_directory_path() /
+        ("tachyon_wp34_src_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+         "_" + std::to_string(counter++));
     fs::remove_all(root);
     fs::create_directories(root);
   }

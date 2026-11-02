@@ -33,6 +33,15 @@ struct ResolvedAddress {
   StringIdx file;
   uint32_t line = 0;
   std::vector<InlineFrame> inlines;  // innermost first; empty when the address is not inside an inlined call
+  // Position, in the PHYSICAL function's own source, of the call that the outermost inline frame was expanded
+  // from (the "call site" of the whole inline chain). Filled only when `inlines` is non-empty; callSiteLine
+  // is 0 and callSiteFile invalid when the provider cannot tell. JSON: the line-table position (ra.file/line,
+  // which is already in the function's file there). DWARF: DW_AT_call_file/call_line of the outermost inline
+  // site. DIA: best effort, the last line row of the function's own file at or before the address. Note that
+  // `line`/`file` above is the line-table position (inside the innermost inlined callee for DWARF/DIA), and
+  // inlines[k].line for k >= 1 is a position inside that frame's function.
+  StringIdx callSiteFile;
+  uint32_t callSiteLine = 0;
   bool resolved = false;  // false: no function covers the address (gap, out of range, unknown module)
 };
 

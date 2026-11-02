@@ -105,10 +105,12 @@ TEST_P(DwarfLibdw, InlineChainInnermostFirst) {
       EXPECT_EQ(baseName(l.name(r.inlines[1].file)), "fixture_inl.h");
       EXPECT_NE(r.inlines[0].line, 0u);
       EXPECT_NE(r.inlines[1].line, 0u);
+      // The call site of the whole chain, in the physical function's file.
+      EXPECT_EQ(r.callSiteLine, callLine);
+      EXPECT_EQ(baseName(l.name(r.callSiteFile)), "fixture_main.cpp");
     }
   }
   EXPECT_TRUE(sawChain) << "no address of with_inlines resolved to the outerHelper -> innerHelper chain";
-  (void)callLine;
 }
 
 // Every line-table range of the fixture's functions: our function / inline chain / lines against a reference
@@ -152,6 +154,12 @@ void expectAgreesWithSymbolizer(const std::filesystem::path& file, bool gnu) {
           EXPECT_NE(r.inlines[k].line, 0u);
           EXPECT_EQ(baseName(l.name(r.inlines[k].file)), baseName(ref[k].file));
         }
+      }
+      if (!gnu && !r.inlines.empty() && ref.back().line != 0) {
+        // llvm-symbolizer prints the physical function last, at the position of the call to the outermost
+        // inline frame.
+        EXPECT_EQ(r.callSiteLine, ref.back().line) << sym << " rva " << std::hex << lr.rva;
+        EXPECT_EQ(baseName(l.name(r.callSiteFile)), baseName(ref.back().file));
       }
       if (r.line != 0) {
         EXPECT_EQ(r.line, ref.front().line) << std::hex << lr.rva;
