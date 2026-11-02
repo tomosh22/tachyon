@@ -8,3 +8,7 @@ tachyon_add_subdirectories(${CMAKE_CURRENT_SOURCE_DIR}/perf)
 if(WIN32)
   tachyon_add_subdirectories(${CMAKE_CURRENT_SOURCE_DIR}/windows)
 endif()
+# Linux-only tests that need the kernel (perf_event_open): tests/linux/<area>/CMakeLists.txt.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET tachyon::capture_linux_perf AND TACHYON_ENABLE_LIBDW)
+  tachyon_add_subdirectories(${CMAKE_CURRENT_SOURCE_DIR}/linux)
+endif()

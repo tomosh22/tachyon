@@ -7,3 +7,11 @@ target_compile_features(tachyon_agent_core PUBLIC cxx_std_20)
 tachyon_set_warnings(tachyon_agent_core)
 
 tachyon_add_executable(tachyon-agent SOURCES main.cpp DEPS tachyon::agent_core)
+
+# WP-70: the Linux perf backend (`--backend perf`); other platforms keep the stub.
+if(TARGET tachyon::capture_linux_perf)
+  target_link_libraries(tachyon-agent PRIVATE tachyon::capture_linux_perf)
+  target_compile_definitions(tachyon-agent PRIVATE TACHYON_HAVE_PERF_BACKEND=1)
+else()
+  target_compile_definitions(tachyon-agent PRIVATE TACHYON_HAVE_PERF_BACKEND=0)
+endif()

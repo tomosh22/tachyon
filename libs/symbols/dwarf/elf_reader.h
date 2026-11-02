@@ -44,6 +44,16 @@ struct ElfSymbol {
   uint8_t binding = 0;      // STB_LOCAL 0, STB_GLOBAL 1, STB_WEAK 2
 };
 
+// A PT_LOAD program header (WP-70: the perf converter maps a mmap record to the module's lowest load
+// address).
+struct ElfLoadSegment {
+  uint64_t vaddr = 0;
+  uint64_t offset = 0;
+  uint64_t filesz = 0;
+  uint64_t memsz = 0;
+  uint32_t flags = 0;  // PF_X 1, PF_W 2, PF_R 4
+};
+
 struct ElfDebugLink {
   std::string name;
   uint32_t crc = 0;
@@ -68,6 +78,9 @@ class ElfFile {
   // binaries, e.g. 0x400000 for a non-PIE executable). 0 when there is no PT_LOAD.
   uint64_t loadBias() const { return m_loadBias; }
 
+  // Thread-safe. The PT_LOAD segments in program header order (empty when there are none).
+  const std::vector<ElfLoadSegment>& loadSegments() const { return m_loadSegments; }
+
   // Thread-safe. True when .debug_info (or .zdebug_info) holds data in the file (not NOBITS).
   bool hasDebugInfo() const { return m_hasDebugInfo; }
 
@@ -90,6 +103,7 @@ class ElfFile {
   uint16_t m_type = 0;
   uint16_t m_machine = 0;
   uint64_t m_loadBias = 0;
+  std::vector<ElfLoadSegment> m_loadSegments;
   bool m_hasDebugInfo = false;
   std::vector<ElfSection> m_sections;
 };
