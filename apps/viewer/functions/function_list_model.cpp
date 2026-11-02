@@ -67,11 +67,15 @@ analysis::Filter makeFilter(const std::optional<ViewFilter>& busFilter, bool res
 }
 
 analysis::AggregationOptions effectiveOptions(bool expandInline, analysis::KernelFrames kernelFrames,
-                                              const std::optional<FunctionKey>& selected) {
+                                              const std::optional<FunctionKey>& selected, bool blendScopes,
+                                              bool groupByFiber) {
   analysis::AggregationOptions o;
   o.expandInline = expandInline;
   o.kernelFrames = kernelFrames;
+  o.blendScopes = blendScopes;
+  o.groupByFiber = groupByFiber;
   if (selected) {
+    if (selected->isScope()) o.blendScopes = true;
     if (selected->isInline()) o.expandInline = true;
     if (*selected == analysis::kKernelKey && o.kernelFrames == analysis::KernelFrames::Show)
       o.kernelFrames = analysis::KernelFrames::Group;
@@ -96,6 +100,7 @@ std::shared_ptr<const Table> buildTable(std::span<const FunctionRow> rows, const
     e.instances = r.instances;
     table->totalTicks += r.exclusiveTicks;
     common::NameParts parts = namer(r.key);
+    e.scope = parts.scope;
     e.function = std::move(parts.function);
     e.module = std::move(parts.module);
     e.full = std::move(parts.full);

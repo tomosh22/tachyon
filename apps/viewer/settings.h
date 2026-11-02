@@ -27,6 +27,11 @@ struct Settings {
   ThemeKind theme = ThemeKind::Dark;
   float uiScale = 1.0f;                  // multiplied with the display DPI scale
   std::vector<std::string> recentFiles;  // UTF-8, most recent first
+  // WP-54: "Blend instrumentation scopes into sampled stacks" (used when the trace has instrumentation) and
+  // the frame time budget of the timeline's frame graph (milliseconds; per-series overrides live in the
+  // widget).
+  bool blendScopes = true;
+  double frameBudgetMs = 16.67;
 
   // Thread-safe: pure function on the value.
   bool operator==(const Settings&) const = default;

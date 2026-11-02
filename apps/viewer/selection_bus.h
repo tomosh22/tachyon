@@ -79,6 +79,16 @@ struct InstanceHighlight {
   bool active() const { return generation != 0 && instances != nullptr; }
 };
 
+// View-wide analysis options (WP-54). They are preferences, not a selection: SelectionBus::clear() keeps
+// them. `blendScopes` is the user's wish; panels use it only when the trace has instrumentation scopes, and
+// `groupByFiber` only when it has fiber events (see common/scope_view_options.h for the effective values).
+struct ViewOptions {
+  bool blendScopes = true;    // splice instrumentation scopes into sampled stacks (AggregationOptions)
+  bool groupByFiber = false;  // pair and blend scopes per fiber (AggregationOptions)
+
+  bool operator==(const ViewOptions&) const = default;
+};
+
 struct SelectionState {
   // Current time filter; nullopt means "whole trace".
   std::optional<ViewFilter> timeFilter;
@@ -91,6 +101,8 @@ struct SelectionState {
   PanelRequest panelRequest;     // the last request; serial 0 after clear()
   // WP-47.
   InstanceHighlight instanceHighlight;
+  // WP-54.
+  ViewOptions viewOptions;
 };
 
 // SelectedWait, Navigation and PanelRequest were added by WP-46 after All; All still means "everything".
@@ -103,7 +115,8 @@ enum class SelectionField : uint8_t {
   SelectedWait,
   Navigation,
   PanelRequest,
-  InstanceHighlight  // WP-47
+  InstanceHighlight,  // WP-47
+  ViewOptions         // WP-54
 };
 
 // Main-thread only. Dispatch is synchronous, in subscription order. A callback may unsubscribe itself or any
@@ -141,7 +154,11 @@ class SelectionBus {
   // Main-thread only (WP-47). Marks one instance of the active highlight as the current one (the generation
   // is unchanged). Publishes only if the value changed and a highlight is active.
   void setHighlightCurrent(std::optional<uint32_t> index);
-  // Main-thread only. Resets everything (e.g. a new document) and publishes SelectionField::All once.
+  // Main-thread only (WP-54). Each publishes SelectionField::ViewOptions only if the value changed.
+  void setBlendScopes(bool on);
+  void setGroupByFiber(bool on);
+  // Main-thread only. Resets everything (e.g. a new document) and publishes SelectionField::All once. The
+  // ViewOptions survive: they are preferences.
   void clear();
 
   // Main-thread only.

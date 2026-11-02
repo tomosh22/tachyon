@@ -11,6 +11,20 @@ void textRight(const char* text) {
   ImGui::TextUnformatted(text);
 }
 
+ImU32 scopeTextColor() {
+  return IM_COL32(120, 200, 255, 255);
+}
+
+void drawScopeIcon(float size) {
+  const ImVec2 pos = ImGui::GetCursorScreenPos();
+  const float h = ImGui::GetTextLineHeight();
+  const float cx = pos.x + size * 0.5f, cy = pos.y + h * 0.5f, r = size * 0.4f;
+  ImGui::GetWindowDrawList()->AddQuadFilled(ImVec2(cx, cy - r), ImVec2(cx + r, cy), ImVec2(cx, cy + r),
+                                            ImVec2(cx - r, cy), scopeTextColor());
+  ImGui::Dummy(ImVec2(size, h));
+  ImGui::SameLine(0.0f, 2.0f);
+}
+
 void drawSpinner(float radius, ImU32 color) {
   const ImVec2 pos = ImGui::GetCursorScreenPos();
   const ImVec2 centre(pos.x + radius, pos.y + radius + 1.0f);

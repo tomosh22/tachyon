@@ -44,6 +44,8 @@ struct QuerySpec {
   analysis::Filter filter;
   bool expandInline = false;
   analysis::KernelFrames kernelFrames = analysis::KernelFrames::Show;
+  bool blendScopes = false;  // WP-54: effective values (common::effectiveScopeOptions)
+  bool groupByFiber = false;
   uint64_t documentGeneration = 0;
   uint64_t symbolGeneration = 0;
   bool operator==(const QuerySpec&) const = default;
@@ -56,9 +58,12 @@ analysis::Filter makeFilter(const std::optional<ViewFilter>& busFilter, bool res
 
 // Thread-safe: pure function. The aggregation options a query for `selected` needs: a key of an inline frame
 // only exists with inline expansion, and the merged kernel key only with kernel grouping or hiding, so those
-// options are forced on when the selection requires them (otherwise the toggles are used as they are).
+// options are forced on when the selection requires them (otherwise the toggles are used as they are). WP-54:
+// a scope key ({kScopeModule, id}) only exists in blended stacks, so it forces blendScopes on; `blendScopes`
+// and `groupByFiber` are the effective view options otherwise.
 analysis::AggregationOptions effectiveOptions(bool expandInline, analysis::KernelFrames kernelFrames,
-                                              const std::optional<symbols::FunctionKey>& selected);
+                                              const std::optional<symbols::FunctionKey>& selected,
+                                              bool blendScopes = false, bool groupByFiber = false);
 
 // ---- table ------------------------------------------------------------------------------------------------
 
@@ -73,6 +78,7 @@ struct Entry {
   uint32_t functionRank = 0, moduleRank = 0;        // dense ranks of the lower-case function / module name
   uint32_t keyRank = 0;  // position in the order of (key, row index): the unique deterministic tie-break
   bool inlined = false;
+  bool scope = false;  // WP-54: an instrumentation scope
 };
 
 struct Table {

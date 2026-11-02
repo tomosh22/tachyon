@@ -17,7 +17,10 @@ NameParts splitFunctionName(const analysis::QueryContext* context, const symbols
   } else {
     parts.full = analysis::functionKeyName(*context, key);
     parts.inlined = key.isInline();
+    parts.scope = key.isScope();
     parts.function = parts.full;
+    // A scope is "scope:<id>" in the analysis; the table shows the id next to the scope icon.
+    if (parts.scope && parts.full.compare(0, 6, "scope:") == 0) parts.function = parts.full.substr(6);
     if (key.module.valid() && !key.isScope()) {
       const size_t bang = parts.full.find('!');
       if (bang != std::string::npos) {
