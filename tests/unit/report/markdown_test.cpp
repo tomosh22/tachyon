@@ -136,9 +136,18 @@ Diff goldenDiff() {
 
 void expectGolden(const std::string& actual, const std::string& file) {
   const std::filesystem::path path = std::filesystem::path(TACHYON_REPORT_GOLDEN_DIR) / file;
-  if (const char* up = std::getenv("TACHYON_UPDATE_GOLDEN"); up != nullptr && std::string(up) == "1") {
-    testutil::writeText(path, actual);
+  std::string update;
+#if defined(_WIN32)
+  char* raw = nullptr;
+  size_t rawLen = 0;
+  if (_dupenv_s(&raw, &rawLen, "TACHYON_UPDATE_GOLDEN") == 0 && raw != nullptr) {
+    update = raw;
+    free(raw);
   }
+#else
+  if (const char* env = std::getenv("TACHYON_UPDATE_GOLDEN")) update = env;
+#endif
+  if (update == "1") testutil::writeText(path, actual);
   EXPECT_EQ(actual, testutil::readText(path)) << "golden file " << file;
 }
 
