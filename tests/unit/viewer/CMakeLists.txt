@@ -14,7 +14,19 @@ tachyon_add_test(viewer_tests
           status_shortcuts_test.cpp status_followups_test.cpp
           inst_lanes_test.cpp inst_frames_plots_test.cpp inst_widget_test.cpp
           source_model_test.cpp source_widget_test.cpp
-  DEPS tachyon::viewer_core tachyon::analysis tachyon::symbols tachyon::disasm tachyon::trace)
+          capture_model_test.cpp session_explorer_catalog_test.cpp session_explorer_panel_test.cpp
+          capture_agent_session_test.cpp capture_app_test.cpp
+          ../agent/process_util.cpp
+  DEPS tachyon::viewer_core tachyon::analysis tachyon::symbols tachyon::disasm tachyon::trace
+       tachyon::agent_core tachyon::control tachyon::capture)
+
+# WP-41: the capture tests run the real tachyon-agent (--backend mock) and an in-process Agent with the fake
+# launch backend of the agent tests.
+if(TARGET viewer_tests AND TARGET tachyon-agent)
+  add_dependencies(viewer_tests tachyon-agent)
+  target_compile_definitions(viewer_tests PRIVATE TACHYON_AGENT_EXE="$<TARGET_FILE:tachyon-agent>")
+  target_include_directories(viewer_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests/unit)
+endif()
 
 # WP-45: the Source panel tests run against the profiler testbed (real symbols, source lines and code bytes).
 if(TARGET viewer_tests AND TARGET tachyon-testbed)

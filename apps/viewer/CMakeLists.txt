@@ -10,6 +10,14 @@ add_library(tachyon_viewer_core STATIC
   analysis_context.cpp
   app.cpp
   builtin_panels.cpp
+  capture/agent_session.cpp
+  capture/capture_controller.cpp
+  capture/capture_form.cpp
+  capture/capture_paths.cpp
+  capture/process_launcher.cpp
+  capture/process_list.cpp
+  capture/session_catalog.cpp
+  capture/session_explorer_panel.cpp
   callgraph/callgraph_model.cpp
   callgraph/callgraph_panel.cpp
   callgraph/subtree_resolver.cpp
@@ -66,7 +74,12 @@ add_library(tachyon::viewer_core ALIAS tachyon_viewer_core)
 target_include_directories(tachyon_viewer_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(tachyon_viewer_core
   PUBLIC tachyon::model tachyon::analysis tachyon::symbols tachyon::disasm tachyon::core tachyon::imgui
+         tachyon::control tachyon::capture tachyon::trace
   PRIVATE nlohmann_json::nlohmann_json)
+# WP-41: ShellExecuteEx (elevated agent start) lives in shell32.
+if(WIN32)
+  target_link_libraries(tachyon_viewer_core PUBLIC shell32 advapi32)
+endif()
 target_compile_features(tachyon_viewer_core PUBLIC cxx_std_20)
 tachyon_set_warnings(tachyon_viewer_core)
 

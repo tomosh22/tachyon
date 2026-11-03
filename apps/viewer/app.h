@@ -35,6 +35,9 @@ class QueryExecutor;
 
 namespace tachyon::viewer {
 
+class CaptureController;  // capture/capture_controller.h (WP-41)
+class IProcessLauncher;   // capture/process_launcher.h (WP-41)
+
 // Module state changes reported by the symbol workers, handed to the main thread.
 struct SymbolMailbox {
   std::mutex mutex;
@@ -58,6 +61,11 @@ struct AppOptions {
   // WP-48 (tests): called with every document's new SymbolService after the viewer configured it and before
   // resolution starts (e.g. to install a slow fake provider factory).
   std::function<void(symbols::SymbolService&)> configureSymbols;
+  // WP-41: starts the capture agent and the file manager ("Reveal"); null = the real launcher (posix_spawn /
+  // ShellExecuteEx, pkexec / UAC for an elevated agent). Tests inject a recording or de-elevating launcher.
+  std::shared_ptr<IProcessLauncher> processLauncher;
+  // WP-41: try to connect to a running agent at startup (silently; also needs Settings::capture.autoConnect).
+  bool autoConnectAgent = true;
 };
 
 class App {
@@ -111,6 +119,10 @@ class App {
   void setTheme(ThemeKind theme);
   void setUserScale(float scale);
 
+  // ---- WP-41: capture ----
+  // Main-thread only. The agent connection, capture dialogs and live capture state.
+  CaptureController& capture() { return *m_capture; }
+
   // ---- WP-48: status, warnings, symbol paths, toasts, shortcut sheet ----
   // Main-thread only. Shows a message in the bottom-right corner (5 s, at most 5 stacked).
   void toast(ToastLevel level, std::string text);
@@ -159,6 +171,8 @@ class App {
   PanelRegistry m_panels;
   CommandRegistry m_commands;
   FileBrowser m_fileBrowser;
+  std::unique_ptr<CaptureController>
+      m_capture;  // after m_jobs / m_settings (it uses them); reset first in ~App
   std::shared_ptr<Document> m_document;
   uint64_t m_documentGeneration = 0;
   uint64_t m_symbolGeneration = 0;
