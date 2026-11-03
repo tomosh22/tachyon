@@ -175,6 +175,7 @@ Result<void> LinuxPerfBackend::start(const CaptureOptions& options) {
         m_child = std::move(child);
         m_pending = true;
         m_diag = LinuxPerfDiagnostics{};
+        m_maxFlushSeconds = 0;
         m_diag.rootPid = effective.pid;
         return ok();  // lifecycle and state stay Starting until the second start()
       }
@@ -560,6 +561,7 @@ Result<void> LinuxPerfBackend::beginRecording(const CaptureOptions& options,
     m_session = std::move(session);
     m_child = std::move(child);
     m_diag = LinuxPerfDiagnostics{};
+    m_maxFlushSeconds = 0;
     m_diag.plan = m_session->info.plan;
     m_diag.schedPath = m_session->sched.info.mode;
     m_diag.rings = m_session->info.ringCount;
@@ -743,6 +745,7 @@ Result<CaptureResult> LinuxPerfBackend::flush(std::string name, uint32_t seconds
   perf::SessionInfo info;
   fs::path spoolDir;
   perf::ConvertOptions co;
+  uint32_t keepSeconds = 0;
   {
     std::lock_guard lock(m_mutex);
     if (m_state != CaptureState::Capturing || !m_session)
@@ -753,6 +756,8 @@ Result<CaptureResult> LinuxPerfBackend::flush(std::string name, uint32_t seconds
     info = m_session->info;
     co = convertOptionsFor(options, *m_session);
     spoolDir = m_session->spoolDir;
+    if (seconds > m_maxFlushSeconds) m_maxFlushSeconds = seconds;
+    keepSeconds = m_maxFlushSeconds;
   }
   auto endFlush = [this]() {
     std::lock_guard lock(m_mutex);
@@ -802,7 +807,18 @@ Result<CaptureResult> LinuxPerfBackend::flush(std::string name, uint32_t seconds
     for (const perf::SealedSegment& s : *sealed) fs::copy_file(s.path, raw / s.path.filename(), ec);
     result.rawPath = raw;
   }
-  drain->release(*sealed);
+  // Retention: a segment is released only when everything in it is older than the largest window any flush of
+  // this capture asked for (a window of 0 = everything keeps all), so consecutive flushes each hold the full
+  // last `seconds`. The circular budget (Drain, circularMb) still drops the oldest segments regardless.
+  {
+    std::vector<perf::SealedSegment> doomed;
+    if (seconds > 0) {
+      const uint64_t horizon = static_cast<uint64_t>(keepSeconds) * 1'000'000'000ull;
+      for (const perf::SealedSegment& seg : *sealed)
+        if (seg.lastTs != 0 && flushTs > horizon && seg.lastTs < flushTs - horizon) doomed.push_back(seg);
+    }
+    drain->release(doomed);
+  }
   {
     std::lock_guard lock(m_mutex);
     ++m_diag.flushCount;

@@ -785,7 +785,10 @@ TEST_F(BackendTest, CircularFlushWritesTheWindowAndStartsOver) {
   ASSERT_TRUE(again.ok()) << again.error().toString();
   auto two = model::TraceModel::load(again->tracePath);
   ASSERT_TRUE(two.ok());
-  EXPECT_EQ(two->samplesByThread[0].ts.size(), 30u) << "the second flush starts after the first";
+  // Retention rule: a flush releases only segments older than the largest window asked for so far; a window
+  // of 0 (everything) releases nothing, so the second flush still holds the first one's samples.
+  EXPECT_EQ(two->samplesByThread[0].ts.size(), 130u)
+      << "segments inside the window are kept for later flushes";
   EXPECT_EQ(backend->diagnostics().flushCount, 2u);
 
   // The window: only the last 1 second of what is recorded now.
@@ -801,7 +804,9 @@ TEST_F(BackendTest, CircularFlushWritesTheWindowAndStartsOver) {
   ASSERT_TRUE(windowed.ok());
   auto three = model::TraceModel::load(windowed->tracePath);
   ASSERT_TRUE(three.ok());
-  EXPECT_EQ(three->samplesByThread[0].ts.size(), 7u);
+  EXPECT_EQ(three->samplesByThread[0].ts.size(), 137u)
+      << "the 5 s old samples are outside the 1 s window; the 130 earlier ones (kept for later flushes) and "
+         "the 7 new ones are in";
 
   auto result = backend->stop();
   ASSERT_TRUE(result.ok());

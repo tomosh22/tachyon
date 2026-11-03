@@ -127,7 +127,7 @@ TEST(FlightRecorderPerf, TestbedHitchTriggersProduceTracesWithTheHitchInTheLastT
   }
 
   std::set<std::string> paths;
-  size_t withHitch = 0;
+  size_t withHitch = 0, fullWindows = 0;
   for (const nlohmann::json& event : flushed) {
     const fs::path path = event["path"].get<std::string>();
     SCOPED_TRACE(path.string());
@@ -155,6 +155,28 @@ TEST(FlightRecorderPerf, TestbedHitchTriggersProduceTracesWithTheHitchInTheLastT
     // Sampled data in the window.
     const trace::SampleBatch samples = reader.readSamples().value();
     EXPECT_GT(samples.size(), 100u);
+    // Samples of the target's threads: once the capture is older than the window, the samples must cover the
+    // window too (the backend keeps the segments of the last `seconds` between flushes).
+    std::set<uint32_t> targetTids;
+    for (const auto& rec : reader.readThreads().value()) {
+      const trace::ThreadRec t = rec;
+      if ((t.flags & trace::kThreadFlagTargetProcess) != 0) targetTids.insert(t.tid);
+    }
+    uint64_t firstSample = ~0ull, lastSample = 0, targetSamples = 0;
+    for (size_t i = 0; i < samples.size(); ++i) {
+      if (targetTids.count(samples.tid[i]) == 0) continue;
+      ++targetSamples;
+      firstSample = std::min(firstSample, samples.ts[i]);
+      lastSample = std::max(lastSample, samples.ts[i]);
+    }
+    const double sampleSpan = targetSamples > 1 ? static_cast<double>(lastSample - firstSample) / hz : 0.0;
+    if (span >= kWindowSeconds - 0.01) {
+      EXPECT_GE(sampleSpan, 0.9 * span) << "target samples cover the whole window, not just the time since "
+                                           "the previous flush";
+      EXPECT_GE(firstSample, header.start_ts);
+      EXPECT_LE(lastSample, header.end_ts);
+      ++fullWindows;
+    }
 
     // Scopes: balanced, inside the window.
     const auto scopes = reader.readScopeEvents().value();
@@ -187,8 +209,11 @@ TEST(FlightRecorderPerf, TestbedHitchTriggersProduceTracesWithTheHitchInTheLastT
     EXPECT_GE(longest, kHitchSeconds) << "the hitch frame is in the window";
     if (longest >= kHitchSeconds) ++withHitch;
     std::printf(
-        "[flight] %s: span %.2f s, %zu samples, %zu scope events, %zu frame marks, longest frame %.1f ms\n",
-        path.filename().string().c_str(), span, samples.size(), scopes.size(), marks.size(), longest * 1e3);
+        "[flight] %s: span %.2f s, %zu samples (%llu of the target over %.2f s), %zu scope events, %zu frame "
+        "marks, longest frame %.1f ms\n",
+        path.filename().string().c_str(), span, samples.size(),
+        static_cast<unsigned long long>(targetSamples), sampleSpan, scopes.size(), marks.size(),
+        longest * 1e3);
     bool hitchMarker = false;
     const auto markers = reader.readMarkers().value();
     for (const auto& rec : markers)
@@ -196,6 +221,7 @@ TEST(FlightRecorderPerf, TestbedHitchTriggersProduceTracesWithTheHitchInTheLastT
     EXPECT_TRUE(hitchMarker) << "the testbed.hitch marker is in the window";
   }
   EXPECT_EQ(withHitch, flushed.size());
+  EXPECT_GE(fullWindows, 2u) << "flushes 4..N have a full 10 s window";
 
   // The capture went on through all of the flushes and ended with its own trace.
   EXPECT_EQ(fs::path(done["path"].get<std::string>()), out);
