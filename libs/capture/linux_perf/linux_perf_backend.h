@@ -62,6 +62,7 @@
 #include "capture/linux_perf/launch.h"
 #include "capture/linux_perf/perf_converter.h"
 #include "capture/linux_perf/perf_system.h"
+#include "capture/linux_perf/retention.h"
 #include "capture/linux_perf/sched_setup.h"
 #include "capture/windows_etw/session_lifecycle.h"
 #include "capture/windows_etw/target_watch.h"
@@ -79,6 +80,8 @@ namespace tachyon::capture {
 struct LinuxPerfBackendConfig {
   std::shared_ptr<perf::IPerfSystem> system;  // null: the real perf_event_open layer
   bool keepRawSpool = true;                   // keep the spool directory next to the output (rawPath)
+  // How long a flush with a long window keeps raising the retention horizon for later flushes (retention.h).
+  uint64_t horizonMemoryNs = perf::kDefaultHorizonMemoryNs;
   bool forcePerThread = false;  // never try the system-wide plan (tests, unprivileged emulation)
   uint32_t ringPages = 256;     // data pages per ring, a power of two (1 MiB with 4 KiB pages)
   std::string agentVersion = "tachyon-agent";
@@ -175,7 +178,7 @@ class LinuxPerfBackend final : public ICaptureBackend, public ITargetWatch {
   std::chrono::steady_clock::time_point m_startTime;
   std::function<void(CaptureState, float)> m_callback;
   LinuxPerfDiagnostics m_diag;
-  uint32_t m_maxFlushSeconds = 0;  // largest window of any flush of this capture (guarded by m_mutex)
+  perf::RetentionHorizon m_horizon;  // retention horizon of the flushes of this capture (m_mutex)
 };
 
 }  // namespace tachyon::capture

@@ -16,6 +16,13 @@
 // so frames of a retained segment never lose the strings they refer to. Frames are never dropped for size;
 // the records in discarded segments are simply gone (not counted as dropped). A snapshot pins the segments it
 // lists, so the merge of a flush can read them while the capture keeps rotating.
+//
+// A segment holds at least segmentBytes / 2 of payload on top of its prefix, so a prefix close to the
+// kMaxRingPrefixBytes cap cannot make segments rotate after every frame (WP-66). When the prefix cap is hit,
+// further StringDefs / ThreadNames are not re-emitted (counted in prefixOverflows; the agent reports it as a
+// capture warning). A segment file that cannot be created (disk full, permissions) does not stop the spool:
+// it keeps appending to the current segment, counts the failure (segmentOpenFailures, lastOpenError) and
+// tries again after another segmentBytes / 4 of data.
 #pragma once
 
 #include "core/result.h"
@@ -28,6 +35,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -93,11 +101,13 @@ struct SpoolStats {
   uint32_t connections = 0;         // streams that delivered data
   bool overflowed = false;
   // Ring mode.
-  uint64_t retainedBytes = 0;      // bytes of the segments on disk now (prefixes included)
-  uint64_t segmentsStarted = 0;    // segments created so far
-  uint64_t segmentsDiscarded = 0;  // oldest segments deleted so far
-  uint64_t bytesDiscarded = 0;     // their size
-  uint64_t prefixOverflows = 0;    // string defs / thread names that did not fit the re-emitted prefix
+  uint64_t retainedBytes = 0;        // bytes of the segments on disk now (prefixes included)
+  uint64_t segmentsStarted = 0;      // segments created so far
+  uint64_t segmentsDiscarded = 0;    // oldest segments deleted so far
+  uint64_t bytesDiscarded = 0;       // their size
+  uint64_t prefixOverflows = 0;      // string defs / thread names that did not fit the re-emitted prefix
+  uint64_t segmentOpenFailures = 0;  // rotations that could not create the next segment file
+  std::string lastOpenError;         // the message of the latest of them ("" when none)
 };
 
 // The files of a spool at one moment, kept alive (not deleted by rotation) while `lease` lives.
@@ -155,6 +165,8 @@ class Spool {
   Spool(std::filesystem::path path, uint64_t maxBytes, std::shared_ptr<SpoolBudget> budget,
         SpoolOptions options);
   Result<void> openSegmentLocked();
+  // The size the next segment may reach before it rotates (see the class comment).
+  uint64_t segmentLimitLocked(uint64_t prefix) const;
   Result<void> flushLocked();
   void appendRingLocked(const uint8_t* frame, size_t bytes, const FramePeek& peek);
   bool notePrefixLocked(const uint8_t* frame, size_t bytes, const FramePeek& peek);
@@ -168,6 +180,7 @@ class Spool {
   const std::shared_ptr<SpoolBudget> m_budget;
   const bool m_ring;
   uint64_t m_segmentBytes = 0;
+  uint64_t m_retryRotateAt = 0;  // after a failed rotation: try again when the segment reaches this size
   mutable std::mutex m_mutex;
   std::ofstream m_file;
   std::vector<uint8_t> m_buffer;
