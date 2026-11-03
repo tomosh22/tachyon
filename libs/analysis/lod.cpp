@@ -25,6 +25,13 @@ inline uint8_t q8(uint64_t num, uint64_t den) {
   return static_cast<uint8_t>(v > 255 ? 255 : v);
 }
 
+// Thread-safe: pure function. round(15 * num / den), saturating.
+inline uint64_t q15(uint64_t num, uint64_t den) {
+  if (den == 0) return 0;
+  const uint64_t v = (num * 15 + den / 2) / den;
+  return v > 15 ? 15 : v;
+}
+
 // ---- callstack node table ----
 // depth, Euler-tour
 // interval (O(1) ancestor test) and skew-binary jump pointers (O(log) level ancestor).
@@ -102,6 +109,10 @@ struct Geometry {
   std::vector<LodLevelInfo> levels;
   uint32_t step = 2;
   uint32_t platform = 0;
+  // Fine strip level (see lod.h): half the base bucket width, strip data only. fineCount == 0 when absent.
+  uint32_t fineLevel = 0;
+  uint64_t fineWidth = 0;
+  uint32_t fineCount = 0;
 };
 
 inline uint64_t widthOf(uint32_t level) {
@@ -126,8 +137,23 @@ struct LevelArrays {
   std::vector<uint32_t> lca;  // kInvalid when no sample
   std::vector<uint16_t> maxDepth;
 };
+// One fine strip bucket in 32 bits: bits 0..23 the dominant leaf (kFineNone when the bucket holds no sample),
+// bits 24..27 its share of the sampled ticks and bits 28..31 the sampled fraction of the bucket, both in
+// 1/15.
+constexpr uint32_t kFineNone = 0x00FFFFFFu;
+constexpr uint32_t kFineMaxNodes = kFineNone;  // node ids must stay below this
+inline uint32_t fineDominant(uint32_t v) {
+  return v & kFineNone;
+}
+inline uint32_t fineShare15(uint32_t v) {
+  return (v >> 24) & 15u;
+}
+inline uint32_t fineCoverage15(uint32_t v) {
+  return v >> 28;
+}
 struct ThreadLod {
   std::vector<LevelArrays> levels;
+  std::vector<uint32_t> fine;  // fineCount cells, empty without a fine level
 };
 
 // ---- sample view ----
@@ -308,6 +334,7 @@ class ThreadBuilder {
   Result<void> run(size_t thread, ThreadLod& out) {
     const size_t levels = m_g.levels.size();
     out.levels.assign(levels, {});
+    out.fine.assign(m_g.fineCount, kFineNone);
     for (size_t l = 0; l < levels; ++l) {
       const size_t n = m_g.levels[l].bucketCount;
       LevelArrays& a = out.levels[l];
@@ -319,6 +346,8 @@ class ThreadBuilder {
     }
     m_out = &out;
     m_acc.assign(levels, Agg{});
+    const bool fine = m_g.fineCount > 0;
+    const uint64_t half = fine ? m_g.fineWidth : 0;
 
     const SampleView sv = sampleView(m_m, m_g, thread);
     const auto& ivs = statesOf(m_m, thread);
@@ -326,12 +355,19 @@ class ThreadBuilder {
     const uint32_t n0 = m_g.levels[0].bucketCount;
     size_t k = 0, j = 0;
     Agg cur;
+    fineHist[0].reserve(8);
+    fineHist[1].reserve(8);
     for (uint32_t b = 0; b < n0; ++b) {
       if ((b & 4095u) == 0 && m_cancel && m_cancel->load(std::memory_order_relaxed))
         return makeError(ErrorCode::Cancelled, "LOD build cancelled");
       const uint64_t bs = m_g.start + static_cast<uint64_t>(b) * w0;
       const uint64_t be = std::min(bs + w0, m_g.end);
       cur.reset();
+      if (fine) {
+        fineHist[0].clear();
+        fineHist[1].clear();
+        fineCover[0] = fineCover[1] = 0;
+      }
       while (j < ivs.size() && ivs[j].end <= bs) ++j;
       for (size_t q = j; q < ivs.size() && ivs[q].start < be; ++q) {
         const ThreadStateInterval& iv = ivs[q];
@@ -361,8 +397,17 @@ class ThreadBuilder {
         else if (!m_nt.isAncestor(cur.lca, leaf))
           cur.lca = m_nt.lca(cur.lca, leaf);
         cur.maxDepth = std::max(cur.maxDepth, m_nt.depth[leaf]);
+        if (fine) {  // the same piece split at the middle of the base bucket
+          const uint64_t mid = bs + half;
+          if (lo < mid) addFine(0, leaf, std::min(hi, mid) - lo);
+          if (hi > mid) addFine(1, leaf, hi - std::max(lo, mid));
+        }
       }
       std::sort(cur.hist.begin(), cur.hist.end(), [](const Entry& a, const Entry& c) { return a.cs < c.cs; });
+      if (fine) {
+        emitFine(2ull * b, 0);
+        emitFine(2ull * b + 1, 1);
+      }
       propagate(0, b, cur);
     }
     return {};
@@ -381,6 +426,30 @@ class ThreadBuilder {
       std::sort(a.hist.begin(), a.hist.end(), [](const Entry& x, const Entry& y) { return x.cs < y.cs; });
       prune(a.hist, m_cap);
     }
+  }
+
+  void addFine(int half, uint32_t leaf, uint64_t ticks) {
+    fineCover[half] += ticks;
+    for (Entry& e : fineHist[half]) {
+      if (e.cs == leaf) {
+        e.ticks += ticks;
+        return;
+      }
+    }
+    fineHist[half].push_back({ticks, leaf});
+  }
+
+  // Writes fine bucket `idx` (no-op beyond the trace) from the tallies of half 0 or 1 of the current base
+  // bucket.
+  void emitFine(uint64_t idx, int half) {
+    if (idx >= m_g.fineCount || fineCover[half] == 0) return;
+    const Entry* best = &fineHist[half][0];
+    for (const Entry& e : fineHist[half])
+      if (e.ticks > best->ticks || (e.ticks == best->ticks && e.cs < best->cs)) best = &e;
+    const uint64_t ew = std::min(m_g.fineWidth, m_g.total - idx * m_g.fineWidth);
+    const uint32_t share = static_cast<uint32_t>(q15(best->ticks, fineCover[half]));
+    const uint32_t cover = std::max<uint32_t>(static_cast<uint32_t>(q15(fineCover[half], ew)), 1);
+    m_out->fine[idx] = best->cs | (share << 24) | (cover << 28);
   }
 
   void emit(size_t level, uint32_t idx, const Agg& a) {
@@ -468,6 +537,8 @@ class ThreadBuilder {
   ThreadLod* m_out = nullptr;
   std::vector<Agg> m_acc;
   std::vector<Entry> m_scratch;
+  std::vector<Entry> fineHist[2];
+  uint64_t fineCover[2] = {0, 0};
 };
 
 // Stable counting sort of the closed spans by depth (closing order is time order within a depth).
@@ -868,6 +939,13 @@ Result<TimelineLod> TimelineLod::prepare(const TraceModel& model, const LodOptio
     if (li.bucketCount <= 1 || level + g.step > kMaxLevelNumber) break;
   }
 
+  // Fine strip level: half the base bucket, for pixel spans between half the base width and the base width.
+  if (options.fineStrip && options.forceBaseLevel < 0 && base >= 1 && model.nodes.size() < kFineMaxNodes) {
+    g.fineLevel = base - 1;
+    g.fineWidth = widthOf(g.fineLevel);
+    g.fineCount = static_cast<uint32_t>(countAt(g.total, g.fineLevel));
+  }
+
   for (size_t t = 0; t < model.threads.size(); ++t) {
     const size_t samples = t < model.samplesByThread.size() ? model.samplesByThread[t].ts.size() : 0;
     impl->work[t] = samples + g.levels[0].bucketCount + 1;
@@ -981,6 +1059,7 @@ size_t TimelineLod::memoryBytes() const {
   size_t bytes = 0;
   for (size_t t = 0; m_impl && t < m_impl->threads.size(); ++t) {
     if (!m_impl->isReady(t)) continue;
+    bytes += m_impl->threads[t].fine.capacity() * sizeof(uint32_t);
     for (const LevelArrays& a : m_impl->threads[t].levels) {
       bytes += a.band.capacity() * sizeof(BandCell) + a.dominant.capacity() * sizeof(uint32_t) +
                a.strip.capacity() * sizeof(StripCell) + a.lca.capacity() * sizeof(uint32_t) +
@@ -999,6 +1078,7 @@ uint64_t TimelineLod::contentHash() const {
   for (size_t t = 0; m_impl && t < m_impl->threads.size(); ++t) {
     if (!m_impl->isReady(t)) continue;
     mix(&t, sizeof t);
+    mix(m_impl->threads[t].fine.data(), m_impl->threads[t].fine.size() * sizeof(uint32_t));
     for (const LevelArrays& a : m_impl->threads[t].levels) {
       mix(a.band.data(), a.band.size() * sizeof(BandCell));
       mix(a.dominant.data(), a.dominant.size() * sizeof(uint32_t));
@@ -1042,14 +1122,14 @@ inline float toFloat(uint64_t v) {
 
 // Fractions of one column from tick weights; the three are renormalised if rounding made them sum above 1.
 inline BandColumn makeBand(float r, float y, float w, uint8_t cat) {
+  // Branch-free (the "rounding pushed the sum above 1" case is data dependent and would mispredict): inv is
+  // exactly 1 unless the sum exceeds 1.
   float sum = r + y + w;
-  if (sum > 1.0f) {
-    const float inv = 1.0f / sum;
-    r *= inv;
-    y *= inv;
-    w *= inv;
-    sum = 1.0f;
-  }
+  const float inv = 1.0f / (sum > 1.0f ? sum : 1.0f);
+  r *= inv;
+  y *= inv;
+  w *= inv;
+  sum = sum > 1.0f ? 1.0f : sum;
   BandColumn col;
   col.running = r;
   col.ready = y;
@@ -1082,15 +1162,6 @@ class ColumnWriter {
   uint32_t m_n, m_next = 0;
 };
 
-// LOD path: bucket fractions (1/255) weighted by the bucket ticks of the buckets that start in the column.
-struct LodBandAcc {
-  uint64_t running = 0, ready = 0, waiting = 0, weight = 0;
-  uint64_t cat[kCatCount] = {};
-  void reset() {
-    running = ready = waiting = weight = 0;
-    for (uint64_t& c : cat) c = 0;
-  }
-};
 struct DirectBandAcc {
   uint64_t running = 0, ready = 0, waiting = 0;
   uint64_t cat[kCatCount] = {};
@@ -1208,33 +1279,41 @@ Result<void> TimelineLod::stateBands(const StateBandQuery& q, StateBandResult& o
     // Buckets whose start lies in [lo, hi) are assigned to the column containing their start.
     const uint64_t first = (lo - start + w - 1) / w;
     const uint64_t last = std::min<uint64_t>(li.bucketCount, (hi - start + w - 1) / w);
-    LodBandAcc acc;
-    auto flush = [&](const ColumnCursor& c) {
-      if (acc.weight) {
-        const uint64_t a = q.t0 + c.begin(), b = q.t0 + c.end();
-        float scale = 1.0f / (255.0f * toFloat(acc.weight));
-        if (a < start || b > end) {  // column sticks out of the trace: the outside part is unknown
-          scale *= toFloat(std::min(b, end) - std::max(a, start)) / toFloat(b - a);
-        }
-        writer.put(c.column(), makeBand(toFloat(acc.running) * scale, toFloat(acc.ready) * scale,
-                                        toFloat(acc.waiting) * scale,
-                                        acc.waiting ? argmaxCategory(acc.cat) : kNoWaitCategory));
+    // Column by column: all buckets that start in the column are summed (weights are the bucket ticks), then
+    // the column is written once. Columns without a bucket start keep the default (unknown) value.
+    uint64_t i = first;
+    while (i < last) {
+      uint64_t bs = start + i * w;
+      if (!sw.active) {
+        sw.seek(bs);
+      } else if (bs >= sw.colEnd) {
+        sw.advance();
+        if (bs >= sw.colEnd) sw.seek(bs);
       }
-      acc.reset();
-    };
-    for (uint64_t i = first; i < last; ++i) {
-      const uint64_t bs = start + i * w;
-      moveTo(sw, bs, flush);
-      const uint64_t ew = std::min(w, end - bs);
-      const BandCell cell = band[i];
-      acc.running += cell.running * ew;
-      acc.ready += cell.ready * ew;
-      const uint64_t wt = cell.waiting * ew;
-      acc.waiting += wt;
-      if (cell.category < kCatCount) acc.cat[cell.category] += wt;
-      acc.weight += ew;
+      const uint64_t colEnd = sw.colEnd;
+      uint64_t running = 0, ready = 0, waiting = 0, weight = 0;
+      uint64_t cat[kCatCount + 1] = {};  // the last entry collects "no category"
+      do {
+        const uint64_t ew = std::min(w, end - bs);
+        const BandCell cell = band[i];
+        running += cell.running * ew;
+        ready += cell.ready * ew;
+        const uint64_t wt = cell.waiting * ew;
+        waiting += wt;
+        cat[cell.category < kCatCount ? cell.category : kCatCount] += wt;
+        weight += ew;
+        ++i;
+        bs += w;
+      } while (i < last && bs < colEnd);
+      const uint64_t a = q.t0 + sw.cur.begin(), b = colEnd;
+      float scale = 1.0f / (255.0f * toFloat(weight));
+      if (a < start || b > end) {  // column sticks out of the trace: the outside part is unknown
+        scale *= toFloat(std::min(b, end) - std::max(a, start)) / toFloat(b - a);
+      }
+      writer.put(sw.cur.column(),
+                 makeBand(toFloat(running) * scale, toFloat(ready) * scale, toFloat(waiting) * scale,
+                          waiting ? argmaxCategory(cat) : kNoWaitCategory));
     }
-    if (sw.active) flush(sw.cur);
     writer.finish();
     return {};
   }
@@ -1309,19 +1388,14 @@ Result<void> TimelineLod::sampleStrip(const SampleStripQuery& q, SampleStripResu
   Sweep sw(q.t0, q.t1, q.pixelWidth);
   StripColumn* const cols = out.columns.data();
 
-  if (lv >= 0) {
-    const LodLevelInfo& li = im.geo.levels[static_cast<size_t>(lv)];
-    out.level = static_cast<uint8_t>(li.level);
-    if (!im.isReady(t)) {
-      out.pending = true;
-      return {};
-    }
-    const LevelArrays& arr = im.threads[t].levels[static_cast<size_t>(lv)];
-    const uint64_t start = im.geo.start, end = im.geo.end, w = li.bucketWidth;
+  // LOD pass over the buckets of one level: bucket i (width w) belongs to the column containing its start.
+  // cellAt(i, dominant, coverage255, share255) returns false for a bucket without samples.
+  auto lodPass = [&](uint64_t w, uint64_t bucketCount, auto&& cellAt) {
+    const uint64_t start = im.geo.start, end = im.geo.end;
     const uint64_t lo = std::max(q.t0, start), hi = std::min(q.t1, end);
-    if (lo >= hi) return {};
+    if (lo >= hi) return;
     const uint64_t first = (lo - start + w - 1) / w;
-    const uint64_t last = std::min<uint64_t>(li.bucketCount, (hi - start + w - 1) / w);
+    const uint64_t last = std::min<uint64_t>(bucketCount, (hi - start + w - 1) / w);
     StripAcc acc;
     auto flush = [&](const ColumnCursor& c) {
       if (acc.n > 0 && acc.cover > 0) {
@@ -1337,20 +1411,54 @@ Result<void> TimelineLod::sampleStrip(const SampleStripQuery& q, SampleStripResu
       acc.n = 0;
       acc.cover = 0;
     };
-    const uint32_t* dominant = arr.dominant.data();
-    const StripCell* strip = arr.strip.data();
     for (uint64_t i = first; i < last; ++i) {
-      const uint32_t dom = dominant[i];
-      if (dom == kInvalid) continue;
+      uint32_t dom;
+      uint64_t coverage, share;
+      if (!cellAt(i, dom, coverage, share)) continue;
       const uint64_t bs = start + i * w;
       moveTo(sw, bs, flush);
       const uint64_t ew = std::min(w, end - bs);
-      const StripCell cell = strip[i];
-      const uint64_t cover = ew * cell.coverage;
-      acc.add(dom, cover * cell.share);
+      const uint64_t cover = ew * coverage;
+      acc.add(dom, cover * share);
       acc.cover += cover;
     }
     if (sw.active) flush(sw.cur);
+  };
+
+  if (lv >= 0) {
+    const LodLevelInfo& li = im.geo.levels[static_cast<size_t>(lv)];
+    out.level = static_cast<uint8_t>(li.level);
+    if (!im.isReady(t)) {
+      out.pending = true;
+      return {};
+    }
+    const LevelArrays& arr = im.threads[t].levels[static_cast<size_t>(lv)];
+    const uint32_t* dominant = arr.dominant.data();
+    const StripCell* strip = arr.strip.data();
+    lodPass(li.bucketWidth, li.bucketCount,
+            [&](uint64_t i, uint32_t& dom, uint64_t& coverage, uint64_t& share) {
+              dom = dominant[i];
+              coverage = strip[i].coverage;
+              share = strip[i].share;
+              return dom != kInvalid;
+            });
+    return {};
+  }
+
+  // Fine strip level: pixel spans between half the base width and the base width (an approximation like every
+  // level; the exact direct path below serves narrower pixels and threads that are not built yet).
+  if (q.mode == QueryMode::Auto && im.geo.fineCount > 0 && (q.t1 - q.t0) / q.pixelWidth >= im.geo.fineWidth &&
+      im.isReady(t)) {
+    out.level = static_cast<uint8_t>(im.geo.fineLevel);
+    const uint32_t* fine = im.threads[t].fine.data();
+    lodPass(im.geo.fineWidth, im.geo.fineCount,
+            [&](uint64_t i, uint32_t& dom, uint64_t& coverage, uint64_t& share) {
+              const uint32_t v = fine[i];
+              dom = fineDominant(v);
+              coverage = fineCoverage15(v) * 17u;
+              share = fineShare15(v) * 17u;
+              return dom != kFineNone;
+            });
     return {};
   }
 
