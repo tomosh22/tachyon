@@ -330,9 +330,9 @@ INSTANTIATE_TEST_SUITE_P(Fixtures, ChromeFixture,
 TEST(ChromeTrace, FixtureFramesAndMarkersAreExported) {
   LoadedFixture f("frames");
   const json doc = exporttest::parseOrFail(exporttest::chromeText(f.m, *f.svc));
-  const auto marks = eventsWhere(doc, [](const json& e) { return e["cat"] == "framemark"; });
+  const auto marks = eventsWhere(doc, [](const json& e) { return e.value("cat", "") == "framemark"; });
   EXPECT_EQ(marks.size(), f.m.frameMarks.size());
-  const auto markers = eventsWhere(doc, [](const json& e) { return e["cat"] == "marker"; });
+  const auto markers = eventsWhere(doc, [](const json& e) { return e.value("cat", "") == "marker"; });
   EXPECT_EQ(markers.size(), f.m.markers.size());
   size_t plotPoints = 0;
   for (const auto& p : f.m.plots) plotPoints += p.ts.size();
