@@ -211,7 +211,10 @@ int main(int argc, char** argv) {
     }
     if (!elevated) {
       std::fprintf(stderr, "tachyon-agent: ENOPRIV: the '%s' backend needs %s\n", opt.backend.c_str(),
-                   TACHYON_PLATFORM_WINDOWS ? "an elevated (administrator) process" : "root or CAP_PERFMON");
+                   TACHYON_PLATFORM_WINDOWS
+                       ? "an elevated (administrator) process"
+                       : "root, CAP_PERFMON, CAP_SYS_ADMIN or kernel.perf_event_paranoid <= 0 "
+                         "(run 'tachyon-cli doctor')");
       return kExitNoPrivilege;
     }
     if (opt.backend == "etw") {
