@@ -36,7 +36,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | merged | wp/42b-timeline-symbols | 2026-10-25 |
 | WP-43 | Call graph panel | D | merged | wp/43-call-graph | 2026-10-25 |
 | WP-44 | Function list and butterfly | D | merged | wp/44-function-list | 2026-10-25 |
-| WP-45 | Source and disassembly panel | D | not started | wp/45-source-view | |
+| WP-45 | Source and disassembly panel | D | in progress | wp/45-source-panel | 2026-11-03 |
 | WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
 | WP-47 | Search and Function Statistics | D | merged | wp/47-function-stats | 2026-10-25 |
 | WP-48 | Status, warnings, symbol progress | D | merged | wp/48-status-warnings | 2026-11-02 |
@@ -49,8 +49,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
 | WP-60 | Flight recorder mode | — | not started | wp/60-flight-recorder | |
 | WP-61 | Remote capture | — | not started | wp/61-remote | |
-| WP-62 | CI report tool | E | in progress | wp/62-ci-report | 2026-11-02 |
-| WP-63 | Exporters | — | not started | wp/63-exporters | |
+| WP-62 | CI report tool | E | merged (WP-62b follow-up) | wp/62-ci-report | 2026-11-02 |
+| WP-63 | Exporters | E | merged | wp/63-exporters | 2026-11-03 |
 | WP-64 | Large-trace performance pass | — | not started | wp/64-perf-pass | |
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
@@ -194,7 +194,20 @@ The verifier passed it; the implementer's report was lost in a container restart
 
 The verifier passed it with no blocking defects. The release and ASan builds each passed 1742/1742; the Status* tests passed ×10 under ASan; banner parsing was probed against crafted CaptureInfo; a SymbolService rebuild with 20 rapid retries was ASan-clean. Orchestrator fix: Retry/Add now cancels the old SymbolService before starting a new one, because snapshots kept the old run loading providers in the background.
 
+## WP-62 notes
+
+The verifier passed it. Frame percentiles (lower order statistic), per-thread state totals, top functions and scope stats match the fixtures' expected.json exactly. Analysis on medium takes 0.18–0.23 s against a 2 s budget. The baseline diff exit codes, malformed-input handling and determinism were all verified: output is byte-identical across runs and working directories, with no absolute paths. Orchestrator: completed the build/test/push when the implementer stopped, and fixed an MSVC C4996 (getenv) error in a test.
+
+## WP-63 notes
+
+Verifier PASS. The speedscope output validates against the official schema (vendored, byte-identical to the live one) on 7 fixtures, and per-function ns equal the generator's expected ticks. Chrome traces are well formed (M/X/i/C only, ordered per track, metadata complete), scope counts and durations match expected.json, and CPU slices sum to Running ticks. Robustness covers names, ids, ranges and exit codes. On medium, speedscope takes 0.35 s and produces 472 MiB (inherent to the sampled format); Chrome takes 0.023 s for 6.4 MiB. Orchestrator fix: a failed export only deletes `--out` when it is a regular file (it deleted /dev/full in the verifier's probe).
+
 ## Queued follow-ups
+
+- Shared symbol-setup helper: libs/report/analyze.cpp and apps/cli/export_command.cpp duplicate the locator, override, provider and resolve setup.
+- Flaky tests under ctest -j (pass alone): AgentInst.TheCliPrintsMergeWarningsOnStderrAndInJson, CancelTest.ResolveAllAsyncAcceptsAConstModel, PerfCapture.CircularCaptureFlushesTheLastSeconds, CancellationTest.TwentyMillionSamplesReturnWithinBudget. Queue a flake-fix WP.
+
+- WP-62b: the baseline diff compares top-N function shares only, so it misses a function rising from about 1% to about 4% in a flat profile. Fix: carry a larger internal function list in the baseline (all functions with at least 0.5% share), and compare absolute exclusive_ms and total CPU with thresholds. Also add notes for new or removed scopes and frame series, and a note when the current trace is partial.
 
 - Viewer polish: the banner shows lost-event and throttle lines twice when the perf converter also writes them as free-text `convert_stats.warnings`. The `*.symbols.json` scan of a symbol directory is unbounded and runs on the UI thread (3000 files took 7.7 s under ASan); cap it or move it to a worker. An unreadable symbol directory is accepted silently.
 

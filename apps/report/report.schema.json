@@ -1,0 +1,247 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "tachyon-report-1",
+  "title": "tachyon-report document, schema version 1",
+  "type": "object",
+  "required": ["schema_version", "tool", "trace", "settings", "frames", "threads", "functions", "scopes", "locks"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "tool": { "const": "tachyon-report" },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration_ms", "platform", "clock_frequency_hz", "sampling_hz", "events_lost", "partial",
+                   "throttle_events", "thread_count", "sample_count", "has_instrumentation", "warnings"],
+      "properties": {
+        "duration_ms": { "$ref": "#/definitions/ms" },
+        "platform": { "enum": ["windows", "linux", "unknown"] },
+        "clock_frequency_hz": { "$ref": "#/definitions/count" },
+        "sampling_hz": { "$ref": "#/definitions/count" },
+        "events_lost": { "$ref": "#/definitions/count" },
+        "partial": { "type": "boolean" },
+        "throttle_events": { "$ref": "#/definitions/count" },
+        "thread_count": { "$ref": "#/definitions/count" },
+        "sample_count": { "$ref": "#/definitions/count" },
+        "has_instrumentation": { "type": "boolean" },
+        "warnings": { "type": "array", "maxItems": 32, "items": { "type": "string" } }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["top_n", "frame_budget_ms", "blend_scopes", "frame_series"],
+      "properties": {
+        "top_n": { "$ref": "#/definitions/count" },
+        "frame_budget_ms": { "type": "number", "exclusiveMinimum": 0 },
+        "blend_scopes": { "type": "boolean" },
+        "frame_series": { "type": ["string", "null"] }
+      }
+    },
+    "frames": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["series_total", "series"],
+      "properties": {
+        "series_total": { "$ref": "#/definitions/count" },
+        "series": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["label", "name", "thread", "default", "mark_count", "frame_count", "p50_ms", "p95_ms",
+                         "p99_ms", "max_ms", "mean_ms", "over_budget_frames", "slowest_frame_number"],
+            "properties": {
+              "label": { "type": "string" },
+              "name": { "type": "string" },
+              "thread": {
+                "oneOf": [
+                  { "type": "null" },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["tid", "name"],
+                    "properties": { "tid": { "$ref": "#/definitions/count" }, "name": { "type": "string" } }
+                  }
+                ]
+              },
+              "default": { "type": "boolean" },
+              "mark_count": { "$ref": "#/definitions/count" },
+              "frame_count": { "$ref": "#/definitions/count" },
+              "p50_ms": { "$ref": "#/definitions/ms" },
+              "p95_ms": { "$ref": "#/definitions/ms" },
+              "p99_ms": { "$ref": "#/definitions/ms" },
+              "max_ms": { "$ref": "#/definitions/ms" },
+              "mean_ms": { "$ref": "#/definitions/ms" },
+              "over_budget_frames": { "$ref": "#/definitions/count" },
+              "slowest_frame_number": { "$ref": "#/definitions/count" }
+            }
+          }
+        }
+      }
+    },
+    "threads": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tid", "name", "running_ms", "ready_ms", "waiting_ms", "unknown_ms", "sample_count"],
+        "properties": {
+          "tid": { "$ref": "#/definitions/count" },
+          "name": { "type": "string" },
+          "running_ms": { "$ref": "#/definitions/ms" },
+          "ready_ms": { "$ref": "#/definitions/ms" },
+          "waiting_ms": { "$ref": "#/definitions/ms" },
+          "unknown_ms": { "$ref": "#/definitions/ms" },
+          "sample_count": { "$ref": "#/definitions/count" }
+        }
+      }
+    },
+    "functions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_exclusive_ms", "function_count", "top"],
+      "properties": {
+        "total_exclusive_ms": { "$ref": "#/definitions/ms" },
+        "function_count": { "$ref": "#/definitions/count" },
+        "top": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "module", "kind", "exclusive_ms", "inclusive_ms", "exclusive_pct", "samples"],
+            "properties": {
+              "name": { "type": "string" },
+              "module": { "type": "string" },
+              "kind": { "enum": ["function", "scope"] },
+              "exclusive_ms": { "$ref": "#/definitions/ms" },
+              "inclusive_ms": { "$ref": "#/definitions/ms" },
+              "exclusive_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+              "samples": { "$ref": "#/definitions/count" }
+            }
+          }
+        }
+      }
+    },
+    "scopes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope_count", "top"],
+      "properties": {
+        "scope_count": { "$ref": "#/definitions/count" },
+        "top": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "count", "min_ms", "median_ms", "p95_ms", "max_ms", "total_ms", "mean_ms",
+                         "unterminated", "orphan_ends"],
+            "properties": {
+              "name": { "type": "string" },
+              "count": { "$ref": "#/definitions/count" },
+              "min_ms": { "$ref": "#/definitions/ms" },
+              "median_ms": { "$ref": "#/definitions/ms" },
+              "p95_ms": { "$ref": "#/definitions/ms" },
+              "max_ms": { "$ref": "#/definitions/ms" },
+              "total_ms": { "$ref": "#/definitions/ms" },
+              "mean_ms": { "$ref": "#/definitions/ms" },
+              "unterminated": { "$ref": "#/definitions/count" },
+              "orphan_ends": { "$ref": "#/definitions/count" }
+            }
+          }
+        }
+      }
+    },
+    "locks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lock_count", "unparsed_waits", "top"],
+      "properties": {
+        "lock_count": { "$ref": "#/definitions/count" },
+        "unparsed_waits": { "$ref": "#/definitions/count" },
+        "top": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "address", "contentions", "total_wait_ms", "max_wait_ms", "unterminated",
+                         "top_threads"],
+            "properties": {
+              "name": { "type": "string" },
+              "address": { "type": "string", "pattern": "^0x[0-9a-f]+$" },
+              "contentions": { "$ref": "#/definitions/count" },
+              "total_wait_ms": { "$ref": "#/definitions/ms" },
+              "max_wait_ms": { "$ref": "#/definitions/ms" },
+              "unterminated": { "$ref": "#/definitions/count" },
+              "top_threads": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["tid", "name", "waits", "wait_ms"],
+                  "properties": {
+                    "tid": { "$ref": "#/definitions/count" },
+                    "name": { "type": "string" },
+                    "waits": { "$ref": "#/definitions/count" },
+                    "wait_ms": { "$ref": "#/definitions/ms" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "baseline_diff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "regression_count", "improvement_count", "thresholds", "regressions", "improvements",
+                   "notes"],
+      "properties": {
+        "verdict": { "enum": ["pass", "regression"] },
+        "regression_count": { "$ref": "#/definitions/count" },
+        "improvement_count": { "$ref": "#/definitions/count" },
+        "thresholds": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["frame_p95_rel_pct", "frame_p99_rel_pct", "frame_abs_floor_ms", "function_exclusive_pp",
+                       "scope_median_rel_pct", "scope_abs_floor_ms", "lost_events_allowed"],
+          "properties": {
+            "frame_p95_rel_pct": { "type": "number", "minimum": 0 },
+            "frame_p99_rel_pct": { "type": "number", "minimum": 0 },
+            "frame_abs_floor_ms": { "type": "number", "minimum": 0 },
+            "function_exclusive_pp": { "type": "number", "minimum": 0 },
+            "scope_median_rel_pct": { "type": "number", "minimum": 0 },
+            "scope_abs_floor_ms": { "type": "number", "minimum": 0 },
+            "lost_events_allowed": { "$ref": "#/definitions/count" }
+          }
+        },
+        "regressions": { "type": "array", "items": { "$ref": "#/definitions/finding" } },
+        "improvements": { "type": "array", "items": { "$ref": "#/definitions/finding" } },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "definitions": {
+    "count": { "type": "integer", "minimum": 0 },
+    "ms": { "type": "number", "minimum": 0 },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "subject", "baseline", "current", "value_unit", "change", "change_unit"],
+      "properties": {
+        "category": { "enum": ["frame_p95", "frame_p99", "function_exclusive", "scope_median", "lost_events"] },
+        "subject": { "type": "string" },
+        "baseline": { "type": "number" },
+        "current": { "type": "number" },
+        "value_unit": { "enum": ["ms", "% of total", "events"] },
+        "change": { "type": ["number", "null"] },
+        "change_unit": { "enum": ["%", "pp", "events"] },
+        "baseline_is_upper_bound": { "type": "boolean" },
+        "current_is_upper_bound": { "type": "boolean" }
+      }
+    }
+  }
+}
