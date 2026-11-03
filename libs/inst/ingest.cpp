@@ -77,7 +77,11 @@ Result<void> Ingest::attach(uint32_t pid, const std::string& address) {
     m_dirCreated = true;
   }
   const fs::path file = m_config.spoolDir / ("inst-" + std::to_string(pid) + ".tachyon-inst");
-  TACHYON_TRY_ASSIGN(std::unique_ptr<Spool> spool, Spool::create(file, m_config.maxSpoolBytes, m_budget));
+  SpoolOptions spoolOptions;
+  spoolOptions.ringBytes = m_config.ringBytes;
+  spoolOptions.segmentBytes = m_config.ringSegmentBytes;
+  TACHYON_TRY_ASSIGN(std::unique_ptr<Spool> spool,
+                     Spool::create(file, m_config.maxSpoolBytes, m_budget, spoolOptions));
   Spool* raw = spool.get();
   RawServerOptions serverOptions;
   serverOptions.maxConnections = m_config.maxConnectionsPerProcess;
@@ -103,9 +107,12 @@ std::vector<SpoolInfo> Ingest::snapshot() {
   for (auto& [pid, p] : m_processes) {
     SpoolInfo info;
     info.pid = pid;
-    info.path = p.spool->path();
-    auto size = p.spool->flush();
-    info.flushedBytes = size.ok() ? *size : 0;
+    auto snap = p.spool->snapshot();
+    if (!snap.ok() || snap->segments.empty()) continue;
+    info.path = snap->segments.back().file;
+    info.flushedBytes = snap->segments.back().bytes;
+    info.segments = std::move(snap->segments);
+    info.lease = std::move(snap->lease);
     info.stats = p.spool->stats();
     if (info.stats.framesWritten > 0) infos.push_back(std::move(info));
   }
@@ -143,12 +150,14 @@ std::vector<SpoolInfo> Ingest::finish() {
     if (auto closed = p.spool->close(); !closed.ok())
       TACHYON_LOG_WARN("inst: closing the spool of pid {}: {}", pid, closed.error().toString());
     info.stats = p.spool->stats();
-    info.flushedBytes = info.stats.bytesWritten;
-    const fs::path path = info.path;
+    info.segments = p.spool->segments();
+    info.path = info.segments.back().file;
+    info.flushedBytes = info.segments.back().bytes;
+    const std::vector<SpoolSegment> files = info.segments;
     p.spool.reset();
     if (info.stats.framesWritten == 0) {
       std::error_code ec;
-      fs::remove(path, ec);  // the process said hello but never sent anything
+      for (const SpoolSegment& seg : files) fs::remove(seg.file, ec);  // said hello but never sent anything
       continue;
     }
     infos.push_back(std::move(info));

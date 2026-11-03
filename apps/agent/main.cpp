@@ -79,6 +79,7 @@ void printUsage() {
       "                     [--mock-fixture FILE] [--mock-duration-ms N] [--mock-steps N] "
       "[--etw-delete-raw] [--perf-delete-raw] [--perf-ring-pages N]\n"
       "                     [--inst-spool-mb N] [--inst-spool-dir DIR] [--keep-inst-spool]\n"
+      "                     [--flush-seconds N] [--flush-coalesce-ms N] [--ring-min-mb N]\n"
       "The address defaults to $TACHYON_AGENT_PIPE or the platform default. The mock backend copies\n"
       "$TACHYON_MOCK_FIXTURE (or --mock-fixture) to the requested output path. The etw backend keeps the\n"
       "raw <out>.etl next to the trace unless --etw-delete-raw is given. The perf backend (Linux) keeps its "
@@ -89,7 +90,13 @@ void printUsage() {
       "is\n"
       "spooled per process (default cap 1024 MiB, --inst-spool-mb) in <out>.inst/ (or under "
       "--inst-spool-dir)\n"
-      "and merged into the trace when the capture ends; --keep-inst-spool keeps the spool files.\n");
+      "and merged into the trace when the capture ends; --keep-inst-spool keeps the spool files.\n"
+      "Flight recorder: a capture started with circular_mb > 0 keeps the newest instrumentation in a ring "
+      "of\n"
+      "max(circular_mb, --ring-min-mb (default 64)) MiB per process. Tachyon_RequestFlush() from an\n"
+      "instrumented process flushes the last --flush-seconds (default 10) into\n"
+      "<out dir>/<process>-<reason>-<YYYYMMDD-HHMMSS>.tachyon; triggers closer than --flush-coalesce-ms\n"
+      "(default 2000) to the previous one are coalesced.\n");
 }
 
 struct Options {
@@ -105,6 +112,9 @@ struct Options {
   long instSpoolMb = 1024;
   std::string instSpoolDir;
   bool keepInstSpool = false;
+  long flushSeconds = 10;
+  long flushCoalesceMs = 2000;
+  long ringMinMb = 64;
   bool help = false;
 };
 
@@ -144,6 +154,18 @@ bool parseArgs(int argc, char** argv, Options& o) {
       if (!value(o.instSpoolDir)) return false;
     } else if (a == "--keep-inst-spool") {
       o.keepInstSpool = true;
+    } else if (a == "--flush-seconds") {
+      if (!value(tmp)) return false;
+      o.flushSeconds = std::strtol(tmp.c_str(), nullptr, 10);
+      if (o.flushSeconds <= 0) return false;
+    } else if (a == "--flush-coalesce-ms") {
+      if (!value(tmp)) return false;
+      o.flushCoalesceMs = std::strtol(tmp.c_str(), nullptr, 10);
+      if (o.flushCoalesceMs < 0) return false;
+    } else if (a == "--ring-min-mb") {
+      if (!value(tmp)) return false;
+      o.ringMinMb = std::strtol(tmp.c_str(), nullptr, 10);
+      if (o.ringMinMb <= 0) return false;
     } else if (a == "--mock-fixture") {
       if (!value(o.mockFixture)) return false;
     } else if (a == "--mock-duration-ms") {
@@ -259,6 +281,9 @@ int main(int argc, char** argv) {
   cfg.maxInstSpoolBytes = static_cast<uint64_t>(opt.instSpoolMb) << 20;
   cfg.instSpoolRoot = opt.instSpoolDir;
   cfg.keepInstSpool = opt.keepInstSpool;
+  cfg.flushSeconds = static_cast<uint32_t>(opt.flushSeconds);
+  cfg.flushCoalesceMs = static_cast<int>(opt.flushCoalesceMs);
+  cfg.minRingBytes = static_cast<uint64_t>(opt.ringMinMb) << 20;
   agent::Agent agentCore(std::move(backend), cfg);
   control::Server server(std::move(*listener), agentCore);
   agentCore.setEventSink([&server](const control::Event& e) { server.broadcast(e); });

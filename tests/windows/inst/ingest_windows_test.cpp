@@ -184,6 +184,77 @@ TEST_F(InstWindowsTest, LaunchedInstrumentedTestbedYieldsScopesAndSamplesInOneTr
   RecordProperty("target_samples", static_cast<int>(targetSamples));
 }
 
+// WP-60: the flight recorder with real ETW. The testbed's frames scenario asks for a flush right after each
+// planted hitch frame (Tachyon_RequestFlush("hitch")); the agent flushes the circular ETW session in the
+// background. Every flushed trace must load, carry instrumentation and frame marks and cover no more than the
+// window; at least one must hold the hitch frame (a frame of 40 ms or more between two frame marks). An ETW
+// flush restarts the session (a short gap), so which hitch lands in which trace depends on timing.
+TEST_F(InstWindowsTest, HitchTriggersFlushTracesThatHoldTheHitchFrame) {
+  const fs::path out = m_dir / "recorder.tachyon";
+  std::string text;
+  const int code = cli({"--json",        "capture",
+                        "--launch",      TACHYON_TESTBED_EXE,
+                        "--arg",         "--instrument",
+                        "--arg",         "--flush-on-hitch",
+                        "--arg",         "--scenario",
+                        "--arg",         "frames",
+                        "--arg",         "--duration",
+                        "--arg",         "12",
+                        "--arg",         "--hitch-interval-ms",
+                        "--arg",         "2500",
+                        "--env",         "TACHYON_SIDECAR=off",
+                        "--circular-mb", "64",
+                        "--out",         out.string()},
+                       &text);
+  ASSERT_EQ(code, 0) << "cli output:\n" << text << "\nagent log:\n" << readTextFile(m_dir / "agent.log");
+
+  std::vector<std::string> flushedPaths;
+  std::istringstream lines(text);
+  for (std::string line; std::getline(lines, line);) {
+    if (line.empty() || line[0] != '{') continue;
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, false);
+    if (j.is_object() && j.value("event", std::string()) == "flushed")
+      flushedPaths.push_back(j["path"].get<std::string>());
+  }
+  ASSERT_GE(flushedPaths.size(), 2u) << "cli output:\n"
+                                     << text << "\nagent log:\n"
+                                     << readTextFile(m_dir / "agent.log");
+
+  size_t withHitch = 0;
+  for (const std::string& path : flushedPaths) {
+    SCOPED_TRACE(path);
+    ASSERT_TRUE(fs::exists(path));
+    EXPECT_NE(fs::path(path).filename().string().find("-hitch-"), std::string::npos);
+    auto opened = trace::TraceReader::open(path);
+    ASSERT_TRUE(opened.ok()) << opened.error().toString();
+    trace::TraceReader& reader = *opened;
+    const double hz = static_cast<double>(reader.header().clock_frequency_hz);
+    EXPECT_LE(static_cast<double>(reader.header().end_ts - reader.header().start_ts) / hz, 10.75);
+    EXPECT_NE(reader.header().flags & trace::kFlagHasInstrumentation, 0u);
+    const trace::StringTable strings = reader.readStrings().value();
+    std::vector<uint64_t> marks;
+    const auto frameMarks = reader.readFrameMarks().value();
+    for (const auto& rec : frameMarks) {
+      const trace::FrameMarkRec m = rec;
+      if (strings.get(m.name) == "testbed.frame") marks.push_back(m.ts);
+    }
+    std::sort(marks.begin(), marks.end());
+    EXPECT_GT(marks.size(), 10u);
+    double longest = 0.0;
+    for (size_t i = 1; i < marks.size(); ++i)
+      longest = std::max(longest, static_cast<double>(marks[i] - marks[i - 1]) / hz);
+    if (longest >= 0.040) ++withHitch;
+    const auto scopes = reader.readScopeEvents().value();
+    const ScopeBalance balance = checkScopeBalance(scopes);
+    EXPECT_EQ(balance.unmatchedEnds, 0u);
+    EXPECT_EQ(balance.unclosedBegins, 0u);
+    note("flushed " + fs::path(path).filename().string() + ": " + std::to_string(marks.size()) +
+         " frame marks, longest frame " + std::to_string(longest * 1e3) + " ms, " +
+         std::to_string(scopes.size()) + " scope events");
+  }
+  EXPECT_GE(withHitch, 1u) << "no flushed trace contains the hitch frame";
+}
+
 }  // namespace
 }  // namespace tachyon::inst
 

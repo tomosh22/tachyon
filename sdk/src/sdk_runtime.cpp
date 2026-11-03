@@ -729,14 +729,27 @@ void Runtime::shutdown() {
 // --------------------------------------------------------------------------------------------------------
 
 int Runtime::requestFlush(const char* reason) {
+  // What the calling thread recorded just before must reach the agent before it looks at the capture: let
+  // the flush thread drain the rings (a few ms at most) first.
+  if (m_started && !m_shutDown) {
+    const uint64_t target = m_cycles.load(std::memory_order_acquire) + 2;
+    const uint64_t deadline = nowMs() + 50;
+    while (m_cycles.load(std::memory_order_acquire) < target && nowMs() < deadline) {
+      wake();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
   std::lock_guard<std::mutex> lock(m_controlMutex);
   if (m_shutDown) return 0;
   if (!m_control.isOpen()) {
     if (!m_control.connect(m_config.agentAddress, kInitialAgentTimeoutMs, true)) return 0;
   }
   const int64_t id = ++m_nextRequestId;
+  // `trigger`, `reason` and `pid` mark an engine trigger: the agent picks the window and the file name and
+  // answers at once (older agents ignore the extra fields and flush `seconds` into the file `name`).
   const std::string request = "{\"id\":" + std::to_string(id) + ",\"cmd\":\"flush\",\"name\":\"" +
-                              jsonEscape(reason) + "\",\"seconds\":10}";
+                              jsonEscape(reason) + "\",\"seconds\":10,\"reason\":\"" + jsonEscape(reason) +
+                              "\",\"trigger\":true,\"pid\":" + std::to_string(currentProcessId()) + "}";
   std::string pending;
   std::string response;
   if (!controlCall(m_control, pending, id, request, 3000, response)) {
