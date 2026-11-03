@@ -138,11 +138,37 @@ struct LoadOptions {
   unsigned threads = 0;
   // Optional cancellation flag, polled between work items; when it becomes true load() returns Cancelled.
   const std::atomic<bool>* cancel = nullptr;
+  // Streaming (WP-64). In (0, 1): load only a time PREFIX of the file: every chunk except all but the first
+  // ceil(fraction * N) of its N Samples chunks. The result is a self-contained, consistent model of the capture
+  // so far: header.end_ts is clamped to the end of the loaded samples, event records (context switches, ready
+  // events, scopes, marks, plots) at or past it are dropped, tables (strings, frames, callstack nodes, modules,
+  // threads) are complete so ids equal those of the complete load (threads without a ThreadRec are
+  // synthesised from the loaded records only), and TraceModel::loadStatus.complete is false. 1 (or a file
+  // with fewer than 2 Samples chunks) loads everything.
+  double prefixFraction = 1.0;
+  // Stored in TraceModel::loadStatus.generation (loadProgressive numbers its snapshots).
+  uint32_t generation = 0;
+};
+
+// How much of the file a model holds (streaming load, WP-64). A model is immutable once it is returned; a
+// preview is replaced by a later, larger model, never extended in place.
+struct LoadStatus {
+  bool complete = true;               // false: a prefix preview (LoadOptions::prefixFraction)
+  uint32_t generation = 0;            // 0 for the first snapshot of a load, increasing
+  uint32_t sampleChunksLoaded = 0;    // Samples chunks decoded into this model
+  uint32_t sampleChunksTotal = 0;     // Samples chunks in the file
+  uint64_t fullEndTs = 0;             // header.end_ts of the file (header.end_ts is clamped in a preview)
+  uint64_t samplesLoaded = 0;
+  // Thread-safe: pure function. Fraction of the Samples chunks that are loaded, in [0, 1].
+  double fraction() const {
+    return sampleChunksTotal == 0 ? 1.0 : static_cast<double>(sampleChunksLoaded) / sampleChunksTotal;
+  }
 };
 
 struct TraceModel {
   trace::FileHeader header;
   bool isPartial = false;  // header flag bit2 (unfinalized file, or the footer was unusable)
+  LoadStatus loadStatus;   // WP-64: complete unless this is a streaming preview
   CaptureInfo captureInfo;
 
   std::vector<Process> processes;
@@ -172,6 +198,18 @@ struct TraceModel {
   // in [0,1], monotonic, 1.0 on success). Partial or torn files load what is recoverable.
   static Result<TraceModel> load(const std::filesystem::path& path, const LoadOptions& options = {},
                                  std::function<void(float)> progress = {});
+
+  // Streaming load (WP-64): loads a growing prefix of the file for each fraction of `stages` (ascending, each
+  // in (0, 1); e.g. {0.05}), handing every preview model to `onSnapshot` (called on the calling thread, which
+  // may move from it), then loads the complete model and returns it. A file too small to be worth it (fewer
+  // than 2 Samples chunks, or an empty `stages`) is loaded in one go. `progress` covers the whole call
+  // (monotonic, 1.0 at the end); `options.prefixFraction` is ignored. Cancellation returns Cancelled. The
+  // previews are independent models (each costs its own load of the table chunks), so peak memory is the
+  // preview plus the final model while the consumer still holds the preview.
+  static Result<TraceModel> loadProgressive(const std::filesystem::path& path, const LoadOptions& options,
+                                            const std::vector<double>& stages,
+                                            const std::function<void(TraceModel&&)>& onSnapshot,
+                                            std::function<void(float)> progress = {});
 
   // Thread-safe for concurrent const access. Sum of capacity * element size over all vectors, string storage
   // and an estimate for the hash containers.

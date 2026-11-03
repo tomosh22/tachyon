@@ -35,6 +35,20 @@ using trace::TraceReader;
 
 constexpr size_t kMedianDeltasPerThread = 2048;
 
+// Every event record starts with its u64 timestamp (packed: read it by memcpy).
+template <typename T>
+uint64_t eventTs(const T& rec) {
+  uint64_t ts;
+  std::memcpy(&ts, &rec, sizeof ts);
+  return ts;
+}
+
+// Drops the records at or after `end` (streaming previews).
+template <typename T>
+void dropFrom(std::vector<T>& v, uint64_t end) {
+  v.erase(std::remove_if(v.begin(), v.end(), [end](const T& r) { return eventTs(r) >= end; }), v.end());
+}
+
 // Aligned local copy of a packed on-disk record (see the ALIGNMENT RULE in docs/specs/trace-format.md): lets
 // StrongId members be used without touching misaligned addresses.
 template <typename T>
@@ -301,11 +315,25 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
   };
 
   std::vector<size_t> otherIdx, sampleIdx;
+  for (size_t i = 0; i < chunks.size(); ++i)
+    if (chunks[i].type == static_cast<uint32_t>(ChunkType::Samples)) sampleIdx.push_back(i);
+
+  // Streaming prefix (LoadOptions::prefixFraction): keep the first `keep` Samples chunks. Every other chunk is
+  // decoded (writers put the event chunks anywhere between the sample chunks); the event records past the end
+  // of the loaded samples are dropped further down.
+  const size_t sampleChunksTotal = sampleIdx.size();
+  const bool prefix = options.prefixFraction > 0.0 && options.prefixFraction < 1.0 && sampleIdx.size() >= 2;
+  if (prefix) {
+    const size_t keep = std::clamp<size_t>(
+        static_cast<size_t>(std::ceil(options.prefixFraction * static_cast<double>(sampleChunksTotal))), 1,
+        sampleChunksTotal - 1);
+    sampleIdx.resize(keep);
+  }
   for (size_t i = 0; i < chunks.size(); ++i) {
-    if (chunks[i].type == static_cast<uint32_t>(ChunkType::Samples))
-      sampleIdx.push_back(i);
-    else if (chunks[i].type != static_cast<uint32_t>(ChunkType::Footer))
-      otherIdx.push_back(i);
+    const uint32_t type = chunks[i].type;
+    if (type == static_cast<uint32_t>(ChunkType::Samples) || type == static_cast<uint32_t>(ChunkType::Footer))
+      continue;
+    otherIdx.push_back(i);
   }
 
   // ---- Phase A: non-sample chunks ----
@@ -596,6 +624,7 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
 
   // ---- Phase C: scatter ----
   std::vector<uint32_t> chunkMaxStack(sampleIdx.size(), 0);
+  std::vector<uint64_t> chunkMaxTs(sampleIdx.size(), 0);
   TACHYON_TRY(runner.run(sampleIdx.size(), 0.40f, [&](size_t item, unsigned worker) -> Result<void> {
     const FooterRec& c = chunks[sampleIdx[item]];
     TACHYON_TRY_ASSIGN(TraceReader * reader, readerFor(worker));
@@ -628,6 +657,7 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
       index.insert(m.threads[place[j].thread].tid, static_cast<uint32_t>(j));
     }
     uint32_t maxStack = 0;
+    uint64_t maxTs = 0;
     for (size_t i = 0; i < n; ++i) {
       const uint32_t j = index.get(loadAt<uint32_t>(tidCol, i));
       if (j == kInvalidIdx) {
@@ -638,13 +668,16 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
       if (cur.pos >= cur.end) return makeError(ErrorCode::Internal, "sample count changed between passes");
       const uint32_t stack = loadAt<uint32_t>(stackCol, i);
       if (stack != kInvalidIdx && stack > maxStack) maxStack = stack;
-      cur.ts[cur.pos] = loadAt<uint64_t>(tsCol, i);
+      const uint64_t ts = loadAt<uint64_t>(tsCol, i);
+      maxTs = ts > maxTs ? ts : maxTs;
+      cur.ts[cur.pos] = ts;
       cur.stack[cur.pos] = CallstackIdx(stack);
       cur.cpu[cur.pos] = loadAt<uint16_t>(cpuCol, i);
       cur.flags[cur.pos] = loadAt<uint16_t>(flagCol, i);
       ++cur.pos;
     }
     chunkMaxStack[item] = maxStack;
+    chunkMaxTs[item] = maxTs;
     return ok();
   }));
   std::vector<std::vector<std::byte>>().swap(buffers);
@@ -683,6 +716,28 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
   }));
   if (resorted.load())
     TACHYON_LOG_WARN("model: {} threads had unsorted samples and were re-sorted", resorted.load());
+
+  // ---- Streaming preview: the capture so far ends where the loaded samples end ----
+  m.loadStatus.complete = !prefix;
+  m.loadStatus.generation = options.generation;
+  m.loadStatus.sampleChunksTotal = static_cast<uint32_t>(sampleChunksTotal);
+  m.loadStatus.sampleChunksLoaded = static_cast<uint32_t>(sampleIdx.size());
+  m.loadStatus.fullEndTs = m.header.end_ts;
+  for (const SampleColumns& s : m.samplesByThread) m.loadStatus.samplesLoaded += s.ts.size();
+  if (prefix) {
+    uint64_t maxTs = 0;
+    for (uint64_t t : chunkMaxTs) maxTs = std::max(maxTs, t);
+    const uint64_t end = std::max<uint64_t>(maxTs + std::max<uint64_t>(m.sampleIntervalTicks, 1),
+                                            m.header.start_ts + 1);
+    if (end < m.header.end_ts) m.header.end_ts = end;
+    dropFrom(m.contextSwitches, m.header.end_ts);
+    dropFrom(m.readyEvents, m.header.end_ts);
+    dropFrom(m.scopeEvents, m.header.end_ts);
+    dropFrom(fiberRecs, m.header.end_ts);
+    dropFrom(frameMarkRecs, m.header.end_ts);
+    dropFrom(markerRecs, m.header.end_ts);
+    dropFrom(plotRecs, m.header.end_ts);
+  }
 
   // ---- Event streams ----
   ensureSortedByTs(m.contextSwitches);
@@ -769,6 +824,7 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
     for (size_t t = 0; t < threadCount; ++t) {
       if (m.threads[t].first_ts == 0 && evFirst[t] != UINT64_MAX) m.threads[t].first_ts = evFirst[t];
       if (m.threads[t].last_ts == 0) m.threads[t].last_ts = evLast[t];
+      if (prefix && m.threads[t].last_ts > m.header.end_ts) m.threads[t].last_ts = m.header.end_ts;
     }
   }
 
@@ -809,6 +865,46 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
 
   runner.finish();
   return m;
+}
+
+Result<TraceModel> TraceModel::loadProgressive(const std::filesystem::path& path, const LoadOptions& options,
+                                               const std::vector<double>& stages,
+                                               const std::function<void(TraceModel&&)>& onSnapshot,
+                                               std::function<void(float)> progress) {
+  // Stage weights: a preview costs about its fraction of the sample work plus the tables.
+  std::vector<double> usable;
+  for (double f : stages)
+    if (f > 0.0 && f < 1.0 && (usable.empty() || f > usable.back())) usable.push_back(f);
+  double total = 1.0, before = 0.0;
+  for (double f : usable) total += f + 0.02;
+  auto stageProgress = [&](double begin, double weight) {
+    return [&progress, begin, weight, total](float p) {
+      if (progress) progress(static_cast<float>((begin + weight * static_cast<double>(p)) / total));
+    };
+  };
+  uint32_t generation = 0;
+  for (double f : usable) {
+    LoadOptions o = options;
+    o.prefixFraction = f;
+    o.generation = generation++;
+    const double weight = f + 0.02;
+    Result<TraceModel> preview = load(path, o, stageProgress(before, weight));
+    if (!preview.ok()) return preview;
+    before += weight;
+    if (preview->loadStatus.complete) {  // too few chunks to split: this already is the whole file
+      if (progress) progress(1.0f);
+      return preview;
+    }
+    if (onSnapshot) onSnapshot(std::move(preview).value());
+    if (options.cancel && options.cancel->load(std::memory_order_relaxed))
+      return makeError(ErrorCode::Cancelled, "load cancelled");
+  }
+  LoadOptions o = options;
+  o.prefixFraction = 1.0;
+  o.generation = generation;
+  Result<TraceModel> full = load(path, o, stageProgress(before, 1.0));
+  if (full.ok() && progress) progress(1.0f);
+  return full;
 }
 
 }  // namespace tachyon::model
