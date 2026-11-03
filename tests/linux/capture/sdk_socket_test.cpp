@@ -158,7 +158,8 @@ TEST(SdkSocketPerf, InstrumentedTestbedThroughTheRealAgentWithThePerfBackend) {
     EXPECT_TRUE(targetTids.count(tid) != 0)
         << "scope thread " << tid << " is not a sampled thread of the target";
   std::set<uint32_t> named;
-  for (const auto& rec : reader.readThreadNames().value()) named.insert(trace::ThreadNameRec(rec).tid);
+  const auto nameRecs = reader.readThreadNames().value();
+  for (const auto& rec : nameRecs) named.insert(trace::ThreadNameRec(rec).tid);
   for (uint32_t tid : scopeTids) EXPECT_TRUE(named.count(tid) != 0) << "scope thread without a name: " << tid;
 }
 
