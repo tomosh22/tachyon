@@ -175,6 +175,11 @@ TEST(FlightRecorder, NamesAreSanitizedAndCollisionsGetASuffix) {
   EXPECT_EQ(flush(""), "flush-1.tachyon");
   EXPECT_EQ(flush(std::string(300, 'x')), std::string(120, 'x') + ".tachyon");
   EXPECT_EQ(flush("h\xC3\xA9llo"), "h__llo.tachyon");
+  EXPECT_EQ(flush("CON"), "_CON.tachyon");  // Windows device names
+  EXPECT_EQ(flush("nul.x"), "_nul.x.tachyon");
+  EXPECT_EQ(flush("com7"), "_com7.tachyon");
+  EXPECT_EQ(flush("COM0"), "COM0.tachyon");
+  EXPECT_EQ(flush("console"), "console.tachyon");
   for (const auto& entry : fs::directory_iterator(h.dir.path()))
     EXPECT_EQ(entry.path().parent_path(), h.dir.path()) << "nothing escaped the output directory";
 }

@@ -158,7 +158,8 @@ TEST(FlightRecorderPerf, TestbedHitchTriggersProduceTracesWithTheHitchInTheLastT
     // Samples of the target's threads: once the capture is older than the window, the samples must cover the
     // window too (the backend keeps the segments of the last `seconds` between flushes).
     std::set<uint32_t> targetTids;
-    for (const auto& rec : reader.readThreads().value()) {
+    const auto threads = reader.readThreads().value();  // a local: the range must outlive the Result
+    for (const auto& rec : threads) {
       const trace::ThreadRec t = rec;
       if ((t.flags & trace::kThreadFlagTargetProcess) != 0) targetTids.insert(t.tid);
     }

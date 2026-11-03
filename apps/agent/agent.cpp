@@ -16,6 +16,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -58,6 +59,12 @@ std::string sanitizeFileStem(const std::string& in, size_t maxChars = 120) {
   while (lead < out.size() && out[lead] == '.') ++lead;
   out.erase(0, lead);
   while (!out.empty() && out.back() == '.') out.pop_back();
+  // Windows device names stay devices with any extension ("CON.tachyon"): prefix them.
+  std::string base = out.substr(0, out.find('.'));
+  for (char& c : base) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  const bool numbered = base.size() == 4 && (base.rfind("COM", 0) == 0 || base.rfind("LPT", 0) == 0) &&
+                        base[3] >= '1' && base[3] <= '9';
+  if (numbered || base == "CON" || base == "PRN" || base == "AUX" || base == "NUL") out.insert(0, "_");
   return out;
 }
 
