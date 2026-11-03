@@ -37,16 +37,21 @@ bool hasCapturePrivileges() {
 
 bool hasCapturePrivileges() {
   if (geteuid() == 0) return true;
+  constexpr int kCapSysAdmin = 21;  // what kernels before 5.8 (no CAP_PERFMON) ask for
   constexpr int kCapPerfmon = 38;
   std::ifstream status("/proc/self/status");
   std::string line;
   while (std::getline(status, line)) {
     if (line.rfind("CapEff:", 0) == 0) {
       const uint64_t caps = std::strtoull(line.c_str() + 7, nullptr, 16);
-      return ((caps >> kCapPerfmon) & 1U) != 0;
+      if (((caps >> kCapPerfmon) & 1U) != 0 || ((caps >> kCapSysAdmin) & 1U) != 0) return true;
+      break;
     }
   }
-  return false;
+  // kernel.perf_event_paranoid <= 0 lets any user sample system-wide (-1 also scheduler tracepoints).
+  std::ifstream paranoid("/proc/sys/kernel/perf_event_paranoid");
+  long value = 0;
+  return static_cast<bool>(paranoid >> value) && value <= 0;
 }
 
 #endif

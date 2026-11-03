@@ -1,6 +1,7 @@
 #include "cli/cli.h"
 
 #include "capture/windows_etw/launch.h"
+#include "cli/doctor.h"
 #include "cli/export_command.h"
 #include "control/client.h"
 #include "control/protocol.h"
@@ -244,6 +245,9 @@ void printUsage(std::ostream& err) {
          "          [--from-ms X] [--to-ms Y] [--symbols PATH]... [--symbol-server URL]...\n"
          "                               writes a speedscope or Chrome trace JSON file; needs no agent\n"
          "  capture <target> [start options] [--duration S]\n"
+         "  doctor  [--hz N] [--agent PATH] [--socket PATH]\n"
+         "                               checks this machine's capture prerequisites (Linux); exit 1 on "
+         "FAIL\n"
          "target: --launch EXE | --attach PID | --system | --mode launch|attach|system [--exe E] [--pid N]\n"
          "start options: [--args \"A B\" | --args A B | --arg A]... [--cwd D] [--env K=V]... [--hz N]\n"
          "  [--follow-children] [--child-filter GLOB] [--circular-mb N] [--out PATH] [--no-profile]\n"
@@ -498,6 +502,12 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
     const bool json = std::find(args.begin(), args.end(), "--json") != args.end();
     return runExport(std::vector<std::string>(args.begin() + static_cast<std::ptrdiff_t>(at) + 1, args.end()),
                      json, out, err);
+  }
+  if (const size_t at = commandIndex(args); at != std::string::npos && args[at] == "doctor") {
+    const bool json = std::find(args.begin(), args.end(), "--json") != args.end();
+    std::vector<std::string> rest(args.begin(), args.begin() + static_cast<std::ptrdiff_t>(at));
+    rest.insert(rest.end(), args.begin() + static_cast<std::ptrdiff_t>(at) + 1, args.end());
+    return runDoctor(rest, json, out, err);
   }
   if (const size_t at = commandIndex(args); at != std::string::npos && args[at] == "merge") {
     const bool json = std::find(args.begin(), args.end(), "--json") != args.end();
