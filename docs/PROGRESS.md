@@ -30,7 +30,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-41b | Elevated agent (pkexec/sudo) usable by the invoking user | A | not started | wp/41b-elevated-agent | |
-| WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | in progress | wp/36b-lod-perf | 2026-10-25 |
+| WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | merged (partial: target carried to WP-64) | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | merged (verifier PASS) | wp/41-session-explorer | 2026-11-03 |
 | WP-42 | Threads timeline | D | merged; needs GPU verification (60 fps) | wp/42-threads-timeline | 2026-10-25 |
@@ -66,6 +66,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | M0 | passed with exceptions | 2026-10-25 | CI green on Linux and Windows. etlstat numbers pending the user's Windows run (WP-01). Fixtures are generated at build time and checked against SHA256s, because LFS push is blocked. Trace round-trip/interning budget: skewed met (8.66 s), uniform 11.99 s against 10 s, memory met after compact. |
 | M1 | passed for the testbed; engine part pending WP-14 (user-assisted) | 2026-10-25 | Windows CI (elevated runner): `tachyon-cli capture --launch tachyon-testbed.exe` gives a trace with 0 lost events, loader samples before main, child following and attach; the trace opens in TraceReader. Engine capture and conversion-time budget on a real engine capture need the user (WP-14). 20 s dev-box run queued below. |
 | M2 | passed with exceptions | 2026-10-25 | Windows CI: DIA resolves testbed hot functions to file:line and the inline scenario to inline chains (every frame has a line); 1 M RVAs in about 4 s (budget 20 s); ntdll.pdb fetched from msdl.microsoft.com. No team symbol store yet (Part 7 default), so the team-store fetch is untested. An end-to-end symbolized testbed capture in the viewer on Windows is queued for the user. Known limits: hot/cold separated blocks resolve only when the parent's length covers them; an unbounded last public symbol claims trailing addresses. |
+| M3 | passed with exceptions | 2026-11-03 | All analysis WPs (30–36, 36b) merged with fixture expectations and query budgets met; the API changes in 3.7 are in docs/specs/analysis-query.md. Exception: the spec 3.9 frame target (64-row band+strip under 4 ms on `large`) measures 5.3–6.6 ms on the 4-vCPU dev VM (asserted at 2×, passing); medium meets it (0.8 ms CI). Carried to WP-64. LOD memory 4.6 B/sample. |
 | M7 | passed | 2026-11-03 | Linux testbed captures: spin leaf shares 38/29/19/10% vs expected 40/30/20/10% (WP-70 verifier, within ±5%); lock scenario on CI with sched tracepoints: 5,813/5,813 waits woken by the holder (WP-71); SDK scopes over the Unix socket with the perf backend on CI (WP-73). `tachyon-cli doctor` checks the host. |
 
 ## WP-03 measured numbers (GitHub ubuntu-24.04 runner)
@@ -220,6 +221,10 @@ Verifier PASS. `tachyon-cli doctor [--json] [--hz N] [--agent PATH] [--socket PA
 
 Verifier PASS. Run→capture→stop→auto-open with the real agent (`--backend mock`) is tested (CaptureApp.RunCaptureStopOpensTheTrace); parked launch + Resume, killed agent → Lost + reconnect, Attach lists this pid, ASan-clean App destruction with a request in flight. Linux launching uses posix_spawnp with argv (no shell); Windows quoting follows CommandLineToArgvW. Orchestrator fixes: Delete refuses a directory named `*.tachyon`; viewer test TempDirs include the pid. Known gaps: an agent started with "Start with pkexec" runs as root and its 0600 socket (and the SDK's private inst-socket directory) is unreachable for the user → WP-41b; capture_done-only warnings (spool caps, refused connections, failed merges) appear as toasts, not in the banner (needs a hook in status/warnings_banner.*); `\\server\share` in the Run args line collapses one backslash; the Windows process list shows the image path, not the command line; Session Explorer capture time is the file mtime (CaptureInfo has no timestamp); `--selftest` makes one failing agent connect attempt (set autoConnectAgent=false there). Needs Windows verification: ShellExecuteExW runas (UAC), Toolhelp32 process list and user lookup, `explorer /select`.
 
+## WP-36b notes
+
+Orchestrator review. Column-wise band pass (one write per column) and a fine strip level for pixel spans in [base/2, base); perf test uses thread CPU time, best of 5 per zoom. Dev VM (interleaved A/B, large, 1920 px, thread CPU): 64-row band+strip worst 7.3–12.2 → 5.3–6.6 ms; +flame on 4 rows 7.5–11.3 → 5.0–5.7 ms; medium band+strip CI 1.62 → 0.82 ms; medium flame on every row CI 4.98 → 3.68 ms; viewer TimelinePerf medium ×4 CI 4.19/4.50 → 2.77/2.97 ms. Costs: 3.34 → 4.59 B/sample (+37%, over the +25% allowance; accepted because it removes the raw-sample scan that was the worst zoom; `fineStrip=false` disables it), large build 4 workers 3.1–3.5 → 3.8–4.9 s. Strip answers in [base/2, base) are now approximate (documented in lod.h and the spec).
+
 ## Queued follow-ups
 
 - Shared symbol-setup helper: libs/report/analyze.cpp and apps/cli/export_command.cpp duplicate the locator, override, provider and resolve setup.
@@ -250,7 +255,7 @@ Verifier PASS. Run→capture→stop→auto-open with the real agent (`--backend 
 
 - WP-02b: done by the orchestrator. testbed_tests are RUN_SERIAL (the CPU-share checks failed when ctest -j oversubscribed the cores; the verifier reproduced this on pre-existing binaries). LocatorTest.ConcurrentDownloadsAreBounded now asserts only the bound (≤ 2), not that the limit is reached. CancellationTest.TwentyMillion measured 42.6 ms against 50 ms under load average 10; watch it.
 - WP-21b: MERGED (verifier PASS). Cancel or destroy with 4 stalled transfers now takes 18–130 ms (was 16 s); curl idle CPU is 0.15%; pins are balanced. Low follow-ups: catch thread creation failure in the WinHTTP CancelWatcher; pins taken via setLocate(makeDefaultLocate(...)) are never unpinned; the remembered-model overload of resolveAllAsync needs the model to outlive waitAll. Original item: make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.
-- WP-36b: 64-row LOD frame under 4 ms.
+- WP-64 (from WP-36b): 64-row band+strip frame on `large` is 5.3–6.6 ms on the dev VM (target 4 ms). Remaining hot spots: zooms just under 4× a level width (~3.6 buckets per column), the direct strip at 2048–4095 ticks per pixel (mispredict-bound), and band/strip alternation per row. Options: a fused band+strip per-row API (viewer call-site change) or an extra intermediate level (more memory). CI does not build `large`, so the large frame is only measured locally.
 - `SymbolService::resolveAllAsync` should take `const TraceModel&` (the viewer const_casts today).
 
 ## Windows / privileged verification queue
