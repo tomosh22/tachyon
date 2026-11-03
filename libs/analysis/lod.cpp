@@ -1617,7 +1617,9 @@ void fusedLevelPass(const BandCell* band, const uint32_t* dominant, const StripC
                     uint64_t end, uint64_t bucketCount, uint32_t shift, uint64_t t0, uint64_t t1,
                     uint32_t pixels, BandColumn* bandCols, StripColumn* stripCols, Slow&& slow) {
   const uint64_t w = 1ull << shift;
-  const uint64_t lo = std::max(t0, start), hi = std::min(t1, end);
+  // hi never below lo: a window entirely before the trace would otherwise underflow `last` and walk past the
+  // output columns.
+  const uint64_t lo = std::max(t0, start), hi = std::max(lo, std::min(t1, end));
   const uint64_t first = (lo - start + w - 1) >> shift;
   const uint64_t last = std::min<uint64_t>(bucketCount, (hi - start + w - 1) >> shift);
   const bool partialTail = bucketCount > 0 && start + bucketCount * w > end;

@@ -106,6 +106,48 @@ TEST(LodRowColumns, MatchesSeparateQueriesAtEveryZoom) {
   }
 }
 
+// A window entirely before the trace start (once a heap overflow in the fused pass): all columns empty, and
+// the same as the separate queries.
+TEST(LodRowColumns, AWindowEntirelyBeforeTheTraceIsEmpty) {
+  const TraceModel& m = fixture("tiny");
+  const uint64_t s = m.header.start_ts;
+  ASSERT_GT(s, 4u);
+  auto lod = buildLod(m, LodOptions{});
+  ASSERT_TRUE(lod.ok());
+  for (const auto& [t0, t1] : {std::pair<uint64_t, uint64_t>{0, s / 2}, {0, s / 50}, {s / 4, s}}) {
+    for (uint32_t pixels : {1u, 2u, 301u}) {
+      for (size_t thread = 0; thread < m.threads.size(); ++thread) {
+        RowQuery rq;
+        rq.thread = ThreadIdx(static_cast<uint32_t>(thread));
+        rq.t0 = t0;
+        rq.t1 = t1;
+        rq.pixelWidth = pixels;
+        StateBandResult fb;
+        SampleStripResult fs;
+        ASSERT_TRUE(lod->rowColumns(rq, fb, fs).ok());
+        StateBandQuery bq;
+        bq.thread = rq.thread;
+        bq.t0 = t0;
+        bq.t1 = t1;
+        bq.pixelWidth = pixels;
+        SampleStripQuery sq;
+        sq.thread = rq.thread;
+        sq.t0 = t0;
+        sq.t1 = t1;
+        sq.pixelWidth = pixels;
+        StateBandResult b;
+        SampleStripResult st;
+        ASSERT_TRUE(lod->stateBands(bq, b).ok());
+        ASSERT_TRUE(lod->sampleStrip(sq, st).ok());
+        const std::string what = "window [" + std::to_string(t0) + "," + std::to_string(t1) + ") px " +
+                                 std::to_string(pixels) + " thread " + std::to_string(thread);
+        expectSame(fb, b, what);
+        expectSame(fs, st, what);
+      }
+    }
+  }
+}
+
 TEST(LodRowColumns, DirectModeAndPendingThreadsFallBack) {
   const TraceModel& m = fixture("medium");
   auto lod = TimelineLod::prepare(m);  // prepared, not built: every thread pending
