@@ -287,6 +287,20 @@ class SchedTracepointCapture : public SchedCapture {
     EXPECT_EQ(diag.schedPath, "tracepoint") << "the tracepoint events could not be opened; warnings: "
                                             << (result->warnings.empty() ? "none" : result->warnings[0]);
     EXPECT_EQ(result->eventsLost, 0u);
+    const auto& cv = diag.convert;
+    std::printf(
+        "[sched] tracepoint capture diagnostics: switch events %llu, wake events %llu, switches written "
+        "%llu, "
+        "readies written %llu, dropped not-target %llu, malformed %llu, unsupported %llu, bad records %llu, "
+        "throttle records "
+        "%llu, drained %llu samples + %llu meta\n",
+        (unsigned long long)cv.schedSwitchEvents, (unsigned long long)cv.schedWakeEvents,
+        (unsigned long long)cv.switchesWritten, (unsigned long long)cv.readiesWritten,
+        (unsigned long long)cv.schedDroppedNotTarget, (unsigned long long)cv.schedMalformed,
+        (unsigned long long)cv.recordsUnsupported, (unsigned long long)cv.recordsMalformed,
+        (unsigned long long)diag.drain.throttleRecords, (unsigned long long)diag.drain.samples,
+        (unsigned long long)diag.drain.metaRecords);
+    for (const std::string& w : result->warnings) std::printf("[sched] warning: %s\n", w.c_str());
     return loadWithStates(o.outPath, pid);
   }
 

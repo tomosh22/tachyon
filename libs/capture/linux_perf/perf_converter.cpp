@@ -307,6 +307,7 @@ class Converter {
     bool valid = false;
   };
   std::unordered_map<uint32_t, LastSwitchOut> m_lastSwitchOut;
+  std::map<uint64_t, uint64_t> m_unknownTracepoints;  // (common_type << 32 | raw size) -> records
   std::optional<SchedSwitchDecoder> m_switchDecoder;
   std::optional<SchedWakeDecoder> m_wakeDecoder;
 
@@ -876,6 +877,7 @@ void Converter::onSchedSample(const ParsedRecord& r) {
     onSchedWake(r, ev);
   } else {
     ++m_stats.recordsUnsupported;
+    ++m_unknownTracepoints[(static_cast<uint64_t>(type) << 32) | r.rawSize];
   }
 }
 
@@ -1265,6 +1267,13 @@ Result<void> Converter::finalize() {
   sys.paranoid = si.paranoid;
   sys.maxSampleRate = si.maxSampleRate;
   sys.cpuTimeMaxPercent = si.cpuTimeMaxPercent;
+  for (const auto& [key, n] : m_unknownTracepoints)
+    m_stats.warnings.push_back(std::to_string(n) + " tracepoint record(s) of type " +
+                               std::to_string(key >> 32) + " (payload " + std::to_string(key & 0xFFFFFFFFu) +
+                               " bytes) do not match the recorded sched formats and were ignored");
+  if (m_stats.schedMalformed > 0)
+    m_stats.warnings.push_back(std::to_string(m_stats.schedMalformed) +
+                               " scheduler records had a payload shorter than their format and were ignored");
   std::vector<std::string> warnings = si.warnings;
   warnings.insert(warnings.end(), m_stats.warnings.begin(), m_stats.warnings.end());
   if (m_stats.eventsLost > 0)
