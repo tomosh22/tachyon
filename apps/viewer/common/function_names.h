@@ -19,6 +19,10 @@ struct NameParts {
 // '!' (empty for pseudo, scope and unmapped keys); `function` is the part after it, except that an unresolved
 // frame (module!0x<rva>) keeps its whole name and a scope shows its id without the "scope:" prefix. A null
 // context gives the hex value.
-NameParts splitFunctionName(const analysis::QueryContext* context, const symbols::FunctionKey& key);
+//
+// kRootKey is the Call Graph's "<root>". In the function tables (Function List, Butterfly self) the same key
+// is the frameless samples: pass `rootIsNoStack` to name it "<no stack>" there (WP-33b).
+NameParts splitFunctionName(const analysis::QueryContext* context, const symbols::FunctionKey& key,
+                            bool rootIsNoStack = false);
 
 }  // namespace tachyon::viewer::common

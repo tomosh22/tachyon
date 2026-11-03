@@ -41,6 +41,7 @@ std::shared_ptr<const SearchIndex> buildSearchIndex(std::span<const analysis::Fu
   auto index = std::make_shared<SearchIndex>();
   index->entries.reserve(rows.size() + scopeIds.size());
   for (const analysis::FunctionRow& row : rows) {
+    if (row.key == analysis::kRootKey) continue;  // the "<no stack>" row has no statistics to look up
     SearchEntry e;
     e.kind = EntryKind::Function;
     e.key = row.key;

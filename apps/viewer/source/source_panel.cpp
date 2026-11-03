@@ -116,7 +116,8 @@ SourcePanel::Spec SourcePanel::currentSpec(const PanelContext& context) const {
     spec.key = context.selection->state().selectedFunction;
     spec.filter = context.selection->state().timeFilter;
     if (spec.filter) {
-      spec.filter->subtreeRoot.reset();  // the function's source time is not limited to a call graph subtree
+      common::clearSubtree(
+          *spec.filter);  // the function's source time is not limited to a call graph subtree
       spec.filter->function.reset();
     }
   }

@@ -110,6 +110,10 @@ FunctionListPanel::QuerySpec FunctionListPanel::currentSpec(const PanelContext& 
   const common::EffectiveScopeOptions scope = common::effectiveScopeOptions(context);
   spec.blendScopes = scope.blendScopes;
   spec.groupByFiber = scope.groupByFiber;
+  // A subtree path only matches under the frame options it was taken with (WP-33b).
+  if (m_restrictSubtree && context.selection)
+    common::applySubtreeOptions(context.selection->state().timeFilter, spec.expandInline, spec.kernelFrames,
+                                spec.blendScopes, spec.groupByFiber);
   spec.documentGeneration = context.documentGeneration;
   spec.symbolGeneration = context.symbolGeneration;
   return spec;
@@ -145,7 +149,8 @@ void FunctionListPanel::issue(const PanelContext& context, const QuerySpec& spec
           auto rows = analysis::bottomUpFunctionsShared(qc, filter, cancel);
           if (!rows.ok()) return rows.error();
           return fl::buildTable(
-              **rows, [&qc](const FunctionKey& k) { return common::splitFunctionName(&qc, k); }, clockHz);
+              **rows, [&qc](const FunctionKey& k) { return common::splitFunctionName(&qc, k, true); },
+              clockHz);
         });
   });
 }
@@ -381,10 +386,10 @@ void FunctionListPanel::drawToolbar(const PanelContext& context) {
                 common::ticksToMs(m_table->totalTicks, m_table->clockHz));
   }
   const SelectionState& state = context.selection->state();
-  if (m_restrictSubtree && state.timeFilter && state.timeFilter->subtreeRoot) {
+  if (m_restrictSubtree && common::hasSubtreeRestriction(state.timeFilter)) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "  Subtree: node #%u",
-                       state.timeFilter->subtreeRoot->get());
+    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "  Subtree: %s",
+                       common::subtreeText(*state.timeFilter).c_str());
   }
   if (!m_message.empty()) {
     ImGui::SameLine();

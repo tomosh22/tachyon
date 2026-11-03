@@ -100,15 +100,17 @@ double percentOf(uint64_t ticks, uint64_t rootTotal, uint64_t parentTotal, Perce
 using common::ticksToMs;
 
 struct PieSlice {
-  const analysis::NodeAgg* node = nullptr;  // null for the "other" slice
+  const analysis::NodeAgg* node = nullptr;  // null for the "self" and "other" slices
+  bool self = false;                        // the node's own (exclusive) time
   uint64_t ticks = 0;
-  double fraction = 0;           // of the sum of the children's inclusive ticks
+  double fraction = 0;           // of the node's inclusive ticks (its exclusive ticks + the children's)
   float angle0 = 0, angle1 = 0;  // radians, clockwise from 12 o'clock, [0, 2 pi]
   uint32_t otherCount = 0;       // children folded into "other"
 };
 
-// Thread-safe (no shared state). Slices for the children of `node`: the `maxChildren` heaviest children in
-// descending order, then one "other" slice for the rest. Empty when the children carry no time.
+// Thread-safe (no shared state). Slices for `node`: first a "self" slice with the node's exclusive ticks
+// (when non-zero), then the `maxChildren` heaviest children in descending order, then one "other" slice for
+// the rest. Empty when the node has no children or its children carry no time.
 std::vector<PieSlice> pieSlices(const analysis::NodeAgg& node, size_t maxChildren = 10);
 
 // ---- shared helpers (moved to viewer/common/ by WP-44; re-exported here under their old names) ------------

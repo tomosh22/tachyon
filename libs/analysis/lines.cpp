@@ -72,16 +72,16 @@ int64_t FunctionMatcher::outermostCaller(uint32_t node) {
   return base;
 }
 
-std::optional<FunctionHit> FunctionMatcher::matchKernelLeaf(uint32_t leaf) {
-  // Rare path (kernel-leaf samples): walk the stack, leaf first, up to the subtree cut.
+std::optional<FunctionHit> FunctionMatcher::matchWalk(uint32_t leaf, bool kernelLeaf, uint32_t cut) {
+  // Rare paths (kernel-leaf samples, subtree paths): walk the stack, leaf first, up to the cut.
   std::vector<uint32_t> chain;
   const size_t limit = m_model.nodes.size();
   for (uint32_t n = leaf; n != 0 && n < limit && chain.size() <= limit; n = m_model.nodes[n].parent.get()) {
     chain.push_back(n);
-    if (n == m_subtree) break;
+    if (n == cut) break;
   }
   size_t exactAt = 0;
-  while (exactAt < chain.size()) {
+  while (kernelLeaf && exactAt < chain.size()) {
     const FrameIdx fi = m_model.nodes[chain[exactAt]].frame;
     if (!(fi.valid() && fi.get() < m_model.frames.size() && isKernelFrame(m_model, m_model.frames[fi.get()])))
       break;
@@ -99,7 +99,7 @@ std::optional<FunctionHit> FunctionMatcher::match(CallstackIdx leaf, bool kernel
   if (!m_matchable || !leaf.valid()) return std::nullopt;
   const uint32_t n = leaf.get();
   if (n == 0 || n >= m_model.nodes.size()) return std::nullopt;
-  if (kernelLeaf) return matchKernelLeaf(n);
+  if (kernelLeaf) return matchWalk(n, true, m_subtree);
   if (n != m_subtree) {
     const int64_t up = outermostCaller(m_model.nodes[n].parent.get());
     if (up >= 0) return FunctionHit{FrameIdx(static_cast<uint32_t>(up)), true};
@@ -107,6 +107,13 @@ std::optional<FunctionHit> FunctionMatcher::match(CallstackIdx leaf, bool kernel
   const FrameIdx fi = m_model.nodes[n].frame;
   if (frameMatches(fi, false)) return FunctionHit{fi, false};
   return std::nullopt;
+}
+
+std::optional<FunctionHit> FunctionMatcher::matchWithin(CallstackIdx leaf, bool kernelLeaf, uint32_t cut) {
+  if (!m_matchable || !leaf.valid() || cut == 0) return std::nullopt;
+  const uint32_t n = leaf.get();
+  if (n == 0 || n >= m_model.nodes.size()) return std::nullopt;
+  return matchWalk(n, kernelLeaf, cut);
 }
 
 uint64_t FunctionMatcher::addressOf(const FunctionHit& hit) const {
@@ -161,11 +168,19 @@ uint32_t FunctionMatcher::lineOf(const FunctionHit& hit) {
 // StackPass
 
 StackPass::StackPass(const QueryContext& ctx, const ResolvedFilter& f)
-    : m_trivial(!f.subtree.valid() && !f.function), m_subtree(f.subtree), m_flat(ctx, m_table) {
+    : m_trivial(!f.subtree.valid() && !f.function && !f.path),
+      m_hasPath(f.path.has_value()),
+      m_subtree(f.subtree),
+      m_flat(ctx, m_table) {
   if (f.function) m_required = m_table.intern(*f.function);
+  m_flat.setPath(f.path ? &*f.path : nullptr);
   if (!m_trivial) {
     m_memo[0].assign(ctx.model().nodes.size(), 0);
     m_memo[1].assign(ctx.model().nodes.size(), 0);
+    if (m_hasPath) {
+      m_cutMemo[0].assign(ctx.model().nodes.size(), 0);
+      m_cutMemo[1].assign(ctx.model().nodes.size(), 0);
+    }
   }
 }
 
@@ -173,8 +188,12 @@ bool StackPass::pass(CallstackIdx node, bool kernelLeaf, Cancel cancel) {
   m_cost = 0;
   if (m_trivial) return true;
   const uint32_t n = node.valid() ? node.get() : 0;
-  uint8_t& memo = m_memo[kernelLeaf ? 1 : 0][n < m_memo[0].size() ? n : 0];
-  if (memo != 0) return memo == 1;
+  const size_t slot = n < m_memo[0].size() ? n : 0;
+  uint8_t& memo = m_memo[kernelLeaf ? 1 : 0][slot];
+  if (memo != 0) {
+    if (m_hasPath && memo == 1) m_lastCut = m_cutMemo[kernelLeaf ? 1 : 0][slot];
+    return memo == 1;
+  }
   m_flat.setCancel(cancel);
   const bool ok = m_flat.flatten(node, m_subtree, kernelLeaf, m_ids, m_required);
   m_cost = m_flat.lastCost() + m_ids.size();
@@ -183,6 +202,7 @@ bool StackPass::pass(CallstackIdx node, bool kernelLeaf, Cancel cancel) {
     return false;
   }
   memo = ok ? 1 : 2;
+  if (ok && m_hasPath) m_lastCut = m_cutMemo[kernelLeaf ? 1 : 0][slot] = m_flat.pathCutNode();
   return ok;
 }
 
@@ -259,7 +279,9 @@ Result<std::shared_ptr<const std::vector<LineAgg>>> linesForFunctionShared(const
           if (stackPass.aborted()) return cancelledError();
           meter.add(stackPass.lastCost());
           if (!kept) continue;
-          const std::optional<FunctionHit> hit = matcher.match(nw.node, nw.kernelLeaf);
+          const std::optional<FunctionHit> hit =
+              stackPass.hasPath() ? matcher.matchWithin(nw.node, nw.kernelLeaf, stackPass.cutNode())
+                                  : matcher.match(nw.node, nw.kernelLeaf);
           if (!hit) continue;
           slot(matcher.lineOf(*hit)).runningTicks += nw.ticks;
         }
@@ -285,7 +307,9 @@ Result<std::shared_ptr<const std::vector<LineAgg>>> linesForFunctionShared(const
             if (stackPass.aborted()) return cancelledError();
             meter.add(stackPass.lastCost());
             if (!kept) continue;
-            const std::optional<FunctionHit> hit = matcher.match(iv.blocking_stack, false);
+            const std::optional<FunctionHit> hit =
+                stackPass.hasPath() ? matcher.matchWithin(iv.blocking_stack, false, stackPass.cutNode())
+                                    : matcher.match(iv.blocking_stack, false);
             if (!hit) continue;
             LineAgg& l = slot(matcher.lineOf(*hit));
             (waiting ? l.waitingTicks : l.readyTicks) += hi - lo;

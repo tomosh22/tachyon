@@ -195,7 +195,7 @@ void TimelineWidget::clearSelection(SelectionBus* bus) {
   // Only the time range this widget applied is ours to remove; a filter another panel set (or changed since)
   // stays as it is.
   if (!applied || current.t0 != applied->t0 || current.t1 != applied->t1) return;
-  if (!current.threads && !current.subtreeRoot && !current.function) {
+  if (!current.threads && !current.subtreeRoot && !current.subtreePath && !current.function) {
     bus->setTimeFilter(std::nullopt);
     return;
   }

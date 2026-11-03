@@ -62,7 +62,7 @@ uint64_t primaryOfGroup(const Group& g, uint32_t moduleRank, SortColumn column, 
 
 analysis::Filter makeFilter(const std::optional<ViewFilter>& busFilter, bool restrictToSubtree) {
   analysis::Filter f = common::toQueryFilter(busFilter);
-  if (!restrictToSubtree) f.subtreeRoot.reset();
+  if (!restrictToSubtree) common::clearSubtree(f);
   return f;
 }
 

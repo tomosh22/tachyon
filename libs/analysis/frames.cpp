@@ -64,6 +64,7 @@ class FrameDetailer {
       : m_job(job), m_model(job.ctx.model()), m_flat(job.ctx, m_table) {
     m_flat.setCancel(job.cancel);
     m_flat.setBlend(job.blend);
+    m_flat.setPath(job.rf.path ? &*job.rf.path : nullptr);
     if (job.rf.function) m_required = m_table.intern(*job.rf.function);
   }
 

@@ -20,7 +20,6 @@ add_library(tachyon_viewer_core STATIC
   capture/session_explorer_panel.cpp
   callgraph/callgraph_model.cpp
   callgraph/callgraph_panel.cpp
-  callgraph/subtree_resolver.cpp
   cli_args.cpp
   common/function_names.cpp
   common/imgui_util.cpp

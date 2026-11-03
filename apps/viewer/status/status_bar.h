@@ -21,7 +21,8 @@ namespace tachyon::viewer {
 std::string describeDocument(const Document& document);
 // Duration "850 ms" / "1.25 s" / "2 min 5 s" for a tick count at `clockHz` (empty if the clock is unknown).
 std::string formatDuration(uint64_t ticks, uint64_t clockHz);
-// "none", or e.g. "time 0.250-1.500 s, 2 threads, subtree #7" for the bus's time filter and selections.
+// "none", or e.g. "time 0.250-1.500 s, 2 threads, subtree #7" (a path filter: "subtree game.exe!Update") for
+// the bus's time filter and selections.
 std::string describeFilter(const SelectionState& state, const model::TraceModel& model);
 
 class StatusBar {

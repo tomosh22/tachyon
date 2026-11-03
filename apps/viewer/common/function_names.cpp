@@ -4,10 +4,11 @@
 
 namespace tachyon::viewer::common {
 
-NameParts splitFunctionName(const analysis::QueryContext* context, const symbols::FunctionKey& key) {
+NameParts splitFunctionName(const analysis::QueryContext* context, const symbols::FunctionKey& key,
+                            bool rootIsNoStack) {
   NameParts parts;
   if (key == analysis::kRootKey) {
-    parts.full = parts.function = "<root>";
+    parts.full = parts.function = rootIsNoStack ? "<no stack>" : "<root>";
   } else if (key == analysis::kKernelKey) {
     parts.full = parts.function = "<kernel>";
   } else if (!context) {

@@ -220,15 +220,23 @@ Result<std::shared_ptr<const std::vector<FunctionRow>>> bottomUpFunctionsShared(
         std::vector<uint32_t> stamp;
         std::vector<uint32_t> ids;
         uint32_t serial = 0;
+        uint64_t noStackTicks = 0, noStackSamples = 0;
         CancelMeter meter{cancel};
         flat.setCancel(cancel);
         flat.setBlend(blend->get());
+        flat.setPath(rf->path ? &*rf->path : nullptr);
         for (const NodeWeight& nw : **w) {
           if (meter.due()) return cancelledError();
           const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required, nw.scopeStack);
           if (flat.aborted()) return cancelledError();
           meter.add(flat.lastCost() + ids.size());
-          if (!kept || ids.empty()) continue;
+          if (!kept) continue;
+          if (ids.empty()) {  // frameless samples: the "<no stack>" row, so the total matches topDownTree's
+                              // root
+            noStackTicks += nw.ticks;
+            noStackSamples += nw.samples;
+            continue;
+          }
           if (table.size() > incl.size()) {
             incl.resize(table.size(), 0);
             excl.resize(table.size(), 0);
@@ -249,6 +257,8 @@ Result<std::shared_ptr<const std::vector<FunctionRow>>> bottomUpFunctionsShared(
           if (inst[id] == 0) continue;
           rows.push_back(FunctionRow{table.key(id), incl[id], excl[id], saturate32(inst[id])});
         }
+        if (noStackSamples != 0)
+          rows.push_back(FunctionRow{kRootKey, noStackTicks, noStackTicks, saturate32(noStackSamples)});
         std::sort(rows.begin(), rows.end(), sortRowsBy);
         return rows;
       },
@@ -289,6 +299,7 @@ Result<std::shared_ptr<const NodeAgg>> topDownTreeShared(const QueryContext& ctx
         CancelMeter meter{cancel};
         flat.setCancel(cancel);
         flat.setBlend(blend->get());
+        flat.setPath(rf->path ? &*rf->path : nullptr);
         for (const NodeWeight& nw : **w) {
           if (meter.due()) return cancelledError();
           const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required, nw.scopeStack);
@@ -338,7 +349,7 @@ Result<std::shared_ptr<const NodeAgg>> topDownTreeShared(const QueryContext& ctx
         }
         if (cancel.requested()) return cancelledError();
         NodeAgg root = std::move(out[0]);
-        if (rf->subtree.valid() && root.children.size() == 1 && root.exclusiveTicks == 0 &&
+        if ((rf->subtree.valid() || rf->path) && root.children.size() == 1 && root.exclusiveTicks == 0 &&
             root.children[0].key != kRootKey)
           return std::move(root.children[0]);
         return root;
@@ -376,12 +387,22 @@ Result<std::shared_ptr<const Butterfly>> butterflyShared(const QueryContext& ctx
         CancelMeter meter{cancel};
         flat.setCancel(cancel);
         flat.setBlend(blend->get());
+        flat.setPath(rf->path ? &*rf->path : nullptr);
         for (const NodeWeight& nw : **w) {
           if (meter.due()) return cancelledError();
           const bool kept = flat.flatten(nw.node, rf->subtree, nw.kernelLeaf, ids, required, nw.scopeStack);
           if (flat.aborted()) return cancelledError();
           meter.add(flat.lastCost() + ids.size());
           if (!kept) continue;
+          if (ids.empty()) {  // frameless samples are the function kRootKey ("<no stack>"): no callers or
+                              // callees
+            if (target == rootId) {
+              bf.self.inclusiveTicks += nw.ticks;
+              bf.self.exclusiveTicks += nw.ticks;
+              bf.self.instances = saturate32(uint64_t{bf.self.instances} + nw.samples);
+            }
+            continue;
+          }
           const auto it = std::find(ids.begin(), ids.end(), target);  // outermost occurrence
           if (it == ids.end()) continue;
           const size_t pos = static_cast<size_t>(it - ids.begin());

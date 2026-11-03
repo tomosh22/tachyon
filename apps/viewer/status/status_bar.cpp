@@ -1,5 +1,6 @@
 #include "viewer/status/status_bar.h"
 
+#include "viewer/common/query_filter.h"
 #include "viewer/paths.h"
 
 #include <imgui.h>
@@ -59,6 +60,7 @@ std::string describeFilter(const SelectionState& state, const model::TraceModel&
     parts.emplace_back(buf);
     if (f.threads) parts.push_back(std::to_string(f.threads->size()) + " threads");
     if (f.subtreeRoot) parts.push_back("subtree #" + std::to_string(f.subtreeRoot->get()));
+    if (f.subtreePath) parts.push_back("subtree " + common::subtreeText(f));
   }
   if (state.selectedThread.valid() && state.selectedThread.get() < model.threads.size()) {
     const model::Thread& t = model.threads[state.selectedThread.get()];

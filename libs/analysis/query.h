@@ -48,6 +48,16 @@ struct Filter {
   uint64_t t0 = 0, t1 = UINT64_MAX;               // half-open [t0, t1) on sample timestamps
   std::optional<std::vector<ThreadIdx>> threads;  // nullopt = all threads
   std::optional<CallstackIdx> subtreeRoot;        // only samples whose stack passes through this node
+  // WP-33b: only samples whose stack, as the query sees it (after the subtreeRoot cut, with the context's
+  // inline expansion, kernel frame handling and scope blending applied: the flattened root-first sequence
+  // topDownTree merges, return-address rule included), STARTS WITH exactly this FunctionKey prefix. The
+  // matching prefix is then cut like subtreeRoot cuts a stack: the stack the query sees begins at the last
+  // key of the path, so topDownTree returns that function as its root. The path does not include the
+  // synthetic root kRootKey: it is the keys from the top-down root's child down to the selected node. A
+  // function reached through several callstack nodes (call sites, return addresses, inline expansion) is
+  // kept whole, which a single subtreeRoot node cannot do. An empty path is InvalidArgument. When both are
+  // set both apply (subtreeRoot first). Part of Filter equality and of every cache key.
+  std::optional<std::vector<FunctionKey>> subtreePath;
   // Only samples whose stack contains this function: the stack as the query sees it, i.e. after the subtree
   // cut, with the context's inline expansion and kernel frame handling applied. A handle issued by
   // QueryContext::functionIdx(); an index the context never issued is rejected with InvalidArgument.

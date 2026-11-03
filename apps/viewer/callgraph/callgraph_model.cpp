@@ -182,9 +182,16 @@ std::vector<PieSlice> pieSlices(const NodeAgg& node, size_t maxChildren) {
   if (shown < n)
     std::nth_element(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(shown), order.end(), heavier);
   std::sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(shown), heavier);
-  uint64_t total = 0;
-  for (const NodeAgg& c : node.children) total += c.inclusiveTicks;
-  if (total == 0) return slices;
+  uint64_t childTotal = 0;
+  for (const NodeAgg& c : node.children) childTotal += c.inclusiveTicks;
+  if (childTotal == 0) return slices;
+  const uint64_t total = childTotal + node.exclusiveTicks;
+  if (node.exclusiveTicks > 0) {
+    PieSlice self;
+    self.self = true;
+    self.ticks = node.exclusiveTicks;
+    slices.push_back(self);
+  }
   uint64_t shownTicks = 0;
   for (size_t i = 0; i < shown; ++i) {
     PieSlice s;
@@ -193,9 +200,9 @@ std::vector<PieSlice> pieSlices(const NodeAgg& node, size_t maxChildren) {
     shownTicks += s.ticks;
     if (s.ticks > 0) slices.push_back(s);
   }
-  if (shown < n && total > shownTicks) {
+  if (shown < n && childTotal > shownTicks) {
     PieSlice other;
-    other.ticks = total - shownTicks;
+    other.ticks = childTotal - shownTicks;
     other.otherCount = static_cast<uint32_t>(n - shown);
     slices.push_back(other);
   }

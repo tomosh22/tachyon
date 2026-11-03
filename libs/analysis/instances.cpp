@@ -57,6 +57,7 @@ Result<EnumeratedInstances> enumerateFunctionInstances(const QueryContext& ctx, 
   auto blend = blendIndexIfEnabled(ctx, cancel);
   if (!blend) return blend.error();
   flat.setBlend(blend->get());
+  flat.setPath(rf.path ? &*rf.path : nullptr);
   static const std::vector<ScopeSegment> kNoSegments;
   const uint32_t target = table.intern(key);
   const uint32_t required = rf.function ? table.intern(*rf.function) : kUnset;

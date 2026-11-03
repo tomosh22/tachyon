@@ -32,6 +32,11 @@ class FunctionMatcher {
   // through the subtree node must be rejected by the caller beforehand.
   std::optional<FunctionHit> match(CallstackIdx leaf, bool kernelLeaf);
 
+  // As match(), for a Filter::subtreePath: only the frames at or below the callstack node `cut` (the
+  // StackPass::cutNode() of the same sample, the node of the frame holding the path's last key) can match.
+  // cut == 0 (the path ends on no physical frame) matches nothing. Not memoized: costs O(stack depth).
+  std::optional<FunctionHit> matchWithin(CallstackIdx leaf, bool kernelLeaf, uint32_t cut);
+
   // Source line (in the function's own file) of a hit; 0 when unknown. See linesForFunction.
   uint32_t lineOf(const FunctionHit& hit);
 
@@ -46,7 +51,7 @@ class FunctionMatcher {
 
   bool frameMatches(FrameIdx frame, bool caller) const;
   int64_t outermostCaller(uint32_t node);
-  std::optional<FunctionHit> matchKernelLeaf(uint32_t leaf);
+  std::optional<FunctionHit> matchWalk(uint32_t leaf, bool kernelLeaf, uint32_t cut);
   void ensureOwnLines();
 
   const QueryContext& m_ctx;
@@ -74,9 +79,16 @@ class StackPass {
   bool pass(CallstackIdx node, bool kernelLeaf, Cancel cancel);
   bool aborted() const { return m_aborted; }
   size_t lastCost() const { return m_cost; }
+  bool hasPath() const { return m_hasPath; }
+  // With a subtreePath: the cut node (see StackFlattener::pathCutNode) of the stack of the last pass() call
+  // that returned true.
+  uint32_t cutNode() const { return m_lastCut; }
 
  private:
   bool m_trivial;
+  bool m_hasPath = false;
+  uint32_t m_lastCut = 0;
+  std::vector<uint32_t> m_cutMemo[2];
   CallstackIdx m_subtree;
   KeyTable m_table;
   StackFlattener m_flat;
