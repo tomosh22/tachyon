@@ -54,6 +54,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-62 | CI report tool | E | merged (WP-62b follow-up) | wp/62-ci-report | 2026-11-02 |
 | WP-63 | Exporters | E | merged | wp/63-exporters | 2026-11-03 |
 | WP-64 | Large-trace performance pass | C | merged (partial: 4 ms LOD frame, flame-on-4-rows and WP-54 median budgets not met) | wp/64-perf-pass | 2026-11-03 |
+| WP-66 | Agent, remote and flight-recorder hardening (WP-60/61/73/QA1 follow-ups) | A | in progress | wp/66-agent-hardening | 2026-11-03 |
+| WP-67 | Viewer polish and correctness follow-ups (WP-41/48/33b/64) | C | in progress | wp/67-viewer-polish | 2026-11-03 |
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
 | WP-71 | Scheduler events | A | merged (tracepoint path verified on CI's privileged step) | wp/71-sched-events | 2026-11-02 |
