@@ -35,6 +35,7 @@ class QueryExecutor;
 
 namespace tachyon::viewer {
 
+struct StreamMailbox;     // app.cpp (WP-64)
 class CaptureController;  // capture/capture_controller.h (WP-41)
 class IProcessLauncher;   // capture/process_launcher.h (WP-41)
 
@@ -66,6 +67,15 @@ struct AppOptions {
   std::shared_ptr<IProcessLauncher> processLauncher;
   // WP-41: try to connect to a running agent at startup (silently; also needs Settings::capture.autoConnect).
   bool autoConnectAgent = true;
+  // WP-64: open big traces in stages. A file of at least `streamMinFileBytes` is loaded as previews of the
+  // fractions in `streamStages` (each shown as soon as it is ready), then in full; the complete document replaces
+  // the last preview and the timeline keeps its view. Off for small files and when `streamingLoad` is false.
+  bool streamingLoad = true;
+  uint64_t streamMinFileBytes = 64ull << 20;
+  std::vector<double> streamStages = {0.05};
+  // WP-64 (tests): called on the loading thread after each preview was published, before the next stage
+  // starts; a test blocks here to look at the preview.
+  std::function<void()> streamGate;
 };
 
 class App {
@@ -145,6 +155,7 @@ class App {
   void registerCommands();
   void onDocumentLoaded(std::shared_ptr<Document> document);
   void closeDocument();
+  void pumpStream();
   // Main-thread only. Installs a SymbolService on `document` and starts resolving; the workers report through
   // m_symbolMailbox (thread-safe), which wakes the event loop.
   void startSymbolResolution(Document& document);
@@ -179,6 +190,9 @@ class App {
   std::shared_ptr<SymbolMailbox> m_symbolMailbox;
 
   JobQueue::JobId m_openJob = 0;
+  uint64_t m_streamCounter = 0;  // WP-64: numbers the opens; documents of one open share the id
+  uint64_t m_openStream = 0;     // the stream of m_openJob
+  std::shared_ptr<StreamMailbox> m_stream;
   std::string m_lastError;
   bool m_styleDirty = true;
   bool m_quit = false;

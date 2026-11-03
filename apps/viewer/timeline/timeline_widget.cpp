@@ -211,7 +211,18 @@ void TimelineWidget::clearSelection(SelectionBus* bus) {
 
 void TimelineWidget::onDocumentChanged(const Document* document) {
   // Also when the panel is hidden and never drawn again: drop the old model, LOD and build job right away.
-  if (!document || document != m_documentPtr) resetDocument();
+  if (!document || document != m_documentPtr) {
+    m_carry.reset();
+    if (document && m_doc && m_streamId != 0 && document->streamId() == m_streamId) {
+      Carry carry;
+      carry.view = m_doc->view;
+      carry.wasFit = m_doc->view == fitView(m_doc->limits);
+      carry.flags = m_doc->flags;
+      carry.rowsScrollY = m_doc->rowsScrollY;
+      m_carry = std::move(carry);
+    }
+    resetDocument();
+  }
 }
 
 void TimelineWidget::resetDocument() {
@@ -236,6 +247,7 @@ void TimelineWidget::startDocument(const PanelContext& context) {
   resetDocument();
   m_generation = context.documentGeneration;
   m_documentPtr = context.document;
+  m_streamId = context.document->streamId();
   auto doc = std::make_unique<DocState>();
   doc->shared = std::make_shared<LodShared>(context.document->sharedModel());
   const model::TraceModel& model = *doc->shared->model;
@@ -248,6 +260,13 @@ void TimelineWidget::startDocument(const PanelContext& context) {
   doc->platform = model.header.platform;
   doc->frameTicks = buildFrameTicks(model);
   doc->flags.assign(model.threads.size(), RowFlags{});
+  if (m_carry) {  // the preview of this stream was replaced: keep the user's place
+    if (!m_carry->wasFit) doc->view = clampView(m_carry->view, doc->limits);
+    if (m_carry->flags.size() == model.threads.size()) doc->flags = m_carry->flags;
+    doc->rowsScrollY = m_carry->rowsScrollY;
+    m_pendingScrollY = m_carry->rowsScrollY;
+    m_carry.reset();
+  }
   doc->flameDepth.assign(model.threads.size(), 0);
   doc->rows.resize(model.threads.size());
   doc->hasScopes = common::traceHasScopes(model);

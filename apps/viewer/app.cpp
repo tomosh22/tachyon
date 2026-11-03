@@ -368,13 +368,16 @@ bool App::addSymbolPath(const std::filesystem::path& path, std::string& error) {
 }
 
 void App::onDocumentLoaded(std::shared_ptr<Document> document) {
+  // The complete document of a stream replaces its preview: the user's selection stays.
+  const bool continuation =
+      m_document && document->streamId() != 0 && m_document->streamId() == document->streamId();
   m_symbolMailbox.reset();
   m_document = std::move(document);
   ++m_documentGeneration;
   ++m_symbolGeneration;
   startSymbolResolution(*m_document);
   m_lastError.clear();
-  m_selection.clear();
+  if (!continuation) m_selection.clear();
   m_settings.addRecentFile(pathToUtf8(std::filesystem::absolute(m_document->path())));
   if (m_options.persist) saveSettings();
   notifyDocumentChanged();
@@ -382,6 +385,9 @@ void App::onDocumentLoaded(std::shared_ptr<Document> document) {
 
 void App::closeDocument() {
   if (!m_document) return;
+  // Closing the preview of a trace that is still loading abandons the load.
+  if (m_openJob != 0 && m_document->streamId() != 0 && m_document->streamId() == m_openStream)
+    m_jobs.cancel(m_openJob);
   m_document.reset();  // joins the symbol workers before the model can go away
   m_symbolMailbox.reset();
   ++m_documentGeneration;
@@ -390,39 +396,103 @@ void App::closeDocument() {
   notifyDocumentChanged();
 }
 
+// WP-64: the previews of a streaming load, handed from the loading job to the main thread.
+struct StreamMailbox {
+  std::mutex mutex;
+  std::shared_ptr<const model::TraceModel> preview;  // the newest preview the main thread has not taken yet
+  uint64_t stream = 0;
+  std::filesystem::path path;
+};
+
 void App::openFile(const std::filesystem::path& path) {
   if (m_openJob != 0) m_jobs.cancel(m_openJob);  // a new open supersedes the load in flight
   using Loaded = std::optional<Result<model::TraceModel>>;
   auto loaded = std::make_shared<Loaded>();
   m_lastError.clear();
   m_redrawFrames = std::max(m_redrawFrames, 3);
+  // Big files open in stages (WP-64): a preview of the first part of the capture is shown while the rest loads.
+  std::error_code sizeError;
+  const uint64_t fileBytes = std::filesystem::file_size(path, sizeError);
+  const bool streaming = m_options.streamingLoad && !sizeError && fileBytes >= m_options.streamMinFileBytes &&
+                         !m_options.streamStages.empty();
+  auto mailbox = std::make_shared<StreamMailbox>();
+  mailbox->stream = ++m_streamCounter;
+  mailbox->path = path;
+  m_stream = mailbox;
+  m_openStream = mailbox->stream;
+  const std::vector<double> stages = m_options.streamStages;
+  const std::function<void()> gate = m_options.streamGate;
   m_openJob = m_jobs.submit(
       "Loading " + pathToUtf8(path.filename()),
-      [path, loaded](JobContext& ctx) {
+      [path, loaded, mailbox, streaming, stages, gate](JobContext& ctx) {
         model::LoadOptions options;
         options.cancel = ctx.cancelFlag();
-        loaded->emplace(model::TraceModel::load(path, options, [&ctx](float f) { ctx.setProgress(f); }));
+        auto progress = [&ctx](float f) { ctx.setProgress(f); };
         // The timeline and the analysis queries need the thread state intervals (WP-31); build them while the
         // model is still mutable, before it is shared as const.
-        if (loaded->has_value() && (*loaded)->ok() && !ctx.cancelled()) {
-          const Result<void> states = analysis::buildThreadStates((*loaded)->value());
+        auto buildStates = [&ctx](model::TraceModel& m) {
+          if (ctx.cancelled()) return;
+          const Result<void> states = analysis::buildThreadStates(m);
           if (!states.ok()) TACHYON_LOG_WARN("thread states: {}", states.error().toString());
+        };
+        if (streaming) {
+          loaded->emplace(model::TraceModel::loadProgressive(
+              path, options, stages,
+              [&](model::TraceModel&& preview) {
+                buildStates(preview);
+                if (ctx.cancelled()) return;
+                auto shared = std::make_shared<const model::TraceModel>(std::move(preview));
+                {
+                  const std::lock_guard<std::mutex> lock(mailbox->mutex);
+                  mailbox->preview = std::move(shared);
+                }
+                if (gate) gate();
+              },
+              progress));
+        } else {
+          loaded->emplace(model::TraceModel::load(path, options, progress));
         }
+        if (loaded->has_value() && (*loaded)->ok()) buildStates((*loaded)->value());
       },
-      [this, path, loaded](JobQueue::JobId id, JobOutcome outcome) {
+      [this, path, loaded, mailbox](JobQueue::JobId id, JobOutcome outcome) {
         if (id != m_openJob) return;  // superseded by a newer open
         m_openJob = 0;
+        if (m_stream == mailbox) m_stream.reset();
         if (outcome == JobOutcome::Cancelled || !loaded->has_value()) return;
         Result<model::TraceModel>& r = **loaded;
         if (!r.ok()) {
           m_lastError = "Cannot open " + pathToUtf8(path) + ": " + r.error().toString();
           TACHYON_LOG_ERROR("{}", m_lastError);
+          if (m_document && m_document->streamId() == mailbox->stream) closeDocument();  // the preview of it
           toast(ToastLevel::Error, m_lastError);
           return;
         }
         auto model = std::make_shared<const model::TraceModel>(std::move(r).value());
-        onDocumentLoaded(std::make_shared<Document>(path, std::move(model)));
+        auto document = std::make_shared<Document>(path, std::move(model));
+        document->setStreamId(mailbox->stream);
+        onDocumentLoaded(std::move(document));
       });
+}
+
+// Takes the newest preview of the loading job, if any, and shows it (the complete document replaces it later).
+void App::pumpStream() {
+  if (!m_stream || m_openJob == 0) return;
+  std::shared_ptr<const model::TraceModel> preview;
+  {
+    const std::lock_guard<std::mutex> lock(m_stream->mutex);
+    preview = std::move(m_stream->preview);
+  }
+  if (!preview) return;
+  auto document = std::make_shared<Document>(m_stream->path, preview);
+  document->setStreamId(m_stream->stream);
+  onDocumentLoaded(std::move(document));
+  const model::LoadStatus& status = preview->loadStatus;
+  const double hz = static_cast<double>(std::max<uint64_t>(preview->header.clock_frequency_hz, 1));
+  char text[160];
+  std::snprintf(text, sizeof text, "Showing the first %.1f s of %.1f s while the rest of the trace loads (%.0f%%)",
+                static_cast<double>(preview->header.end_ts - preview->header.start_ts) / hz,
+                static_cast<double>(status.fullEndTs - preview->header.start_ts) / hz, status.fraction() * 100.0);
+  toast(ToastLevel::Info, text);
 }
 
 bool App::frame(int waitMs) {
@@ -431,6 +501,7 @@ bool App::frame(int waitMs) {
   if (events.hadInput) m_redrawFrames = std::max(m_redrawFrames, 3);
   for (const std::string& dropped : events.droppedFiles) openFile(pathFromUtf8(dropped));
   m_jobs.pump();
+  pumpStream();
   pumpSymbolEvents();
   m_capture->pump();
 

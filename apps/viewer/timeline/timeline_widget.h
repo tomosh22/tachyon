@@ -230,6 +230,16 @@ class TimelineWidget {
   std::unique_ptr<DocState> m_doc;
   uint64_t m_generation = 0;
   const Document* m_documentPtr = nullptr;
+  // WP-64: when a streaming preview is replaced by the complete document of the same stream, the user's place
+  // (view, row flags, scroll) carries over.
+  uint64_t m_streamId = 0;
+  struct Carry {
+    TimeView view;
+    bool wasFit = false;  // the view showed the whole preview: show the whole trace now
+    std::vector<RowFlags> flags;
+    float rowsScrollY = 0;
+  };
+  std::optional<Carry> m_carry;
 
   // Interaction state (not derived from the document).
   std::optional<TickRange> m_selection;
