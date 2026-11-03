@@ -496,6 +496,176 @@ TEST(LodSpansFixture, NarrowSpansAreMergedNotEmittedBelowOnePixel) {
   }
 }
 
+// ---- WP-36b: band and strip LOD passes against a reference built from the stored buckets ----
+// The LOD answer is defined by lod.h: bucket i of the chosen level belongs to the column containing its first
+// tick; band fractions are tick-weighted averages of the 1/255 bucket cells, the strip dominant is the
+// heaviest bucket dominant (equal stacks added up, ties to the smaller id).
+void checkLodPassesAgainstBuckets(const TraceModel& m, size_t maxThreads) {
+  auto lod = buildLod(m);
+  ASSERT_TRUE(lod.ok());
+  const auto& levels = lod->levels();
+  const uint64_t start = m.header.start_ts, end = m.header.end_ts;
+  size_t windows = 0;
+  for (size_t li = 0; li < levels.size(); ++li) {
+    const uint64_t w = levels[li].bucketWidth;
+    for (double k : {1.0, 1.4, 2.0, 2.7, 3.3, 3.9}) {
+      const uint64_t span = static_cast<uint64_t>(static_cast<double>(w) * k);
+      const uint64_t t0 = start + 3 * w + 5;
+      if (t0 >= end || (end - t0) / span < 8) continue;
+      const uint32_t px = static_cast<uint32_t>(std::min<uint64_t>(97, (end - t0) / span));
+      const uint64_t t1 = t0 + static_cast<uint64_t>(px) * span;
+      for (size_t t = 0; t < std::min(m.threads.size(), maxThreads); ++t) {
+        const ThreadIdx th(static_cast<uint32_t>(t));
+        StateBandQuery bq{th, t0, t1, px, QueryMode::Auto};
+        StateBandResult br;
+        ASSERT_TRUE(lod->stateBands(bq, br).ok());
+        SampleStripQuery sq{th, t0, t1, px, QueryMode::Auto};
+        SampleStripResult sr;
+        ASSERT_TRUE(lod->sampleStrip(sq, sr).ok());
+        if (br.level != levels[li].level) continue;  // a coarser level won: covered by its own iteration
+        ASSERT_EQ(sr.level, levels[li].level);
+        ++windows;
+        for (uint32_t c = 0; c < px; ++c) {
+          const uint64_t a = pixelEdge(t0, t1, px, c), b = pixelEdge(t0, t1, px, c + 1);
+          double run = 0, rdy = 0, wat = 0, weight = 0, cover = 0;
+          std::map<uint32_t, double> est;
+          const uint64_t first = (a - start + w - 1) / w;
+          for (uint64_t i = first; i < levels[li].bucketCount && start + i * w < b; ++i) {
+            LodBucket bk;
+            ASSERT_TRUE(lod->bucket(th, li, static_cast<uint32_t>(i), bk));
+            const double ew = static_cast<double>(std::min(w, end - (start + i * w)));
+            run += bk.running * ew;
+            rdy += bk.ready * ew;
+            wat += bk.waiting * ew;
+            weight += ew;
+            if (bk.dominant.valid()) {
+              const double cv = ew * bk.coverage;
+              cover += cv;
+              est[bk.dominant.get()] += cv * bk.share;
+            }
+          }
+          const BandColumn& col = br.columns[c];
+          ASSERT_GT(weight, 0.0);
+          double r = run / (255 * weight), y = rdy / (255 * weight), g = wat / (255 * weight);
+          const double sum = r + y + g;
+          if (sum > 1) {
+            r /= sum;
+            y /= sum;
+            g /= sum;
+          }
+          ASSERT_NEAR(col.running, r, 2e-5) << "L" << levels[li].level << " k" << k << " t" << t << " c" << c;
+          ASSERT_NEAR(col.ready, y, 2e-5) << "L" << levels[li].level << " k" << k << " t" << t << " c" << c;
+          ASSERT_NEAR(col.waiting, g, 2e-5) << "L" << levels[li].level << " k" << k << " t" << t << " c" << c;
+          const StripColumn& sc = sr.columns[c];
+          if (cover == 0) {
+            ASSERT_FALSE(sc.stack.valid());
+            continue;
+          }
+          uint32_t best = kInvalidIdx;
+          double bestEst = -1;
+          for (const auto& [stack, e] : est)
+            if (e > bestEst) {
+              bestEst = e;
+              best = stack;
+            }
+          ASSERT_EQ(sc.stack.get(), best) << "L" << levels[li].level << " k" << k << " t" << t << " c" << c;
+          ASSERT_NEAR(sc.share, std::min(1.0, bestEst / (255 * cover)), 2e-5);
+          ASSERT_NEAR(sc.coverage, std::min(1.0, cover / (255 * static_cast<double>(b - a))), 2e-5);
+        }
+      }
+    }
+  }
+  EXPECT_GT(windows, 4u);
+}
+
+TEST(LodPasses, BandAndStripMatchBucketReferenceOnTiny) {
+  checkLodPassesAgainstBuckets(fixture("tiny"), 99);
+}
+
+TEST(LodPasses, BandAndStripMatchBucketReferenceOnMedium) {
+  checkLodPassesAgainstBuckets(fixture("medium"), 3);
+}
+
+// ---- WP-36b: fine strip level ----
+TEST(LodFine, StripOfOneFineBucketPerColumnMatchesBruteForce) {
+  for (const char* name : {"tiny", "medium"}) {
+    const TraceModel& m = fixture(name);
+    auto lod = buildLod(m);
+    ASSERT_TRUE(lod.ok());
+    const uint32_t baseLevel = lod->levels().front().level;
+    ASSERT_GE(baseLevel, 1u) << name;
+    const uint64_t fineW = (64ull << baseLevel) / 2;
+    const uint64_t start = m.header.start_ts;
+    const uint32_t n = 200;
+    ASSERT_GT(m.header.end_ts - start, (n + 2) * fineW);
+    const uint64_t t0 = start + ((m.header.end_ts - start) / 3 / fineW) * fineW, t1 = t0 + n * fineW;
+    ASSERT_LT(t1, m.header.end_ts) << name;
+    size_t nonEmpty = 0;
+    for (size_t t = 0; t < std::min<size_t>(m.threads.size(), 8); ++t) {
+      const ThreadIdx th(static_cast<uint32_t>(t));
+      const auto ext = extents(m, t);
+      SampleStripQuery sq{th, t0, t1, n, QueryMode::Auto};
+      SampleStripResult r;
+      ASSERT_TRUE(lod->sampleStrip(sq, r).ok());
+      EXPECT_FALSE(r.pending);
+      EXPECT_EQ(r.level, baseLevel - 1) << name;
+      for (uint32_t c = 0; c < n; ++c) {
+        const uint64_t a = t0 + c * fineW, b = a + fineW;
+        const BruteStrip s = bruteStrip(m, ext, a, b);
+        ASSERT_EQ(r.columns[c].stack.get(), s.dominant) << name << " t" << t << " c" << c;
+        if (s.cover == 0) continue;
+        ++nonEmpty;
+        // share and coverage are stored in 1/15
+        ASSERT_NEAR(r.columns[c].share, static_cast<double>(s.domTicks) / static_cast<double>(s.cover),
+                    0.5 / 15 + 1e-4);
+        ASSERT_NEAR(r.columns[c].coverage, static_cast<double>(s.cover) / static_cast<double>(fineW),
+                    1.0 / 15 + 1e-4);
+      }
+      // Just below the fine width the exact direct path answers.
+      sq.t1 = t0 + n * (fineW - 1);
+      ASSERT_TRUE(lod->sampleStrip(sq, r).ok());
+      EXPECT_EQ(r.level, kDirectLevel);
+    }
+    EXPECT_GT(nonEmpty, 50u) << name;
+  }
+}
+
+TEST(LodFine, ThreadNotBuiltYetIsAnsweredDirectlyAndOptionsDisableTheLevel) {
+  const TraceModel& m = fixture("tiny");
+  auto prepared = TimelineLod::prepare(m);
+  ASSERT_TRUE(prepared.ok());
+  const uint32_t baseLevel = prepared->levels().front().level;
+  const uint64_t fineW = (64ull << baseLevel) / 2;
+  SampleStripQuery sq{ThreadIdx(0), m.header.start_ts + fineW, m.header.start_ts + fineW + 50 * fineW, 50,
+                      QueryMode::Auto};
+  SampleStripResult before;
+  ASSERT_TRUE(prepared->sampleStrip(sq, before).ok());
+  EXPECT_FALSE(before.pending);
+  EXPECT_EQ(before.level, kDirectLevel);
+  ASSERT_TRUE(prepared->build().ok());
+  SampleStripResult after;
+  ASSERT_TRUE(prepared->sampleStrip(sq, after).ok());
+  EXPECT_EQ(after.level, baseLevel - 1);
+
+  LodOptions off;
+  off.fineStrip = false;
+  auto without = buildLod(m, off);
+  ASSERT_TRUE(without.ok());
+  SampleStripResult r;
+  ASSERT_TRUE(without->sampleStrip(sq, r).ok());
+  EXPECT_EQ(r.level, kDirectLevel);
+  EXPECT_LT(without->memoryBytes(), prepared->memoryBytes());
+  // Both answers describe the same samples: the dominant stack agrees on most columns.
+  size_t same = 0, valid = 0;
+  for (size_t c = 0; c < r.columns.size(); ++c) {
+    if (!r.columns[c].stack.valid()) continue;
+    ++valid;
+    same += r.columns[c].stack == after.columns[c].stack;
+  }
+  EXPECT_GT(valid, 5u);
+  EXPECT_EQ(same, valid);  // one fine bucket per column: exact
+}
+
 // ---- determinism ----
 TEST(LodDeterminism, SameContentForAnyWorkerCountAndQueriesRepeat) {
   for (const char* name : {"tiny", "medium"}) {

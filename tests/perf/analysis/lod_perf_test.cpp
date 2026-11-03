@@ -1,16 +1,19 @@
-// Perf budgets (WP-36, Part 3.9): LOD build time and per-frame query CPU time.
+// Perf budgets (WP-36, WP-36b, Part 3.9): LOD build time and per-frame query CPU time.
 //
-//   medium (CI): build, and for 16 rows x (state band + sample strip + flame chart depth 1..32) at 1920 px
-//   the
-//                worst per-frame CPU over all zooms from the whole trace down to 1 ms windows must stay below
-//                the 4 ms frame budget (asserted at 2x).
-//   large (local, GTEST_SKIP when tachyon_fixtures_large was not built): build < 15 s and the worst frame
-//   over
-//                all zooms for 64 rows < 4 ms (both asserted at 2x).
+// A frame is one band + strip (+ optionally the flame chart, depth 1..32) query per row at 1920 px. Its cost
+// is the CPU time of the calling thread (testutil::currentThreadCpuNs, so a loaded machine does not matter);
+// per zoom the best of 5 repetitions is taken and the worst zoom is asserted at 2x the 4 ms budget. Wall time
+// is printed too.
+//   medium (CI): build, and the 16-row frame with and without the flame chart on every row.
+//   large (local, GTEST_SKIP when tachyon_fixtures_large was not built): build < 15 s and, for 64 rows, the
+//                band+strip frame and the frame with the flame chart on 4 rows, both over all zooms of
+//                makeZooms (the whole trace down to 1 ms plus the zooms just below and above every level
+//                width).
 //
 // Measured numbers and the LOD memory are printed.
 #include "analysis/lod.h"
 #include "analysis/thread_states.h"
+#include "thread_cpu_time.h"
 
 #include <gtest/gtest.h>
 
@@ -21,10 +24,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-
-#if defined(__unix__) || defined(__APPLE__)
-#include <time.h>
-#endif
 
 namespace tachyon::analysis {
 namespace {
@@ -41,14 +40,9 @@ double seconds(Clock::time_point a, Clock::time_point b) {
 }
 
 // CPU time of the calling thread in milliseconds (the budget is CPU per frame; this also keeps the numbers
-// stable when the machine is shared). Falls back to wall time where there is no per-thread clock.
+// stable when the machine is shared). The helper is shared with the cancellation tests (WP-QA1).
 double threadCpuMs() {
-#if defined(CLOCK_THREAD_CPUTIME_ID)
-  timespec ts;
-  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0)
-    return double(ts.tv_sec) * 1e3 + double(ts.tv_nsec) * 1e-6;
-#endif
-  return std::chrono::duration<double, std::milli>(Clock::now().time_since_epoch()).count();
+  return static_cast<double>(testutil::currentThreadCpuNs()) * 1e-6;
 }
 
 struct Buffers {
@@ -58,8 +52,10 @@ struct Buffers {
 };
 
 // One frame: every thread's row. `flameRows` threads (from the first) also get the expanded flame chart.
+// `parts` selects what is drawn per row: bit 0 state band, bit 1 sample strip (default both).
+constexpr unsigned kBand = 1, kStrip = 2, kBandStrip = 3;
 double frameMs(const TimelineLod& lod, size_t rows, size_t flameRows, uint64_t t0, uint64_t t1, Buffers& buf,
-               uint64_t& sink) {
+               uint64_t& sink, unsigned parts = kBandStrip) {
   const double start = threadCpuMs();
   for (size_t t = 0; t < rows; ++t) {
     const ThreadIdx th(static_cast<uint32_t>(t));
@@ -68,15 +64,19 @@ double frameMs(const TimelineLod& lod, size_t rows, size_t flameRows, uint64_t t
     bq.t0 = t0;
     bq.t1 = t1;
     bq.pixelWidth = kPixels;
-    (void)lod.stateBands(bq, buf.band);
+    if (parts & kBand) {
+      (void)lod.stateBands(bq, buf.band);
+      sink += static_cast<uint64_t>(buf.band.columns[7].running * 100);
+    }
     SampleStripQuery sq;
     sq.thread = th;
     sq.t0 = t0;
     sq.t1 = t1;
     sq.pixelWidth = kPixels;
-    (void)lod.sampleStrip(sq, buf.strip);
-    sink +=
-        buf.strip.columns[kPixels / 2].stack.get() + static_cast<uint64_t>(buf.band.columns[7].running * 100);
+    if (parts & kStrip) {
+      (void)lod.sampleStrip(sq, buf.strip);
+      sink += buf.strip.columns[kPixels / 2].stack.get();
+    }
     if (t < flameRows) {
       TimelineQuery tq;
       tq.thread = th;
@@ -125,21 +125,45 @@ std::vector<Zoom> makeZooms(const model::TraceModel& m, const TimelineLod& lod) 
 }
 
 struct FrameReport {
-  double worstMs = 0;
+  double worstMs = 0;      // worst zoom's best-of-reps thread CPU time
+  double worstWallMs = 0;  // wall time of that same repetition
   std::string worstLabel;
+  std::vector<std::pair<double, std::string>> perZoom;  // best-of-reps CPU ms and label of every zoom
 };
 
+// The `n` slowest zooms as "ms (label); ..." for the log.
+std::string slowest(const FrameReport& r, size_t n) {
+  auto v = r.perZoom;
+  std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+  std::string out;
+  for (size_t i = 0; i < std::min(n, v.size()); ++i) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.2f", v[i].first);
+    out += std::string(i ? "; " : "") + buf + " (" + v[i].second + ")";
+  }
+  return out;
+}
+
 FrameReport worstFrame(const TimelineLod& lod, const std::vector<Zoom>& zooms, size_t rows, size_t flameRows,
-                       int reps) {
+                       int reps, unsigned parts = kBandStrip) {
   Buffers buf;
   uint64_t sink = 0;
   FrameReport r;
   for (const Zoom& z : zooms) {
-    double best = 1e30;
-    for (int i = 0; i < reps; ++i)
-      best = std::min(best, frameMs(lod, rows, flameRows, z.t0, z.t1, buf, sink));
+    double best = 1e30, bestWall = 0;
+    for (int i = 0; i < reps; ++i) {
+      const auto w0 = Clock::now();
+      const double cpu = frameMs(lod, rows, flameRows, z.t0, z.t1, buf, sink, parts);
+      const double wall = seconds(w0, Clock::now()) * 1e3;
+      if (cpu < best) {
+        best = cpu;
+        bestWall = wall;
+      }
+    }
+    r.perZoom.emplace_back(best, z.label);
     if (best > r.worstMs) {
       r.worstMs = best;
+      r.worstWallMs = bestWall;
       r.worstLabel = z.label;
     }
   }
@@ -188,11 +212,14 @@ TEST(LodPerf, MediumBuildAndFrame) {
   const FrameReport collapsed = worstFrame(*lod, zooms, rows, 0, 5);
   const FrameReport expanded = worstFrame(*lod, zooms, rows, rows, 5);
   std::printf(
-      "[lod perf] medium: worst frame over %zu zooms, %zu rows at %u px: band+strip %.3f ms (%s); "
-      "band+strip+flame "
-      "depth 1..32 on every row %.3f ms (%s); budget %.1f ms, assert %.1f ms\n",
-      zooms.size(), rows, kPixels, collapsed.worstMs, collapsed.worstLabel.c_str(), expanded.worstMs,
-      expanded.worstLabel.c_str(), kFrameBudgetMs, kFrameBudgetMs * 2);
+      "[lod perf] medium: worst frame (best of 5 reps, thread CPU ms / wall ms) over %zu zooms, %zu rows at "
+      "%u "
+      "px: band+strip %.3f / %.3f (%s); band+strip+flame depth 1..32 on every row %.3f / %.3f (%s); budget "
+      "%.1f ms, assert %.1f ms\n",
+      zooms.size(), rows, kPixels, collapsed.worstMs, collapsed.worstWallMs, collapsed.worstLabel.c_str(),
+      expanded.worstMs, expanded.worstWallMs, expanded.worstLabel.c_str(), kFrameBudgetMs,
+      kFrameBudgetMs * 2);
+  EXPECT_LT(collapsed.worstMs, kFrameBudgetMs * 2);
   EXPECT_LT(expanded.worstMs, kFrameBudgetMs * 2);
   // Build budget: the large budget scaled by sample count (7.49 M of 299.5 M), asserted at 2x.
   const double buildBudget = kLargeBuildBudgetS * 7.49 / 299.5;
@@ -218,18 +245,40 @@ TEST(LodPerf, LargeBuildAndFrame) {
   std::printf("[lod perf] large: build budget %.1f s, assert %.1f s\n", kLargeBuildBudgetS,
               kLargeBuildBudgetS * 2);
   EXPECT_LT(buildSeconds, kLargeBuildBudgetS * 2);
+  {
+    LodOptions one;
+    one.threads = 1;
+    const auto s0 = Clock::now();
+    auto single = buildLod(m, one);
+    ASSERT_TRUE(single.ok());
+    std::printf("[lod perf] large: build with 1 worker %.3f s (informational)\n", seconds(s0, Clock::now()));
+    EXPECT_EQ(single->contentHash(), lod->contentHash());
+  }
 
   const auto zooms = makeZooms(m, *lod);
   const size_t rows = m.threads.size();
+  // Best of 5 repetitions per zoom, measured in calling-thread CPU time (robust against a loaded machine).
   const FrameReport collapsed = worstFrame(*lod, zooms, rows, 0, 5);
   const FrameReport some = worstFrame(*lod, zooms, rows, 4, 5);
-  const FrameReport all = worstFrame(*lod, zooms, rows, rows, 3);
+  const FrameReport all = worstFrame(*lod, zooms, rows, rows, 5);
   std::printf(
-      "[lod perf] large: worst frame over %zu zooms, %zu rows at %u px: band+strip %.3f ms (%s); +flame on 4 "
-      "rows "
-      "%.3f ms (%s); +flame on every row %.3f ms (%s); budget %.1f ms, assert %.1f ms\n",
-      zooms.size(), rows, kPixels, collapsed.worstMs, collapsed.worstLabel.c_str(), some.worstMs,
-      some.worstLabel.c_str(), all.worstMs, all.worstLabel.c_str(), kFrameBudgetMs, kFrameBudgetMs * 2);
+      "[lod perf] large: worst frame (best of 5 reps, thread CPU ms / wall ms) over %zu zooms, %zu rows at "
+      "%u "
+      "px: band+strip %.3f / %.3f (%s); +flame on 4 rows %.3f / %.3f (%s); +flame on every row %.3f / %.3f "
+      "(%s); budget %.1f ms, assert %.1f ms\n",
+      zooms.size(), rows, kPixels, collapsed.worstMs, collapsed.worstWallMs, collapsed.worstLabel.c_str(),
+      some.worstMs, some.worstWallMs, some.worstLabel.c_str(), all.worstMs, all.worstWallMs,
+      all.worstLabel.c_str(), kFrameBudgetMs, kFrameBudgetMs * 2);
+  std::printf("[lod perf] large: slowest band+strip zooms (thread CPU ms): %s\n",
+              slowest(collapsed, 6).c_str());
+  // Where the band+strip time goes at its worst zoom (informational).
+  {
+    const FrameReport b = worstFrame(*lod, zooms, rows, 0, 5, kBand);
+    const FrameReport st = worstFrame(*lod, zooms, rows, 0, 5, kStrip);
+    std::printf("[lod perf] large: worst frame band only %.3f ms (%s); strip only %.3f ms (%s)\n", b.worstMs,
+                b.worstLabel.c_str(), st.worstMs, st.worstLabel.c_str());
+  }
+  EXPECT_LT(collapsed.worstMs, kFrameBudgetMs * 2);
   EXPECT_LT(some.worstMs, kFrameBudgetMs * 2);
 }
 

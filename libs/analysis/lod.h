@@ -33,6 +33,15 @@
 //   a bucket has <= maxStacksPerBucket distinct leaves (otherwise the lightest are dropped while merging
 //   levels), LCA and depth are always exact.
 //
+// Fine strip level (WP-36b). Scanning the raw samples of a pixel costs O(samples per pixel), which at a pixel
+// just under the base width is ~6 samples per column and too slow for 64 rows in a 4 ms frame. For
+// auto-chosen base levels the build therefore also stores, per bucket of half the base width (level L_base -
+// 1), only the sample strip data, packed into 32 bits (24-bit dominant leaf, 4-bit share, 4-bit coverage,
+// both in 1/15); 4 B per half bucket, i.e. 8 B per base bucket. sampleStrip() uses it, like a stored level,
+// for pixel spans in [half base width, base width) in Auto mode (its result level is L_base - 1, which
+// levels() does not list). Band and flame chart do not use it (the direct band path is cheap; the flame is
+// drawn for few rows).
+//
 // Level selection: the query level is the coarsest stored level whose bucket width is <= the tick span of
 // one pixel ((t1 - t0) / P). When even the base level is wider than a pixel the answer is computed directly
 // from statesByThread / the sample arrays (binary search + one sweep over the window), which is exact and
@@ -92,6 +101,11 @@ struct LodOptions {
   uint32_t levelStep = 2;
   // Distinct leaf stacks kept per bucket while merging levels (exact below this).
   uint32_t maxStacksPerBucket = 32;
+  // Store the fine strip level (see the header comment): the sample strip of pixel spans between half the
+  // base width and the base width is answered from half-width buckets instead of scanning the raw samples.
+  // Ignored (no fine level) when forceBaseLevel is set, the base level is L0 or the model has 2^24 callstack
+  // nodes.
+  bool fineStrip = true;
 };
 
 enum class QueryMode : uint8_t {
