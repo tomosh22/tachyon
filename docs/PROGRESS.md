@@ -30,7 +30,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-33b | Subtree path filter; bottomUp/topDown frameless consistency | C | merged (verifier PASS) | wp/33b-subtree-path | 2026-11-03 |
-| WP-41b | Elevated agent (pkexec/sudo) usable by the invoking user | A | not started | wp/41b-elevated-agent | |
+| WP-41b | Elevated agent (pkexec/sudo) usable by the invoking user | A | in progress (with WP-61) | wp/61-remote-capture | 2026-11-03 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | merged (partial: target carried to WP-64) | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | merged (verifier PASS) | wp/41-session-explorer | 2026-11-03 |
