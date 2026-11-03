@@ -70,6 +70,8 @@ void CallGraphPanel::resetDocumentState() {
   m_firstTree = true;
   m_truncated = false;
   m_message.clear();
+  m_notice.clear();
+  m_noticeArmed = false;
   m_selectionBeyondCap = false;
   m_drawnRows.clear();
   m_haveDocument = false;
@@ -114,7 +116,11 @@ void CallGraphPanel::dropStaleSubtreePath(const PanelContext& context) {
       o.groupByFiber == scope.groupByFiber)
     return;
   clearSubtreeFilter(context);
-  m_message = "Subtree filter cleared: the frame options changed.";
+  // A notice, not an error: it survives the query results that follow until the user changes the filter
+  // again (the re-query this drop itself triggers does not count).
+  m_notice = "Subtree filter cleared: the frame options changed.";
+  m_noticeArmed = true;
+  m_message = m_notice;
 }
 
 CallGraphPanel::QuerySpec CallGraphPanel::currentSpec(const PanelContext& context) const {
@@ -185,7 +191,7 @@ void CallGraphPanel::update(const PanelContext& context) {
                          m_shown.groupByFiber != m_requested.groupByFiber ||
                          m_shown.symbolGeneration != m_requested.symbolGeneration;  // keys changed: ids too
       m_shown = m_requested;
-      m_message.clear();
+      m_message = m_notice;
       applyTree(result->value(), m_pendingSnapshot, m_pendingClockHz, reset);
     } else {
       m_message = "Query failed: " + result->error().toString();
@@ -207,6 +213,10 @@ void CallGraphPanel::update(const PanelContext& context) {
     if (defer) {
       context.requestRedraw();
     } else {
+      if (m_noticeArmed)
+        m_noticeArmed = false;
+      else
+        m_notice.clear();
       issue(context, spec);
     }
   }
@@ -408,6 +418,8 @@ bool CallGraphPanel::filterToSubtree(const PanelContext& context, const ActionTa
                                               m_shown.groupByFiber};
   filter.subtreeLabel = target.fullName;
   m_message.clear();
+  m_notice.clear();
+  m_noticeArmed = false;
   context.selection->setTimeFilter(filter);
   return true;
 }

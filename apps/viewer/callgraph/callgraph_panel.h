@@ -173,6 +173,8 @@ class CallGraphPanel final : public IPanel {
   bool m_haveDocument = false;
   double m_pendingClockHz = 1e9;
   std::string m_message;
+  std::string m_notice;        // shown instead of an empty message until the next filter change
+  bool m_noticeArmed = false;  // the re-query caused by the notice's own filter change does not clear it
 
   std::shared_ptr<const analysis::NodeAgg> m_tree;
   double m_clockHz = 1e9;

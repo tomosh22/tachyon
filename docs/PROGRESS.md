@@ -29,7 +29,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-34 | Line/instruction attribution, disassembly | C | merged (WP-34b merged; WP-34c call-site field) | wp/34-lines-disasm | 2026-10-25 |
 | WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
-| WP-33b | Subtree path filter; bottomUp/topDown frameless consistency | C | in progress | wp/33b-subtree-path | 2026-11-03 |
+| WP-33b | Subtree path filter; bottomUp/topDown frameless consistency | C | merged (verifier PASS) | wp/33b-subtree-path | 2026-11-03 |
 | WP-41b | Elevated agent (pkexec/sudo) usable by the invoking user | A | not started | wp/41b-elevated-agent | |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | merged (partial: target carried to WP-64) | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
@@ -225,6 +225,10 @@ Verifier PASS. Run→capture→stop→auto-open with the real agent (`--backend 
 ## WP-36b notes
 
 Orchestrator review. Column-wise band pass (one write per column) and a fine strip level for pixel spans in [base/2, base); perf test uses thread CPU time, best of 5 per zoom. Dev VM (interleaved A/B, large, 1920 px, thread CPU): 64-row band+strip worst 7.3–12.2 → 5.3–6.6 ms; +flame on 4 rows 7.5–11.3 → 5.0–5.7 ms; medium band+strip CI 1.62 → 0.82 ms; medium flame on every row CI 4.98 → 3.68 ms; viewer TimelinePerf medium ×4 CI 4.19/4.50 → 2.77/2.97 ms. Costs: 3.34 → 4.59 B/sample (+37%, over the +25% allowance; accepted because it removes the raw-sample scan that was the worst zoom; `fineStrip=false` disables it), large build 4 workers 3.1–3.5 → 3.8–4.9 s. Strip answers in [base/2, base) are now approximate (documented in lod.h and the spec).
+
+## WP-33b notes
+
+Verifier PASS. Call Graph "Filter to subtree" now filters by the key path, so a function reached via several callstack nodes keeps its full time (acceptance test on medium); the main-thread subtree resolver is gone. bottomUp has a "<no stack>" row, so Function List totals equal the Call Graph root in all 6 modes. Cost of a path vs a root filter on medium (7.5 M samples): cold 0.89–1.03×, warm within 0.1 ms. Pie chart has a "self" slice; a selected row beyond the 100k-row cap is reported. Orchestrator fix: the "Subtree filter cleared" notice was wiped by the next query result (test failed 2/20); it now persists until the next filter change (40/40). Follow-ups: `NodeChildIndex`/`AnalysisContext::childIndex()` are dead code; selecting "<no stack>" in the Function List may show no butterfly (butterfly_panel.cpp resets kRootKey); lines/instructions path matching is O(depth) per node, not memoized; the SubtreePath perf test uses small subtrees.
 
 ## Queued follow-ups
 
