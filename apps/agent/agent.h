@@ -81,6 +81,9 @@ struct AgentConfig {
   std::string backendName;   // reported by status
   std::string agentAddress;  // used to derive instrumentation addresses for inst_hello
   bool elevated = false;     // reported by status
+  // WP-41b: owner of the per-process SDK sockets created for inst_hello (the control socket is handled by
+  // listenOn). Unset: the agent's own user.
+  control::SocketOwner socketOwner;
 
   // Instrumentation ingestion (WP-52).
   // Per-process spool cap in bytes; frames past it are dropped and reported as tachyon.dropped markers.

@@ -2,7 +2,7 @@
 # WP-73: the Unix socket path of the SDK against a real agent process (Linux only).
 set(TACHYON_SDK_SOCKET_TEST "")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set(TACHYON_SDK_SOCKET_TEST sdk_socket_linux_test.cpp)
+  set(TACHYON_SDK_SOCKET_TEST sdk_socket_linux_test.cpp socket_owner_linux_test.cpp)
 endif()
 tachyon_add_test(inst_integration_tests
   SOURCES testbed_ingest_test.cpp flight_recorder_mock_test.cpp ../../unit/agent/process_util.cpp

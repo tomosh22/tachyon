@@ -272,7 +272,11 @@ std::string instrumentationAddress(const std::string& agentAddress, uint32_t pid
   return R"(\\.\pipe\tachyon-inst-)" + std::to_string(pid);
 }
 
-Result<std::unique_ptr<IListener>> listenOn(const std::string& address) {
+Result<void> applySocketOwner(const std::string&, const SocketOwner&) {
+  return ok();  // the pipe DACL already admits the invoking user
+}
+
+Result<std::unique_ptr<IListener>> listenOn(const std::string& address, const SocketOwner&) {
   auto security = std::make_unique<PipeSecurity>();
   if (!security->init()) return winError(ErrorCode::IoError, "building the pipe security descriptor");
   HANDLE h = createInstance(address, true, *security);

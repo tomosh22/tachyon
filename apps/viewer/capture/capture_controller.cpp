@@ -18,6 +18,10 @@
 #include <memory>
 #include <optional>
 
+#if !TACHYON_PLATFORM_WINDOWS
+#include <unistd.h>
+#endif
+
 namespace tachyon::viewer {
 
 using capture_ui::inputString;
@@ -54,6 +58,13 @@ AgentLaunchPlan planAgentLaunch(const CaptureSettings& settings, const std::file
         viewerExe.parent_path() / (TACHYON_PLATFORM_WINDOWS ? "tachyon-agent.exe" : "tachyon-agent");
   }
   plan.spec.args = {"--backend", plan.backend, TACHYON_PLATFORM_WINDOWS ? "--pipe" : "--socket", address};
+#if !TACHYON_PLATFORM_WINDOWS
+  // pkexec runs the agent as root: it must hand its sockets to the user who is starting it (WP-41b).
+  if (elevate) {
+    plan.spec.args.push_back("--socket-owner");
+    plan.spec.args.push_back(std::to_string(static_cast<unsigned long>(::getuid())));
+  }
+#endif
   plan.spec.args.insert(plan.spec.args.end(), settings.agentArgs.begin(), settings.agentArgs.end());
   plan.spec.elevate = elevate;
   plan.spec.description = "the capture agent";
@@ -191,9 +202,10 @@ void CaptureController::handleEvent(const AgentEvent& e) {
     case AgentEventKind::ConnectFailed:
       if (e.userInitiated) {
         std::string text = e.message;
-        // An agent started as another user (pkexec / sudo) creates a socket this user cannot open.
+        // An agent started as root outside pkexec / sudo (a service, su) creates a socket this user cannot
+        // open; the viewer's own pkexec launch and sudo hand the socket over (--socket-owner).
         if (text.find("ermission denied") != std::string::npos || text.find("ACCES") != std::string::npos)
-          text += " (the agent runs as another user and its socket is not accessible to you)";
+          text += " (the agent runs as another user; start it with --socket-owner <your uid>)";
         toast(ToastLevel::Warning, std::move(text));
       }
       break;

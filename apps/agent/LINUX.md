@@ -123,15 +123,25 @@ CLI. The path must be shorter than 108 bytes.
 
 * The socket file is created with mode `0600`, owned by the agent's user. Put it in a private directory (`0700`)
   when the machine is shared: `/tmp` is not private.
+* **An agent running as root for another user** (the viewer's "Start with pkexec", `sudo tachyon-agent`) hands the
+  control socket and every per-process SDK socket to that user with `chown` and leaves the modes at `0600`, so
+  the unprivileged viewer, CLI and instrumented programs can connect and nobody else can. The user is, in this
+  order: `--socket-owner UID` (the viewer passes its own uid), `$PKEXEC_UID`, `$SUDO_UID` (only honoured when
+  the agent's effective uid is 0; uid 0 is never accepted). The group is the user's primary group from the
+  account database. Run the agent with `--socket`/`TACHYON_AGENT_PIPE` pointing into a directory that user can
+  enter (the default path of a root process is `/run/user/0/...`, which the user cannot). An agent started as
+  root by other means (a service, `su`) has no invoking user: pass `--socket-owner`, otherwise the socket stays
+  root's and the viewer reports "permission denied".
 * An SDK client sends `inst_hello` with its pid on the control socket; the agent answers with a per-process
   socket `tachyon-inst-<pid>.sock` in the same directory (also `0600`), which the SDK then streams to.
   The agent checks the connecting process with `SO_PEERCRED`: the peer pid has to be the pid of the `inst_hello`,
   or the connection is dropped and counted as refused in the capture's warnings.
 * `inst_hello` is answered only while a capture is starting or running, and only for processes that belong to it
   (the launched or attached process; any pid in a system capture; descendants with `--follow-children`).
-* The SDK and the agent therefore have to run as the same user. A program started by `sudo tachyon-agent` runs as
-  root and cannot talk to a socket of another user; a program started under another account cannot talk to this
-  agent. Use `setcap` so that the agent and the program share the user.
+* The SDK and the agent therefore have to run as the same user, or the agent has to hand its sockets to the
+  SDK's user (`--socket-owner`, above). A program started under a third account cannot talk to this agent. With
+  `sudo tachyon-agent` and a *launched* program, the program also runs as root; prefer `setcap` when the agent
+  launches programs.
 * Without a reachable agent the SDK writes a sidecar file `<exe>-<pid>.tachyon-inst` in the current directory (set
   `TACHYON_SIDECAR=off` to disable it, or a path to choose it). `tachyon-cli merge` adds it to a trace afterwards.
   A capture that shows no scopes while the program was instrumented usually means the SDK never reached the

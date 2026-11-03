@@ -151,7 +151,17 @@ std::string instrumentationAddress(const std::string& agentAddress, uint32_t pid
   return (dir / ("tachyon-inst-" + std::to_string(pid) + ".sock")).string();
 }
 
-Result<std::unique_ptr<IListener>> listenOn(const std::string& address) {
+Result<void> applySocketOwner(const std::string& path, const SocketOwner& owner) {
+  if (!owner.set()) return ok();
+  const uid_t uid = static_cast<uid_t>(owner.uid);
+  const gid_t gid = owner.gid >= 0 ? static_cast<gid_t>(owner.gid) : static_cast<gid_t>(-1);
+  if (::chown(path.c_str(), uid, gid) < 0)
+    return sysError(errno == EPERM ? ErrorCode::NoPrivilege : ErrorCode::IoError,
+                    "chown " + path + " to uid " + std::to_string(owner.uid));
+  return ok();
+}
+
+Result<std::unique_ptr<IListener>> listenOn(const std::string& address, const SocketOwner& owner) {
   auto addr = makeAddr(address);
   if (!addr.ok()) return std::move(addr).error();
 
@@ -168,6 +178,12 @@ Result<std::unique_ptr<IListener>> listenOn(const std::string& address) {
   if (br < 0) {
     Error e = sysError(ErrorCode::IoError, "bind " + address);
     ::close(fd);
+    return e;
+  }
+  if (auto given = applySocketOwner(address, owner); !given.ok()) {
+    Error e = given.error();
+    ::close(fd);
+    ::unlink(address.c_str());
     return e;
   }
   if (::listen(fd, 16) < 0) {

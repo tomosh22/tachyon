@@ -21,6 +21,10 @@
 #include <thread>
 #include <vector>
 
+#if !TACHYON_PLATFORM_WINDOWS
+#include <unistd.h>
+#endif
+
 #if TACHYON_PLATFORM_WINDOWS
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -74,13 +78,16 @@ void installSignalHandlers() {
 void printUsage() {
   std::fprintf(
       stderr,
-      "usage: tachyon-agent [--backend mock|etw|perf] [--socket PATH | --pipe NAME]\n"
+      "usage: tachyon-agent [--backend mock|etw|perf] [--socket PATH | --pipe NAME] [--socket-owner UID]\n"
       "                     [--log-level trace|debug|info|warn|error]\n"
       "                     [--mock-fixture FILE] [--mock-duration-ms N] [--mock-steps N] "
       "[--etw-delete-raw] [--perf-delete-raw] [--perf-ring-pages N]\n"
       "                     [--inst-spool-mb N] [--inst-spool-dir DIR] [--keep-inst-spool]\n"
       "                     [--flush-seconds N] [--flush-coalesce-ms N] [--ring-min-mb N]\n"
-      "The address defaults to $TACHYON_AGENT_PIPE or the platform default. The mock backend copies\n"
+      "The address defaults to $TACHYON_AGENT_PIPE or the platform default. An agent running as root on\n"
+      "behalf of another user (started through pkexec or sudo: $PKEXEC_UID / $SUDO_UID, or --socket-owner "
+      "UID)\n"
+      "hands its control socket and the SDK sockets to that user (modes stay 0600). The mock backend copies\n"
       "$TACHYON_MOCK_FIXTURE (or --mock-fixture) to the requested output path. The etw backend keeps the\n"
       "raw <out>.etl next to the trace unless --etw-delete-raw is given. The perf backend (Linux) keeps its "
       "raw\n"
@@ -115,6 +122,7 @@ struct Options {
   long flushSeconds = 10;
   long flushCoalesceMs = 2000;
   long ringMinMb = 64;
+  std::string socketOwner;
   bool help = false;
 };
 
@@ -134,6 +142,8 @@ bool parseArgs(int argc, char** argv, Options& o) {
       if (!value(o.backend)) return false;
     } else if (a == "--socket" || a == "--pipe") {
       if (!value(o.address)) return false;
+    } else if (a == "--socket-owner") {
+      if (!value(o.socketOwner)) return false;
     } else if (a == "--log-level") {
       if (!value(o.logLevel)) return false;
     } else if (a == "--etw-delete-raw") {
@@ -268,7 +278,32 @@ int main(int argc, char** argv) {
   }
 
   const std::string address = !opt.address.empty() ? opt.address : control::defaultAgentAddress();
-  auto listener = control::listenOn(address);
+
+  // WP-41b: an agent started with elevated rights for another user (pkexec, sudo, or --socket-owner) hands
+  // its sockets to that user; the modes stay owner-only.
+  control::SocketOwner socketOwner;
+  {
+    uint32_t ownerUid = 0;
+    bool have = false;
+    if (!opt.socketOwner.empty()) {
+      if (!agent::parseSocketOwnerUid(opt.socketOwner, ownerUid)) {
+        std::fprintf(stderr, "tachyon-agent: bad --socket-owner '%s' (expected a non-zero numeric uid)\n",
+                     opt.socketOwner.c_str());
+        return kExitUsage;
+      }
+      have = true;
+    } else {
+#if !TACHYON_PLATFORM_WINDOWS
+      have = agent::socketOwnerFromEnvironment(geteuid() == 0, std::getenv("PKEXEC_UID"),
+                                               std::getenv("SUDO_UID"), ownerUid);
+#endif
+    }
+    if (have) {
+      socketOwner = agent::socketOwnerForUid(ownerUid);
+      TACHYON_LOG_INFO("agent: sockets will belong to uid {}", ownerUid);
+    }
+  }
+  auto listener = control::listenOn(address, socketOwner);
   if (!listener.ok()) {
     TACHYON_LOG_ERROR("agent: cannot listen on {}: {}", address, listener.error().toString());
     return kExitFatal;
@@ -278,6 +313,7 @@ int main(int argc, char** argv) {
   cfg.backendName = opt.backend;
   cfg.agentAddress = address;
   cfg.elevated = elevated;
+  cfg.socketOwner = socketOwner;
   cfg.maxInstSpoolBytes = static_cast<uint64_t>(opt.instSpoolMb) << 20;
   cfg.instSpoolRoot = opt.instSpoolDir;
   cfg.keepInstSpool = opt.keepInstSpool;

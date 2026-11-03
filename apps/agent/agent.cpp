@@ -685,6 +685,9 @@ Response Agent::handleInstHello(const InstHelloRequest& req) {
   body.pipe = instrumentationAddress(m_config.agentAddress, req.pid);
   // The listener must exist before the client is told where to connect.
   auto attached = ingest->attach(req.pid, body.pipe);
+  // The socket is 0600 and owned by the agent's user; for an agent running on behalf of another user it is
+  // handed over before the client learns its address (WP-41b).
+  if (attached.ok()) attached = applySocketOwner(body.pipe, m_config.socketOwner);
   if (!attached.ok()) {
     TACHYON_LOG_WARN("agent: inst_hello from pid {}: {}", req.pid, attached.error().toString());
     return makeErrorResponse(std::nullopt, attached.error());
