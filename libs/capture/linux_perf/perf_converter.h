@@ -83,6 +83,7 @@ struct ConvertStats {
   uint64_t schedDroppedNotTarget = 0;
   uint64_t schedDroppedWindow = 0;
   uint64_t schedMalformed = 0;
+  uint64_t schedUnnamed = 0;  // switch records dropped: the task's tid was the kernel's -1 (exiting task)
   uint64_t framesTotal = 0;
   uint64_t framesUnmapped = 0;  // user frames outside every file mapping (absolute)
   uint64_t framesKernel = 0;

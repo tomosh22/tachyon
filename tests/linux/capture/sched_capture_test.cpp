@@ -190,6 +190,27 @@ bool stackTouchesModule(const model::TraceModel& m, CallstackIdx leaf, const std
   return false;
 }
 
+// Each live thread has one record, none for the kernel's unnamed tid, and a lock thread is never in an
+// Unknown state once it exists (the Unknown span before its creation is the binding "Unknown from trace
+// start" rule).
+void expectCleanThreadRecords(const Loaded& l, const std::map<uint32_t, size_t>& locks, bool checkUnknown) {
+  std::map<uint32_t, int> count;
+  for (const auto& th : l.model.threads) ++count[th.tid];
+  for (const auto& [tid, n] : count)
+    if (n > 1) ADD_FAILURE() << "tid " << tid << " has " << n << " thread records";
+  EXPECT_EQ(count.count(0xFFFFFFFFu), 0u);
+  for (const auto& [tid, thread] : locks) {
+    if (!checkUnknown) break;
+    const uint64_t born = l.model.threads[thread].first_ts;
+    uint64_t unknownAfterStart = 0;
+    for (const auto& iv : l.model.statesByThread[thread])
+      if (iv.state == ThreadState::Unknown && iv.end > born)
+        unknownAfterStart += iv.end - std::max(iv.start, born);
+    EXPECT_LT(unknownAfterStart, 1'000'000u)
+        << "tid " << tid << ": " << unknownAfterStart << " ns Unknown after the thread started";
+  }
+}
+
 class SchedCapture : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -316,6 +337,7 @@ TEST_F(SchedTracepointCapture, LockScenarioWaitersAreWokenByTheHolderSystemWide)
   ASSERT_FALSE(l.model.threads.empty());
   const auto locks = lockThreads(l);
   ASSERT_EQ(locks.size(), 2u) << "the two tb-lock threads are in the trace";
+  expectCleanThreadRecords(l, locks, /*checkUnknown=*/true);
   for (size_t t = 0; t < l.model.threads.size(); ++t) {
     const auto& th = l.model.threads[t];
     if (th.pid != l.pid) continue;
@@ -434,6 +456,7 @@ TEST_F(SchedCapture, FallbackRecordsSwitchesWithoutWaitReasonsOrWakers) {
   Loaded l = loadWithStates(o.outPath, pid);
   const auto locks = lockThreads(l);
   ASSERT_EQ(locks.size(), 2u);
+  expectCleanThreadRecords(l, locks, /*checkUnknown=*/false);
   uint64_t waiting = 0, ready = 0, waitReasons = 0, wakers = 0, stacks = 0;
   for (const auto& [tid, thread] : locks) {
     const Intervals iv = count(l, thread);

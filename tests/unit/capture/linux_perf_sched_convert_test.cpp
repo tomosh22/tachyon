@@ -100,7 +100,7 @@ class SchedSpool {
     }
   }
 
-  RecordBuilder& meta() { return builder(m_meta, 0); }
+  RecordBuilder& meta(uint32_t ring = 0) { return builder(m_meta, ring); }
   RecordBuilder& data(uint32_t ring = 0) { return builder(m_data, ring); }
   SessionInfo& info() { return m_info; }
   fs::path out() const { return m_dir.path() / "out.tachyon"; }
@@ -461,6 +461,116 @@ TEST(SchedConvert, AnEventMergedAheadOfItsThreadsForkDoesNotSplitTheThreadRecord
   EXPECT_TRUE(waiting);
 }
 
+// The kernel's cpu-wide records for one switch A -> B on a cpu: a switch-out record made by A (tid A, next B)
+void cpuWideSwitch(SchedSpool& f, uint32_t ring, uint64_t t, uint32_t cpu, uint32_t fromPid, uint32_t fromTid,
+                   uint32_t toPid, uint32_t toTid, bool preempt = false, bool withOutRecord = true) {
+  if (withOutRecord)
+    f.data(ring).switchCpuWide(true, toPid, toTid, SchedSpool::id(fromPid, fromTid, t, cpu), preempt);
+  f.data(ring).switchCpuWide(false, fromPid, fromTid, SchedSpool::id(toPid, toTid, t + 5, cpu));
+}
+
+// One ThreadRec per tid, and no thread for the kernel's "unhashed task" tid.
+void expectOneRecordPerTid(const model::TraceModel& m) {
+  std::map<uint32_t, int> count;
+  for (const auto& t : m.threads) ++count[t.tid];
+  for (const auto& [tid, n] : count) EXPECT_EQ(n, 1) << "tid " << tid << " has " << n << " thread records";
+  EXPECT_EQ(count.count(0xFFFFFFFFu), 0u) << "no thread for the unnamed tid";
+}
+
+TEST(SchedConvert, EventsAfterAnExitRecordStayWithTheExitedThread) {
+  SchedSpool f("tracepoint");
+  f.processes();
+  f.switchSample(kHolder, kWaiter, kStart + 1000, 1, kWaiter, 1, 0);
+  f.wakeSample(kHolder, kHolder, kStart + 2000, 0, kWaiter, 1);
+  f.switchSample(0, 0, kStart + 2100, 1, 0, 0, kWaiter, {kContextKernel, kKernelA});
+  f.meta().exit(kHolder, kHolder, kWaiter, kHolder, kStart + 3000,
+                SchedSpool::id(kHolder, kWaiter, kStart + 3000));
+  // After the EXIT record: a wakeup by the dying task, and its final switch-out, which the kernel reports
+  // with the tid -1 of a task that is no longer pid_alive (prev_pid in the payload still names it).
+  f.wakeSample(kHolder, kWaiter, kStart + 3010, 1, kHolder, 0);
+  f.switchSample(kHolder, 0xFFFFFFFFu, kStart + 3020, 1, kWaiter, 0x10, 0);
+  ASSERT_TRUE(convertSpool(f.build(), f.out(), target(kHolder)).ok());
+  Built b = loadModel(f.out());
+  expectOneRecordPerTid(b.model);
+  auto reader = trace::TraceReader::open(f.out());
+  auto sw = reader->readContextSwitches();
+  ASSERT_TRUE(sw.ok());
+  bool sawExit = false;
+  for (const auto& c : *sw) {
+    EXPECT_NE(c.old_tid, 0xFFFFFFFFu);
+    EXPECT_NE(c.new_tid, 0xFFFFFFFFu);
+    sawExit |= c.old_tid == kWaiter && c.old_state == 4;
+  }
+  EXPECT_TRUE(sawExit) << "the final switch-out is attributed to prev_pid";
+  auto rd = reader->readReadyEvents();
+  ASSERT_TRUE(rd.ok());
+  for (const auto& r : *rd) {
+    EXPECT_NE(r.readying_tid, 0xFFFFFFFFu);
+    EXPECT_NE(r.readied_tid, 0xFFFFFFFFu);
+  }
+  const auto& st = statesOf(b.model, kWaiter);
+  ASSERT_FALSE(st.empty());
+  bool waiting = false;
+  for (const auto& iv : st) waiting |= iv.state == ThreadState::Waiting;
+  EXPECT_TRUE(waiting) << "the thread's states are not lost to a second record";
+}
+
+TEST(SchedConvert, ACpuClockSampleAfterTheExitRecordDoesNotCreateAThread) {
+  SchedSpool f("tracepoint");
+  f.processes();
+  f.meta().exit(kHolder, kHolder, kWaiter, kHolder, kStart + 3000,
+                SchedSpool::id(kHolder, kWaiter, kStart + 3000));
+  RecordBuilder::Sample s;
+  s.misc = kMiscUser;
+  s.id = SchedSpool::id(kHolder, kWaiter, kStart + 3005, 1);
+  s.chain = {kContextUser, kUserMain};
+  s.ip = kUserMain;
+  f.data().sample(s);
+  s.id = SchedSpool::id(kHolder, 0xFFFFFFFFu, kStart + 3006, 1);  // an unnamed task: dropped
+  f.data().sample(s);
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->samplesWritten, 1u);
+  Built b = loadModel(f.out());
+  expectOneRecordPerTid(b.model);
+}
+
+TEST(SchedConvert, ADuplicateForkFromAnotherRingDoesNotCreateAThread) {
+  SchedSpool f("tracepoint");
+  f.meta().fork(kHolder, 1, kHolder, 1, kStart + 10, SchedSpool::id(1, 1, kStart + 10));
+  f.meta().fork(kHolder, kHolder, kWaiter, kHolder, kStart + 1000,
+                SchedSpool::id(kHolder, kHolder, kStart + 1000));
+  f.meta(1).fork(kHolder, kHolder, kWaiter, kHolder, kStart + 1001,
+                 SchedSpool::id(kHolder, kHolder, kStart + 1001));
+  f.meta(1).fork(kHolder, 1, kHolder, 1, kStart + 11, SchedSpool::id(1, 1, kStart + 11));  // the process too
+  f.switchSample(kHolder, kWaiter, kStart + 2000, 1, kWaiter, 1, 0);
+  ASSERT_TRUE(convertSpool(f.build(), f.out(), target(kHolder)).ok());
+  Built b = loadModel(f.out());
+  expectOneRecordPerTid(b.model);
+  EXPECT_EQ(b.model.processes.size(), 1u);
+}
+
+TEST(SchedConvert, CpuWideSwitchOutOfAnUnnamedTaskIsAttributedToTheLastRunningThread) {
+  SchedSpool f("context_switch");
+  f.processes();
+  cpuWideSwitch(f, 1, kStart + 1000, 1, 0, 0, kHolder, kWaiter, false, false);  // the waiter gets cpu 1
+  // The waiter exits: its switch-out record has the tid -1.
+  f.data(1).switchCpuWide(true, 0, 0, SchedSpool::id(kHolder, 0xFFFFFFFFu, kStart + 2000, 1));
+  f.data(1).switchCpuWide(false, kHolder, kWaiter, SchedSpool::id(0, 0, kStart + 2005, 1));
+  ASSERT_TRUE(convertSpool(f.build(), f.out(), target(kHolder)).ok());
+  auto reader = trace::TraceReader::open(f.out());
+  auto sw = reader->readContextSwitches();
+  ASSERT_TRUE(sw.ok());
+  ASSERT_EQ(sw->size(), 2u);
+  EXPECT_EQ((*sw)[1].old_tid, kWaiter);
+  for (const auto& c : *sw) {
+    EXPECT_NE(c.old_tid, 0xFFFFFFFFu);
+    EXPECT_NE(c.new_tid, 0xFFFFFFFFu);
+  }
+  Built b = loadModel(f.out());
+  expectOneRecordPerTid(b.model);
+}
+
 TEST(SchedConvert, WindowDropsOlderSchedulerEvents) {
   SchedSpool f("tracepoint");
   lockStream(f);
@@ -489,15 +599,6 @@ TEST(SchedConvert, UnusableFormatInTheSpoolIsReportedAndSkipsThoseEvents) {
 
 // ---------------------------------------------------------------------------------------------------------
 // the PERF_RECORD_SWITCH fallback
-
-// The kernel's cpu-wide records for one switch A -> B on a cpu: a switch-out record made by A (tid A, next B)
-// and a switch-in record made by B (tid B, prev A). No switch-out record is emitted for the idle task.
-void cpuWideSwitch(SchedSpool& f, uint32_t ring, uint64_t t, uint32_t cpu, uint32_t fromPid, uint32_t fromTid,
-                   uint32_t toPid, uint32_t toTid, bool preempt = false, bool withOutRecord = true) {
-  if (withOutRecord)
-    f.data(ring).switchCpuWide(true, toPid, toTid, SchedSpool::id(fromPid, fromTid, t, cpu), preempt);
-  f.data(ring).switchCpuWide(false, fromPid, fromTid, SchedSpool::id(toPid, toTid, t + 5, cpu));
-}
 
 TEST(SchedConvert, FallbackCpuWideSwitchesUsePreemptFlagForReadyAndWaiting) {
   SchedSpool f("context_switch");

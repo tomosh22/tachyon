@@ -19,6 +19,7 @@
 #include <optional>
 #include <queue>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 
 namespace tachyon::capture::perf {
@@ -34,6 +35,9 @@ constexpr uint32_t kNone = 0xFFFFFFFFu;
 constexpr size_t kSampleFlushCount = 262144;
 constexpr const char* kConverterVersion = "1";
 constexpr int kMaxAncestors = 64;
+// The kernel reports (pid_t)-1 as the tid of a task that is no longer pid_alive (its final switch-out,
+// wakeups in exit_notify): not a thread that can be named.
+constexpr uint32_t kBadTid = 0xFFFFFFFFu;
 
 uint64_t alignDown(uint64_t v) {
   return v & ~(kPageSize - 1);
@@ -339,6 +343,21 @@ class Converter {
   std::unordered_map<uint32_t, uint32_t> m_pidToProc;
   std::vector<Thr> m_threads;
   std::unordered_map<uint32_t, uint32_t> m_tidToThread;  // live threads
+  // Threads whose EXIT record was seen, kept reachable until the tid is reused by a FORK: the kernel emits
+  // events of a dying task (its wakeups in exit_notify, its last switch-out, cpu-clock samples) after the
+  // EXIT record, and they belong to its record, not to a new one.
+  std::unordered_map<uint32_t, uint32_t> m_exitedTid;
+  std::set<std::tuple<uint32_t, uint32_t, uint64_t>> m_forkSeen;  // (pid, tid, time) of FORK records applied
+  // Per cpu, the task that last got the cpu (SWITCH_CPU_WIDE fallback): stands in for a switch-out record
+  // whose own tid is unusable.
+  std::unordered_map<uint32_t, uint32_t> m_cpuRunning;
+  // The thread record of a tid: the live one, else the exited one; -1 when unknown.
+  int64_t findThread(uint32_t tid) const {
+    auto it = m_tidToThread.find(tid);
+    if (it != m_tidToThread.end()) return it->second;
+    auto ex = m_exitedTid.find(tid);
+    return ex != m_exitedTid.end() ? static_cast<int64_t>(ex->second) : -1;
+  }
   std::vector<NameEvent> m_names;
 
   std::vector<FileEntry> m_files;
@@ -378,16 +397,26 @@ uint32_t Converter::ensureProc(uint32_t pid, uint64_t ts) {
 uint32_t Converter::ensureThread(uint32_t tid, uint32_t proc, uint64_t ts) {
   auto it = m_tidToThread.find(tid);
   if (it != m_tidToThread.end() && m_threads[it->second].proc == proc) return it->second;
+  if (it == m_tidToThread.end()) {
+    auto ex = m_exitedTid.find(tid);
+    if (ex != m_exitedTid.end() && m_threads[ex->second].proc == proc) {
+      // A late event of an exited thread (see m_exitedTid): it stays with its record, whose end moves to the
+      // last such event.
+      Thr& dead = m_threads[ex->second];
+      if (ts > dead.endTs) dead.endTs = ts;
+      return ex->second;
+    }
+  }
   Thr t;
   t.tid = tid;
   t.proc = proc;
   t.preexisting = true;
   t.inferred = true;
   t.startTs = m_startTs;
-  (void)ts;
   m_threads.push_back(std::move(t));
   const uint32_t idx = static_cast<uint32_t>(m_threads.size() - 1);
   m_tidToThread[tid] = idx;
+  m_exitedTid.erase(tid);
   ++m_procs[proc].liveThreads;
   return idx;
 }
@@ -439,6 +468,9 @@ void Converter::dropAddressSpace(Proc& p, uint64_t ts) {
 
 void Converter::onFork(const ParsedRecord& r, bool rundown) {
   const uint64_t ts = r.time;
+  // The same FORK reaches the stream once per ring whose event has the task side-band on.
+  if (!rundown && !m_forkSeen.insert({r.pid, r.tid, ts}).second) return;
+  constexpr uint64_t kDuplicateWindowNs = 1'000'000;
   if (r.pid == r.tid) {  // a new process
     auto old = m_pidToProc.find(r.pid);
     if (old != m_pidToProc.end() && !m_procs[old->second].exited && !rundown) {
@@ -447,6 +479,8 @@ void Converter::onFork(const ParsedRecord& r, bool rundown) {
         o.fromRundown = false;
         return;
       }
+      if (!o.preexisting && o.ppid == r.ppid && ts >= o.startTs && ts - o.startTs < kDuplicateWindowNs)
+        return;         // a copy of the FORK just applied (delivered by another ring, stamped a few ns later)
       o.exited = true;  // its exit was missed; the pid is being reused
       o.endTs = ts;
     }
@@ -465,6 +499,7 @@ void Converter::onFork(const ParsedRecord& r, bool rundown) {
     }
     // drop a stale live thread entry of the same tid
     m_tidToThread.erase(r.tid);
+    m_exitedTid.erase(r.tid);
     Thr t;
     t.tid = r.tid;
     t.proc = idx;
@@ -484,11 +519,16 @@ void Converter::onFork(const ParsedRecord& r, bool rundown) {
         s.fromRundown = false;
         return;
       }
+      if (!s.exited && !s.inferred && !s.fromRundown && s.proc == proc && !rundown && ts >= s.startTs &&
+          ts - s.startTs < kDuplicateWindowNs)
+        return;  // a copy of the FORK just applied
       if (s.inferred && s.proc == proc && !s.exited && !rundown) {
         // An event of the thread was merged ahead of its FORK record (records of different cpus whose
         // timestamps are a few ns apart): the FORK confirms the thread instead of replacing it, so that its
         // events stay with one thread record.
         s.inferred = false;
+        s.preexisting = false;
+        s.startTs = ts;
         return;
       }
       if (!s.exited) {
@@ -498,6 +538,7 @@ void Converter::onFork(const ParsedRecord& r, bool rundown) {
       }
       m_tidToThread.erase(stale);
     }
+    m_exitedTid.erase(r.tid);
     Thr t;
     t.tid = r.tid;
     t.proc = proc;
@@ -517,6 +558,7 @@ void Converter::onExit(const ParsedRecord& r) {
   Thr& t = m_threads[it->second];
   t.exited = true;
   t.endTs = r.time;
+  m_exitedTid[r.tid] = it->second;
   m_tidToThread.erase(it);
   Proc& p = m_procs[t.proc];
   if (p.liveThreads > 0) --p.liveThreads;
@@ -703,6 +745,10 @@ void Converter::onSample(const ParsedRecord& r) {
     ++m_stats.samplesDroppedIdle;
     return;
   }
+  if (r.pid == kBadTid || r.tid == kBadTid) {  // a task the kernel can no longer name
+    ++m_stats.samplesMalformed;
+    return;
+  }
   const uint32_t procIdx = ensureProc(r.pid, r.time);
   if (!keep(procIdx)) {
     ++m_stats.samplesDroppedNotTarget;
@@ -854,15 +900,15 @@ void Converter::initSched() {
 
 bool Converter::tidKept(uint32_t tid) {
   if (m_roots.empty()) return true;
-  auto it = m_tidToThread.find(tid);
-  if (it == m_tidToThread.end()) return false;
-  return isTarget(m_threads[it->second].proc);
+  const int64_t idx = findThread(tid);
+  if (idx < 0) return false;
+  return isTarget(m_threads[static_cast<size_t>(idx)].proc);
 }
 
 // Counts a scheduler event as activity of a known thread, so that system mode writes the thread record.
 void Converter::touchThread(uint32_t tid) {
-  auto it = m_tidToThread.find(tid);
-  if (it != m_tidToThread.end()) ++m_threads[it->second].kept;
+  const int64_t idx = findThread(tid);
+  if (idx >= 0) ++m_threads[static_cast<size_t>(idx)].kept;
 }
 
 void Converter::onSchedSample(const ParsedRecord& r) {
@@ -897,16 +943,27 @@ void Converter::onSchedSwitch(const ParsedRecord& r, const SchedSwitchEvent& ev)
   }
   if (ev.prevPid == ev.nextPid) return;
 
-  // The sample is taken by the task that switches out, so its callchain is prev's blocking stack.
+  // The sample is taken by the task that switches out, so its callchain is prev's blocking stack. A task that
+  // is already unhashed (its final switch-out) has no usable tid in the sample; prev_pid in the payload names
+  // it.
+  const bool sampleNamed = r.pid != kBadTid && r.tid != kBadTid;
   Proc* stackProc = nullptr;
-  if (r.pid != 0) {
+  if (sampleNamed && r.pid != 0) {
     const uint32_t procIdx = ensureProc(r.pid, r.time);
     if (keep(procIdx)) {
       stackProc = &m_procs[procIdx];
       ++m_threads[ensureThread(r.tid, procIdx, r.time)].kept;
     }
+  } else if (!sampleNamed && ev.prevPid != 0) {
+    const int64_t idx = findThread(ev.prevPid);
+    if (idx >= 0 && keep(m_threads[static_cast<size_t>(idx)].proc)) {
+      stackProc = &m_procs[m_threads[static_cast<size_t>(idx)].proc];
+      ++m_threads[static_cast<size_t>(idx)].kept;
+    }
   }
-  const bool oldKept = ev.prevPid == r.tid && r.pid != 0 ? stackProc != nullptr : tidKept(ev.prevPid);
+  const bool sampleIsPrev = sampleNamed ? (ev.prevPid == r.tid && r.pid != 0) : ev.prevPid != 0;
+  const bool oldKept =
+      sampleIsPrev ? (stackProc != nullptr || (!sampleNamed && tidKept(ev.prevPid))) : tidKept(ev.prevPid);
   const bool newKept = tidKept(ev.nextPid);
   if (!oldKept && !newKept) {
     ++m_stats.schedDroppedNotTarget;
@@ -917,7 +974,7 @@ void Converter::onSchedSwitch(const ParsedRecord& r, const SchedSwitchEvent& ev)
   if (oldKept && ev.prevPid != 0 && stackProc != nullptr) {
     uint16_t flags = 0;
     stack = cachedStack(stackProc, r, flags);
-    if (r.tid != ev.prevPid) reserved |= trace::kSwitchFlagStackFromOtherThread;
+    if (sampleNamed && r.tid != ev.prevPid) reserved |= trace::kSwitchFlagStackFromOtherThread;
   }
   const SwitchStateEncoding enc = encodeSwitchState(ev.prevState);
   trace::ContextSwitchRec rec{};
@@ -942,6 +999,7 @@ void Converter::onSchedWake(const ParsedRecord& r, const SchedWakeEvent& ev) {
     return;
   }
   if (!ev.success || ev.pid == r.tid) return;
+  const bool wakerNamed = r.pid != kBadTid && r.tid != kBadTid;
   if (!tidKept(ev.pid)) {
     ++m_stats.schedDroppedNotTarget;
     return;
@@ -949,7 +1007,7 @@ void Converter::onSchedWake(const ParsedRecord& r, const SchedWakeEvent& ev) {
   // The waker is the task running the wakeup. Its user frames are resolved only when it belongs to the target
   // (otherwise its mappings would create modules of unrelated processes); the kernel frames always are.
   Proc* wakerProc = nullptr;
-  if (r.pid != 0) {
+  if (wakerNamed && r.pid != 0) {
     const uint32_t procIdx = ensureProc(r.pid, r.time);
     if (keep(procIdx)) {
       wakerProc = &m_procs[procIdx];
@@ -961,7 +1019,7 @@ void Converter::onSchedWake(const ParsedRecord& r, const SchedWakeEvent& ev) {
   rec.ts = r.time;
   rec.cpu = r.cpu;
   rec.readied_tid = ev.pid;
-  rec.readying_tid = r.tid;
+  rec.readying_tid = wakerNamed ? r.tid : 0;  // an unhashed waker (exit_notify) cannot be named
   rec.readying_stack = cachedStack(wakerProc, r, flags);
   m_readySink.push(rec);
   ++m_stats.readiesWritten;
@@ -980,6 +1038,14 @@ void Converter::onSwitchRecord(const ParsedRecord& r) {
     LastSwitchOut& last = m_lastSwitchOut[r.cpu];
     if (out) {
       oldTid = r.tid;
+      if (oldTid == kBadTid) {  // the task is already unhashed: the task that got the cpu last is leaving it
+        auto running = m_cpuRunning.find(r.cpu);
+        if (running == m_cpuRunning.end()) {
+          ++m_stats.schedUnnamed;
+          return;
+        }
+        oldTid = running->second;
+      }
       newTid = r.nextPrevTid;
       last = {oldTid, newTid, true};
     } else {
@@ -994,13 +1060,21 @@ void Converter::onSwitchRecord(const ParsedRecord& r) {
   } else {
     newTid = r.tid;
   }
+  if (oldTid == kBadTid || newTid == kBadTid) {
+    ++m_stats.schedUnnamed;
+    return;
+  }
+  if (r.type() == kRecordSwitchCpuWide && newTid != 0)
+    m_cpuRunning[r.cpu] = newTid;
+  else if (r.type() == kRecordSwitchCpuWide)
+    m_cpuRunning.erase(r.cpu);
   ++m_stats.schedSwitchEvents;
   if (m_opt.windowStartTs != 0 && r.time < m_opt.windowStartTs) {
     ++m_stats.schedDroppedWindow;
     return;
   }
   if (oldTid == newTid) return;
-  if (r.pid != 0) {
+  if (r.pid != 0 && r.pid != kBadTid && r.tid != kBadTid) {
     const uint32_t procIdx = ensureProc(r.pid, r.time);
     if (keep(procIdx)) ++m_threads[ensureThread(r.tid, procIdx, r.time)].kept;
   }
@@ -1280,6 +1354,11 @@ Result<void> Converter::finalize() {
     m_stats.warnings.push_back(std::to_string(n) + " tracepoint record(s) of type " +
                                std::to_string(key >> 32) + " (payload " + std::to_string(key & 0xFFFFFFFFu) +
                                " bytes) do not match the recorded sched formats and were ignored");
+  if (m_stats.schedUnnamed > 0)
+    m_stats.warnings.push_back(
+        std::to_string(m_stats.schedUnnamed) +
+        " switch records of a task the kernel could no longer name (it was exiting) could "
+        "not be attributed and were dropped");
   if (m_stats.schedMalformed > 0)
     m_stats.warnings.push_back(std::to_string(m_stats.schedMalformed) +
                                " scheduler records had a payload shorter than their format and were ignored");
