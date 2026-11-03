@@ -31,3 +31,11 @@ Header: `libs/model/model.h` (`tachyon::model`), now orchestrator-owned.
 - `TraceModel::load(path, LoadOptions, progress)`. Progress is invoked only on the calling thread. Loading is deterministic for any worker count.
 - tid 0 on events means "no thread" (invalid ThreadIdx). The latest ThreadNames record by ts sets `Thread::name`. Duplicate ThreadRecs are kept, and `tidToThread` maps to the first.
 - Memory: 16 B/sample for sample columns; the "≤ 3× compressed" budget is under user review (synthetic fixtures compress 8:1 and measure 6.95–7.33×).
+
+## Clarifications added with WP-64 (2026-11-03, binding)
+
+- Streaming load: `LoadOptions::prefixFraction` (default 1.0) loads only that fraction of the sample chunks as a consistent time prefix: tables complete, `header.end_ts` clamped to the loaded samples, events past it dropped, `loadStatus.complete == false`. Thread indices of threads with a ThreadRec equal the full load's (threads synthesised from samples alone may differ; real traces have ThreadRecs). `TraceModel::loadStatus` = {complete, generation, sampleChunksLoaded/Total, fullEndTs, samplesLoaded}.
+- `TraceModel::loadProgressive(path, options, stages, onSnapshot, progress)` publishes a preview per stage, then the complete model; cancellation returns Cancelled.
+- Viewer: files of 64 MiB or more open as a 5% preview, then the complete document replaces it, keeping the timeline view, row flags and scroll. Closing the preview abandons the load; a newer open supersedes it.
+- Memory ceiling (viewer): `Settings::memoryCeilingPercent` (default 75 % of physical memory, 0 = none; View > Memory limit). The timeline index is budgeted up front (ceiling minus the model); over the ceiling the governor degrades, in order, the LOD fine level, the finest LOD levels, the analysis cache budget (toast and banner at each stage), then shows "model alone exceeds the ceiling". Nothing is restored automatically.
+- `tachyon-viewer --bench <trace> [--bench-frames N]` runs a headless steady/pan/zoom frame-time benchmark (dogfooding entry point; capture it with `tachyon-agent --backend perf`).
