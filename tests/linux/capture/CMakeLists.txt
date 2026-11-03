@@ -37,3 +37,18 @@ if(TARGET sdk_socket_linux_tests)
                                                             TACHYON_CLI_EXE="$<TARGET_FILE:tachyon-cli>")
   add_dependencies(sdk_socket_linux_tests tachyon-testbed tachyon-agent tachyon-cli)
 endif()
+
+# WP-60: the flight recorder end to end: the real agent (--backend perf) and `tachyon-cli capture --launch
+# tachyon-testbed --scenario frames --instrument --flush-on-hitch --circular-mb 256`; every hitch trigger must
+# produce a trace that has the hitch frame within the last 10 s. Skips like the tests above.
+tachyon_add_test(flight_recorder_linux_tests
+  SOURCES flight_recorder_test.cpp ../../unit/agent/process_util.cpp
+  DEPS tachyon::capture_linux_perf tachyon::capture tachyon::control tachyon::inst tachyon::model tachyon::trace
+       nlohmann_json::nlohmann_json
+  LABELS linux_privileged)
+if(TARGET flight_recorder_linux_tests)
+  target_compile_definitions(flight_recorder_linux_tests PRIVATE TACHYON_TESTBED_EXE="$<TARGET_FILE:tachyon-testbed>"
+                                                                 TACHYON_AGENT_EXE="$<TARGET_FILE:tachyon-agent>"
+                                                                 TACHYON_CLI_EXE="$<TARGET_FILE:tachyon-cli>")
+  add_dependencies(flight_recorder_linux_tests tachyon-testbed tachyon-agent tachyon-cli)
+endif()

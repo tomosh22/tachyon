@@ -18,13 +18,17 @@ void printUsage() {
   std::fputs(
       "usage: tachyon-testbed [--scenario <name[,name...]|all>] [--duration <seconds>] [--hitch-interval-ms "
       "<ms>]\n"
-      "                       [--instrument] [--pretty] [--list] [--help]\n"
+      "                       [--instrument] [--flush-on-hitch] [--pretty] [--list] [--help]\n"
       "  Scenarios run one after another; with several, --duration is split across them (frames gets 4x "
       "weight).\n"
       "  The expected/measured split is printed as JSON on stdout; diagnostics go to stderr.\n"
       "  --instrument emits Tachyon SDK events (scopes, thread names, frame marks, markers, plots, lock "
       "waits,\n"
-      "  fiber switches) to the agent named by $TACHYON_AGENT_PIPE, or to a sidecar .tachyon-inst file.\n",
+      "  fiber switches) to the agent named by $TACHYON_AGENT_PIPE, or to a sidecar .tachyon-inst file.\n"
+      "  --flush-on-hitch (needs --instrument) makes the frames scenario call "
+      "Tachyon_RequestFlush(\"hitch\")\n"
+      "  right after each planted hitch frame ended (flight recorder trigger; the agent needs "
+      "--circular-mb).\n",
       stderr);
 }
 
@@ -49,6 +53,7 @@ int main(int argc, char** argv) {
   double hitchIntervalMs = 0.0;  // 0 = default (2000 ms; scaled to fit when several scenarios run)
   bool pretty = false;
   bool instrument = false;
+  bool flushOnHitch = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto needValue = [&](const char* flag) -> const char* {
@@ -74,6 +79,8 @@ int main(int argc, char** argv) {
       pretty = true;
     } else if (arg == "--instrument") {
       instrument = true;
+    } else if (arg == "--flush-on-hitch") {
+      flushOnHitch = true;
     } else if (arg == "--list") {
       for (const auto& name : scenarioNames()) std::printf("%s\n", name.c_str());
       return 0;
@@ -97,8 +104,13 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  if (flushOnHitch && !instrument) {
+    std::fputs("--flush-on-hitch needs --instrument\n", stderr);
+    return 2;
+  }
   if (instrument) {
     setInstrumentation(true);
+    setFlushOnHitch(flushOnHitch);
     Tachyon_SetCurrentThreadName(
         "tachyon-testbed");  // first SDK call: starts the runtime and the agent connection
     std::fputs("tachyon-testbed: instrumentation on\n", stderr);

@@ -178,6 +178,8 @@ std::string parse(const std::vector<std::string>& args, Parsed& p) {
     } else if (p.command == "flush" && a == "--name") {
       if (!needValue(flush.name)) return "missing value for --name";
       haveName = true;
+    } else if (p.command == "flush" && a == "--reason") {
+      if (!needValue(flush.reason)) return "missing value for --reason";
     } else if (p.command == "flush" && a == "--seconds") {
       if (!needUint(flush.seconds, err)) return err;
       haveSeconds = true;
@@ -235,7 +237,7 @@ void printUsage(std::ostream& err) {
          "  start   <target> [start options] [--no-start] [--wait]\n"
          "  stop    [--wait]\n"
          "  resume                       begin recording a launch parked with 'start --no-start'\n"
-         "  flush   --name N --seconds S\n"
+         "  flush   --name N --seconds S [--reason R]\n"
          "  cancel\n"
          "  merge   TRACE.tachyon INST.tachyon-inst [--out PATH] [--clip] [--no-siblings] [--force]\n"
          "                               adds an instrumentation sidecar (and its numbered siblings) to a "
@@ -285,6 +287,11 @@ void printEvent(const Event& e, bool json, std::ostream& out) {
   if (const auto* d = std::get_if<CaptureDoneEvent>(&e)) {
     out << "capture_done: path=" << d->summary.path << " events_lost=" << d->summary.events_lost
         << " duration_s=" << std::fixed << std::setprecision(3) << d->summary.duration_s << "\n";
+  } else if (const auto* f = std::get_if<FlushedEvent>(&e)) {
+    out << "flushed: path=" << f->path << " reason=" << f->reason << " events_lost=" << f->events_lost
+        << " duration_s=" << std::fixed << std::setprecision(3) << f->duration_s;
+    if (f->coalesced > 0) out << " coalesced=" << f->coalesced;
+    out << "\n";
   }
 }
 
@@ -358,8 +365,13 @@ int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream&
   const bool timed = p.durationS > 0.0;
   const int firstWaitMs = timed ? static_cast<int>(p.durationS * 1000.0) : timeoutMs;
 
-  // The agent finishing by itself (the launched or attached target exited) arrives as capture_done.
-  auto event = client.waitForEvent(isFinal, firstWaitMs);
+  // The agent finishing by itself (the launched or attached target exited) arrives as capture_done. Flushes
+  // of a flight recorder (circular capture) are reported as they happen.
+  const auto finalOrReport = [&](const Event& e) {
+    if (std::holds_alternative<FlushedEvent>(e)) printEvent(e, p.json, out);
+    return isFinal(e);
+  };
+  auto event = client.waitForEvent(finalOrReport, firstWaitMs);
   bool timedOut = false;
   if (!event.ok()) {
     if (event.error().code != ErrorCode::Timeout) {
@@ -378,7 +390,7 @@ int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream&
       printResponse(*stop, p.json, out, err);
       return kExitProtocolError;
     }
-    event = client.waitForEvent(isFinal, timeoutMs);
+    event = client.waitForEvent(finalOrReport, timeoutMs);
     if (!event.ok()) {
       reportFailure(p.json, out, err, codeFor(event.error()),
                     "waiting for capture_done: " + event.error().message);

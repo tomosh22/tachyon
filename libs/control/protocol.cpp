@@ -263,6 +263,9 @@ std::string encodeRequest(const Request& request) {
   } else if (const auto* f = std::get_if<FlushRequest>(&request.body)) {
     j["name"] = f->name;
     j["seconds"] = f->seconds;
+    if (!f->reason.empty()) j["reason"] = f->reason;
+    if (f->trigger) j["trigger"] = true;
+    if (f->pid != 0) j["pid"] = f->pid;
   } else if (const auto* h = std::get_if<InstHelloRequest>(&request.body)) {
     j["pid"] = h->pid;
     j["api_version"] = h->api_version;
@@ -296,6 +299,9 @@ Result<Request> decodeRequest(std::string_view line, std::optional<int64_t>* idO
     FlushRequest f;
     TACHYON_TRY(getString(j, "name", f.name, true));
     TACHYON_TRY(getU32(j, "seconds", f.seconds, true));
+    TACHYON_TRY(getString(j, "reason", f.reason, false));
+    TACHYON_TRY(getBool(j, "trigger", f.trigger, false));
+    TACHYON_TRY(getU32(j, "pid", f.pid, false));
     req.body = std::move(f);
   } else if (cmd == "inst_hello") {
     InstHelloRequest h;
@@ -345,6 +351,14 @@ std::string encodeEvent(const Event& event) {
   } else if (const auto* e = std::get_if<ErrorEvent>(&event)) {
     j["event"] = "error";
     j["message"] = e->message;
+  } else if (const auto* fl = std::get_if<FlushedEvent>(&event)) {
+    j["event"] = "flushed";
+    j["path"] = fl->path;
+    j["name"] = fl->name;
+    j["reason"] = fl->reason;
+    j["duration_s"] = fl->duration_s;
+    j["events_lost"] = fl->events_lost;
+    if (fl->coalesced != 0) j["coalesced"] = fl->coalesced;
   }
   return dump(j);
 }
@@ -369,6 +383,16 @@ Result<ServerMessage> decodeServerMessage(std::string_view line, std::optional<C
     if (name == "error") {
       ErrorEvent e;
       TACHYON_TRY(getString(j, "message", e.message, true));
+      return ServerMessage(Event(std::move(e)));
+    }
+    if (name == "flushed") {
+      FlushedEvent e;
+      TACHYON_TRY(getString(j, "path", e.path, true));
+      TACHYON_TRY(getString(j, "name", e.name, false));
+      TACHYON_TRY(getString(j, "reason", e.reason, false));
+      TACHYON_TRY(getDouble(j, "duration_s", e.duration_s, false));
+      TACHYON_TRY(getU64(j, "events_lost", e.events_lost, false));
+      TACHYON_TRY(getU32(j, "coalesced", e.coalesced, false));
       return ServerMessage(Event(std::move(e)));
     }
     return bad("unknown event '" + name + "'");

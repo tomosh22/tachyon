@@ -717,6 +717,8 @@ Result<ScenarioReport> runFrames(const RunConfig& config, const Calibration& cal
   ThreadReport thread;
   uint64_t frames = 0, hitches = 0, checksum = 0;
   double maxFrameMs = 0.0;
+  nlohmann::json hitchFrames = nlohmann::json::array();
+  uint64_t flushRequests = 0, flushesAccepted = 0;
   std::thread worker([&] {
     identifyThread(thread, "tb-frames");
     const uint64_t periodTsc = secondsToTsc(cal, model.periodMs * 1e-3);
@@ -726,10 +728,24 @@ Result<ScenarioReport> runFrames(const RunConfig& config, const Calibration& cal
     uint64_t updateTicks = 0, renderTicks = 0, hitchTicks = 0, waitTicks = 0, state = 1;
     const uint64_t deadline = readTsc() + secondsToTsc(cal, config.durationS);
     uint64_t frameStart = readTsc();
+    bool flushPending = false;  // the previous frame was a hitch frame: ask for the flush now
+    uint64_t hitchBeginTs = 0;
     while (frameStart < deadline) {
+      if (flushPending) {
+        flushPending = false;
+        const int accepted = onHitchFrameEnded();  // outside the frame's scope, after its frame mark
+        if (accepted >= 0) {
+          ++flushRequests;
+          if (accepted > 0) ++flushesAccepted;
+          hitchFrames.back()["flush"] = accepted > 0 ? "accepted" : "refused";
+        }
+        frameStart = readTsc();  // whatever the request cost is not part of the next frame
+        if (frameStart >= deadline) break;
+      }
       onFrameBegin(frames);
       TB_SCOPE("frame");
       const bool hitchFrame = frames % expect.framesPerHitch == expect.framesPerHitch - 1;
+      if (hitchFrame) hitchBeginTs = core::nowTicks();
       uint64_t t = frameStart;
       {
         TB_SCOPE("frame_update");
@@ -769,6 +785,12 @@ Result<ScenarioReport> runFrames(const RunConfig& config, const Calibration& cal
       maxFrameMs = std::max(maxFrameMs, tscToSeconds(cal, t - frameStart) * 1e3);
       onFrameTime(tscToSeconds(cal, t - frameStart) * 1e3);
       onFrameEnd(frames);
+      if (hitchFrame) {
+        // Trace-clock timestamps (clock_frequency_hz ticks per second) of the hitch frame.
+        hitchFrames.push_back(
+            {{"frame", frames}, {"begin_ts", hitchBeginTs}, {"end_ts", core::nowTicks()}, {"flush", "none"}});
+        flushPending = flushOnHitchEnabled();
+      }
       ++frames;
       // On time: keep the 60 Hz cadence. Late (hitch): start the next frame now, no catch-up.
       frameStart = t > target ? t : target;
@@ -796,6 +818,9 @@ Result<ScenarioReport> runFrames(const RunConfig& config, const Calibration& cal
                     {"frames", frames},
                     {"hitches", hitches},
                     {"max_frame_ms", maxFrameMs},
+                    {"hitch_frames", hitchFrames},
+                    {"flush_requests", flushRequests},
+                    {"flushes_accepted", flushesAccepted},
                     {"checksum", checksumOf(checksum)}};
   return report;
 }

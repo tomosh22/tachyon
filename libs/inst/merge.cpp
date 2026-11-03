@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <optional>
 #include <set>
@@ -140,8 +141,51 @@ std::string hashText(uint64_t hash) {
   return buf;
 }
 
+// Per-thread balance of a clipped, timestamp-sorted ScopeEvents sequence (see MergeOptions).
+void balanceScopes(std::vector<ScopeEventRec>& scopes, const std::vector<FiberEventRec>& fibers,
+                   uint64_t endTs, MergeReport& report) {
+  std::set<uint32_t> fiberThreads;
+  for (const FiberEventRec& f : fibers) fiberThreads.insert(FiberEventRec(f).tid);
+  std::unordered_map<uint32_t, uint32_t> depth;
+  std::vector<ScopeEventRec> kept;
+  kept.reserve(scopes.size());
+  for (const ScopeEventRec& rec : scopes) {
+    const ScopeEventRec r = rec;
+    if (fiberThreads.count(r.tid) != 0) {
+      kept.push_back(rec);
+      continue;
+    }
+    uint32_t& d = depth[r.tid];
+    if (r.kind == kScopeBegin) {
+      ++d;
+    } else if (d == 0) {
+      ++report.orphanEndsDropped;
+      continue;
+    } else {
+      --d;
+    }
+    kept.push_back(rec);
+  }
+  std::vector<uint32_t> tids;
+  for (const auto& [tid, d] : depth)
+    if (d > 0) tids.push_back(tid);
+  std::sort(tids.begin(), tids.end());
+  for (uint32_t tid : tids) {
+    for (uint32_t i = 0; i < depth[tid]; ++i) {
+      ScopeEventRec end;
+      std::memset(static_cast<void*>(&end), 0, sizeof(end));
+      end.ts = endTs;
+      end.tid = tid;
+      end.kind = kScopeEnd;
+      kept.push_back(end);
+      ++report.syntheticEnds;
+    }
+  }
+  scopes = std::move(kept);
+}
+
 std::string buildCaptureInfo(const std::string* previous, const MergeReport& report,
-                             const DecodedInstrumentation& data) {
+                             const DecodedInstrumentation& data, const std::string& patch, bool addMerge) {
   using nlohmann::json;
   json info = json::object();
   if (previous != nullptr) {
@@ -152,6 +196,12 @@ std::string buildCaptureInfo(const std::string* previous, const MergeReport& rep
       info["original_capture_info"] = *previous;  // not a JSON object: keep it verbatim
     }
   }
+  if (!patch.empty()) {
+    const json p = json::parse(patch, nullptr, false);
+    if (p.is_object())
+      for (auto it = p.begin(); it != p.end(); ++it) info[it.key()] = it.value();
+  }
+  if (!addMerge) return info.dump();
   json merges = json::array();
   if (info.contains("instrumentation") && info["instrumentation"].is_object()) {
     const json& old = info["instrumentation"];
@@ -273,7 +323,7 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
   report.startTs = inHeader.start_ts;
   report.endTs = inHeader.end_ts;
 
-  if (data.empty() && inPlace) {
+  if (data.empty() && inPlace && options.captureInfoPatch.empty()) {
     report.warnings.push_back("no instrumentation records to merge; the trace was left unchanged");
     return report;
   }
@@ -289,7 +339,15 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
     clipped += clipRecords(data.markers, inHeader.start_ts, inHeader.end_ts);
     clipped += clipRecords(data.plots, inHeader.start_ts, inHeader.end_ts);
     report.clippedRecords = clipped;
-    if (clipped > 0)
+    if (options.balanceClippedScopes) {
+      balanceScopes(data.scopes, data.fibers, inHeader.end_ts, report);
+      if (report.orphanEndsDropped + report.syntheticEnds > 0)
+        report.warnings.push_back(std::to_string(report.orphanEndsDropped) +
+                                  " scope ends without a begin in the window were dropped, " +
+                                  std::to_string(report.syntheticEnds) +
+                                  " scopes still open at the window end were closed there");
+    }
+    if (clipped > 0 && !options.balanceClippedScopes)
       report.warnings.push_back(std::to_string(clipped) +
                                 " instrumentation records outside the trace window were dropped; scopes that "
                                 "straddle the window start may have an End without a Begin");
@@ -469,7 +527,9 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
                                    0;
   if (haveInstrumentation) writer.addFlags(kFlagHasInstrumentation);
 
-  writer.appendCaptureInfo(buildCaptureInfo(havePreviousInfo ? &previousInfoText : nullptr, report, data));
+  const bool addMerge = !(data.sources.empty() && data.streams.empty());
+  writer.appendCaptureInfo(buildCaptureInfo(havePreviousInfo ? &previousInfoText : nullptr, report, data,
+                                            options.captureInfoPatch, addMerge));
 
   TACHYON_TRY(writer.finish());
   if ((inHeader.flags & kFlagPartial) != 0) {

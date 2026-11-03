@@ -12,6 +12,7 @@
 #include "viewer/status/path_picker.h"
 #include "viewer/status/toast.h"
 
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -50,6 +51,29 @@ AgentLaunchPlan planAgentLaunch(const CaptureSettings& settings, const std::file
 // Thread-safe: pure function. "m:ss.s" / "h:mm:ss".
 std::string formatElapsed(double seconds);
 
+// One trace written by a flush of the circular capture (a `flushed` event of the agent).
+struct FlushedCapture {
+  std::string name;
+  std::string reason;
+  std::string path;
+  double durationS = 0.0;
+  uint64_t eventsLost = 0;
+  uint32_t coalesced = 0;                    // triggers folded into this flush
+  std::chrono::system_clock::time_point at;  // when the viewer heard of it
+};
+
+// What the Flight Recorder panel shows.
+struct FlightRecorderState {
+  bool connected = false;
+  bool capturing = false;
+  bool armed = false;            // capturing and known to be circular: a flush will work
+  bool circularUnknown = false;  // capturing, but started by someone else: the viewer cannot tell
+  uint32_t ringMb = 0;           // circular_mb of the capture the viewer started
+  double elapsedSeconds = 0.0;
+  std::string target;
+  std::string phase;
+};
+
 class CaptureController {
  public:
   // Main-thread only. `launcher` null = the system launcher.
@@ -79,6 +103,20 @@ class CaptureController {
   void resumeCapture();
   void stopCapture();
   void cancelCapture();
+
+  // ---- flight recorder (WP-60) ----
+  FlightRecorderState flightRecorderState() const;
+  // Flushed traces of this run of the viewer, oldest first (at most 200).
+  const std::vector<FlushedCapture>& flushedCaptures() const { return m_flushed; }
+  // The "seconds" field of the panel's Flush now button.
+  int& flushSeconds() { return m_flushSeconds; }
+  // Asks the agent for a flush of the last flushSeconds() seconds. False (with a toast) when the capture is
+  // not a flight recorder or there is none.
+  bool flushNow();
+  // Opens the flushed trace #index in the viewer.
+  void openFlushed(size_t index);
+  // Draws the contents of the Flight Recorder panel (between Begin/End).
+  void drawFlightRecorderContents();
 
   // ---- frame hooks ----
   // Delivers the agent's events (toasts, auto-open, panel focus). Returns true if anything was delivered.
@@ -161,11 +199,20 @@ class CaptureController {
   uint32_t m_selectedPid = 0;
 
   AgentPhase m_lastPhase = AgentPhase::Unknown;
+
+  std::vector<FlushedCapture> m_flushed;
+  int m_flushSeconds = 10;
+  uint32_t m_flushSerial = 0;
 };
 
 // Thread-safe: factory. The "Capture" panel: agent connection, live capture state, Stop / Cancel / Resume.
 std::unique_ptr<IPanel> makeCapturePanel(CaptureController& controller);
 
+// Thread-safe: factory. The "Flight Recorder" panel: is the circular capture armed, Flush now, and the list
+// of flushed traces.
+std::unique_ptr<IPanel> makeFlightRecorderPanel(CaptureController& controller);
+
 inline constexpr const char* kCapturePanelName = "Capture";
+inline constexpr const char* kFlightRecorderPanelName = "Flight Recorder";
 
 }  // namespace tachyon::viewer

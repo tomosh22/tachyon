@@ -1334,16 +1334,20 @@ Result<void> Converter::run() {
 Result<void> Converter::finalize() {
   uint64_t endTs = m_opt.endTs != 0 ? m_opt.endTs : (m_set.info.endTs != 0 ? m_set.info.endTs : m_lastTs);
   if (endTs < m_startTs) endTs = m_startTs;
-  m_stats.startTs = m_startTs;
+  // A circular flush covers only its window: the trace's time range is the window, not the whole capture
+  // (instrumentation of the flush is clipped to this range; WP-60).
+  const uint64_t rangeStart =
+      m_opt.windowStartTs > m_startTs && m_opt.windowStartTs < endTs ? m_opt.windowStartTs : m_startTs;
+  m_stats.startTs = rangeStart;
   m_stats.endTs = endTs;
-  m_stats.seconds = static_cast<double>(endTs - m_startTs) / 1e9;
+  m_stats.seconds = static_cast<double>(endTs - rangeStart) / 1e9;
   // A THROTTLE that never got its UNTHROTTLE lasted until the end.
   for (const auto& [cpu, ts] : m_openThrottle)
     if (endTs > ts) m_stats.throttledNs += endTs - ts;
   m_openThrottle.clear();
 
-  finishTables(m_startTs, endTs);
-  m_writer.setTimeRange(m_startTs, endTs);
+  finishTables(rangeStart, endTs);
+  m_writer.setTimeRange(rangeStart, endTs);
 
   const SessionInfo& si = m_set.info;
   SysctlInfo sys;

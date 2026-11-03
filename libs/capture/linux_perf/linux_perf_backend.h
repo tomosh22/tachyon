@@ -175,6 +175,7 @@ class LinuxPerfBackend final : public ICaptureBackend, public ITargetWatch {
   std::chrono::steady_clock::time_point m_startTime;
   std::function<void(CaptureState, float)> m_callback;
   LinuxPerfDiagnostics m_diag;
+  uint32_t m_maxFlushSeconds = 0;  // largest window of any flush of this capture (guarded by m_mutex)
 };
 
 }  // namespace tachyon::capture

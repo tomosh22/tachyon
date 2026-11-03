@@ -45,6 +45,9 @@ struct AgentSnapshot {
   std::string target;           // what is being captured ("launch /bin/app", "attach pid 12", "system")
   std::string lastError;        // last connection / command / agent error, "" if none
   bool commandInFlight = false;
+  // Flight recorder (WP-60): circular_mb of the capture this viewer started (0: not circular, or started by
+  // someone else, in which case the viewer cannot know).
+  uint32_t circularMb = 0;
 };
 
 enum class AgentEventKind : uint8_t {
@@ -55,12 +58,14 @@ enum class AgentEventKind : uint8_t {
   CaptureDone,     // capture_done (summary)
   AgentError,      // unsolicited error event of the agent (message)
   CommandFailed,   // a command was refused or failed (command, code, message)
+  Flushed,         // the agent wrote a flushed trace of a circular capture (flushed), whoever asked
 };
 
 struct AgentEvent {
   AgentEventKind kind = AgentEventKind::StateChanged;
   AgentPhase phase = AgentPhase::Unknown;
   control::CaptureSummary summary;  // CaptureDone
+  control::FlushedEvent flushed;    // Flushed
   std::string message;
   std::string command;        // CommandFailed: "start", "stop", ...
   std::string code;           // CommandFailed: protocol code ("EBUSY", ...) or "ETIMEOUT"/"EIO" for transport
@@ -99,6 +104,9 @@ class AgentSession {
   void resume();
   void stop();
   void cancel();
+  // Flight recorder: asks the agent to write the last `seconds` of the circular capture to <name>.tachyon.
+  // The result arrives as a Flushed event (or CommandFailed).
+  void flush(std::string name, uint32_t seconds, std::string reason);
   // Asks the agent for its status now.
   void refreshStatus();
 
@@ -120,6 +128,7 @@ class AgentSession {
       Resume,
       Stop,
       Cancel,
+      Flush,
       Refresh
     } kind = Kind::Refresh;
     std::string address;
@@ -127,6 +136,7 @@ class AgentSession {
     bool userInitiated = true;
     control::StartRequest start;
     std::string label;
+    control::FlushRequest flush;
   };
 
   void post(Command command);

@@ -115,3 +115,29 @@ TEST(TestbedScenarios, EveryScenarioRunsAndProducesValidReport) {
     }
   }
 }
+
+// WP-60: the report lists the planted hitch frames with trace-clock timestamps (for the flight recorder
+// tests).
+TEST(TestbedScenarios, FramesReportListsTheHitchFramesWithTimestamps) {
+  const Calibration cal = calibrate(0.02, 0.01);
+  auto run = runScenarios({"frames"}, 1.2, 400.0, cal);  // a hitch every 24 frames, 0.4 s
+  ASSERT_TRUE(run.ok()) << run.error().toString();
+  const nlohmann::json j = toJson(run.value());
+  const nlohmann::json& d = j["scenarios"][0]["details"];
+  ASSERT_TRUE(d.contains("hitch_frames"));
+  ASSERT_TRUE(d["hitch_frames"].is_array());
+  EXPECT_EQ(d["hitch_frames"].size(), d["hitches"].get<size_t>());
+  EXPECT_GE(d["hitch_frames"].size(), 1u);
+  uint64_t previousEnd = 0;
+  for (const auto& hitch : d["hitch_frames"]) {
+    const uint64_t begin = hitch["begin_ts"].get<uint64_t>();
+    const uint64_t end = hitch["end_ts"].get<uint64_t>();
+    const double ms = static_cast<double>(end - begin) * 1e3 / static_cast<double>(cal.traceFrequencyHz);
+    EXPECT_GE(ms, 40.0) << "the hitch frame is the long one";
+    EXPECT_GT(begin, previousEnd);
+    previousEnd = end;
+    EXPECT_EQ(hitch["flush"].get<std::string>(), "none") << "no --flush-on-hitch here";
+  }
+  EXPECT_EQ(d["flush_requests"].get<uint64_t>(), 0u);
+  EXPECT_EQ(d["flushes_accepted"].get<uint64_t>(), 0u);
+}

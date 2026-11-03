@@ -3,8 +3,23 @@
 #include "capture/windows_etw/launch.h"
 #include "control/transport.h"
 #include "core/log.h"
+#include "core/platform.h"
 
+#if TACHYON_PLATFORM_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <ctime>
+#include <fstream>
 #include <system_error>
 
 namespace tachyon::agent {
@@ -27,6 +42,100 @@ CaptureSummary toSummary(const capture::CaptureResult& r, std::vector<std::strin
   all.insert(all.end(), std::make_move_iterator(warnings.begin()), std::make_move_iterator(warnings.end()));
   s.warnings = capSummaryWarnings(std::move(all));
   return s;
+}
+
+// A safe file stem: [A-Za-z0-9._-] stay, anything else becomes '_', no leading dots, at most `maxChars`.
+std::string sanitizeFileStem(const std::string& in, size_t maxChars = 120) {
+  std::string out;
+  for (const char ch : in) {
+    const auto c = static_cast<unsigned char>(ch);
+    const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                       c == '.' || c == '_' || c == '-';
+    out.push_back(plain ? ch : '_');
+    if (out.size() >= maxChars) break;
+  }
+  size_t lead = 0;
+  while (lead < out.size() && out[lead] == '.') ++lead;
+  out.erase(0, lead);
+  while (!out.empty() && out.back() == '.') out.pop_back();
+  return out;
+}
+
+// A JSON string literal for `in`.
+std::string jsonQuote(const std::string& in) {
+  std::string out = "\"";
+  for (const char ch : in) {
+    const auto c = static_cast<unsigned char>(ch);
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (c < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof buf, "\\u%04x", c);
+          out += buf;
+        } else {
+          out.push_back(ch);
+        }
+    }
+  }
+  out += "\"";
+  return out;
+}
+
+std::string timestampText() {
+  const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  std::tm tm{};
+#if TACHYON_PLATFORM_WINDOWS
+  localtime_s(&tm, &now);
+#else
+  localtime_r(&now, &tm);
+#endif
+  char buf[32];
+  std::strftime(buf, sizeof buf, "%Y%m%d-%H%M%S", &tm);
+  return buf;
+}
+
+// The file name of `exe` without directory and extension, made safe for a file name ("" when it has none).
+std::string exeStem(const std::string& exe) {
+  try {
+    return sanitizeFileStem(std::filesystem::path(exe).stem().string(), 40);
+  } catch (const std::exception&) {  // a name the narrow code page cannot represent
+    return {};
+  }
+}
+
+// Name of the process that asked for a flush: the launched exe, else the OS's name for the pid.
+std::string processNameFor(uint32_t pid, const std::string& launchedExeStem) {
+  if (!launchedExeStem.empty()) return launchedExeStem;
+#if TACHYON_PLATFORM_LINUX
+  if (pid != 0) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/comm");
+    std::string comm;
+    if (in && std::getline(in, comm) && !comm.empty()) return comm;
+  }
+#elif TACHYON_PLATFORM_WINDOWS
+  if (pid != 0) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process != nullptr) {
+      wchar_t buffer[MAX_PATH * 4];
+      DWORD size = static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0]));
+      std::string stem;
+      if (QueryFullProcessImageNameW(process, 0, buffer, &size) != 0 && size > 0) {
+        try {
+          stem = sanitizeFileStem(std::filesystem::path(std::wstring(buffer, size)).stem().string(), 40);
+        } catch (const std::exception&) {  // a name the narrow code page cannot represent
+        }
+      }
+      CloseHandle(process);
+      if (!stem.empty()) return stem;
+    }
+  }
+#endif
+  return pid != 0 ? "pid" + std::to_string(pid) : "process";
 }
 
 }  // namespace
@@ -155,6 +264,18 @@ Response Agent::handleStart(const StartRequest& req) {
       ingestConfig.maxConnectionsPerProcess = m_config.maxInstConnectionsPerProcess;
       ingestConfig.maxTotalSpoolBytes = m_config.maxInstTotalSpoolBytes;
       ingestConfig.verifyPeerPid = m_config.verifyInstPeerPid;
+      if (opts.circularMb > 0) {
+        ingestConfig.ringBytes =
+            std::max<uint64_t>(static_cast<uint64_t>(opts.circularMb) << 20, m_config.minRingBytes);
+        ingestConfig.ringSegmentBytes = m_config.ringSegmentBytes;
+      }
+      m_sessionOutDir =
+          opts.outPath.has_parent_path() ? opts.outPath.parent_path() : std::filesystem::path(".");
+      m_sessionExeStem = opts.mode == capture::CaptureMode::Launch ? exeStem(opts.exe) : std::string();
+      m_loggedNotCircular = false;
+      m_haveTrigger = false;
+      m_lastFlushPath.clear();
+      m_coalesced = 0;
       m_sessionMode = opts.mode;
       m_sessionPid = opts.pid;
       m_sessionFollow = opts.followChildren;
@@ -245,19 +366,23 @@ std::shared_ptr<inst::Ingest> Agent::takeIngest(bool& circular) {
 
 std::vector<std::string> Agent::mergeSpools(inst::Ingest& ingest, const std::vector<inst::SpoolInfo>& spools,
                                             const capture::CaptureResult& result, bool clip,
-                                            bool removeWhenDone) {
+                                            bool removeWhenDone, const std::string& captureInfoPatch) {
   std::vector<std::string> warnings;
   if (const uint32_t rejected = ingest.rejectedConnections(); rejected > 0)
     warnings.push_back(
         std::to_string(rejected) +
         " instrumentation connections were refused (connection cap, wrong peer pid or no thread)");
-  if (spools.empty()) {
+  if (spools.empty() && captureInfoPatch.empty()) {
     if (removeWhenDone) ingest.removeSpoolDir();
     return warnings;
   }
   std::vector<inst::MergeInput> inputs;
   for (const inst::SpoolInfo& info : spools) {
-    inputs.push_back({info.path, info.flushedBytes});
+    if (info.segments.empty()) {
+      inputs.push_back({info.path, info.flushedBytes});
+    } else {
+      for (const inst::SpoolSegment& seg : info.segments) inputs.push_back({seg.file, seg.bytes});
+    }
     if (info.stats.overflowed) {
       TACHYON_LOG_WARN("agent: the instrumentation spool of pid {} reached its cap; {} records dropped",
                        info.pid, info.stats.recordsDropped);
@@ -267,6 +392,8 @@ std::vector<std::string> Agent::mergeSpools(inst::Ingest& ingest, const std::vec
   }
   inst::MergeOptions options;
   options.clipToTraceRange = clip;
+  options.balanceClippedScopes = clip;
+  options.captureInfoPatch = captureInfoPatch;
   auto merged = inst::mergeInstrumentation(result.tracePath, inputs, options);
   if (!merged.ok()) {
     TACHYON_LOG_ERROR("agent: merging instrumentation into {} failed: {}; spool files kept in {}",
@@ -330,7 +457,63 @@ void Agent::finishCaptureLocked(const Event& finalEvent) {
   emit(StateEvent{CaptureState::Idle, 0.0});
 }
 
+std::string Agent::uniqueFlushName(const std::string& requested) const {
+  std::string stem = sanitizeFileStem(requested);
+  if (stem.empty()) stem = "flush";
+  const std::filesystem::path& dir = m_sessionOutDir;  // caller holds m_mutex
+  std::error_code ec;
+  std::string candidate = stem;
+  for (int n = 1; n < 10000 && std::filesystem::exists(dir / (candidate + ".tachyon"), ec); ++n)
+    candidate = stem + "-" + std::to_string(n);
+  return candidate;
+}
+
+void Agent::endFlush() {
+  {
+    std::lock_guard lock(m_mutex);
+    m_flushing = false;
+  }
+  m_flushDone.notify_all();
+}
+
+Result<CaptureSummary> Agent::performFlush(const FlushJob& job) {
+  if (job.trigger && m_config.flushSettleMs > 0)
+    std::this_thread::sleep_for(std::chrono::milliseconds(m_config.flushSettleMs));
+  // No lock across the backend call (it may take seconds and may call the progress callback).
+  auto result = m_backend->flush(job.name, job.seconds);
+  if (!result.ok()) return result.error();
+  // The flushed trace covers a window of the capture: add what the instrumented processes sent so far,
+  // clipped to that window. The spools keep growing for the rest of the capture.
+  const std::string patch = "{\"flush_reason\":" + jsonQuote(job.reason) +
+                            ",\"flush_name\":" + jsonQuote(job.name) +
+                            ",\"flush_window_s\":" + std::to_string(job.seconds) +
+                            ",\"flush_trigger\":" + (job.trigger ? "true" : "false") + "}";
+  std::vector<std::string> flushWarnings;
+  if (std::shared_ptr<inst::Ingest> ingest = currentIngest()) {
+    const std::vector<inst::SpoolInfo> spools = ingest->snapshot();
+    flushWarnings = mergeSpools(*ingest, spools, *result, true, false, patch);
+  }
+  CaptureSummary summary = toSummary(*result, std::move(flushWarnings));
+  FlushedEvent event;
+  event.path = summary.path;
+  event.name = job.name;
+  event.reason = job.reason;
+  event.duration_s = summary.duration_s;
+  event.events_lost = summary.events_lost;
+  {
+    std::lock_guard lock(m_mutex);
+    event.coalesced = m_coalesced;
+    m_coalesced = 0;
+    m_lastFlushPath = summary.path;
+    emit(event);
+  }
+  TACHYON_LOG_INFO("agent: flushed '{}' ({} s window) -> {}", job.reason, job.seconds, summary.path);
+  return summary;
+}
+
 Response Agent::handleFlush(const FlushRequest& req) {
+  FlushJob job;
+  job.trigger = req.trigger;
   {
     std::lock_guard lock(m_mutex);
     switch (m_state.load()) {
@@ -341,32 +524,70 @@ Response Agent::handleFlush(const FlushRequest& req) {
         return makeErrorResponse(std::nullopt,
                                  makeError(ErrorCode::Busy, "capture is not in a flushable state"));
     }
-    if (m_flushing)
-      return makeErrorResponse(std::nullopt, makeError(ErrorCode::Busy, "a flush is already in progress"));
+    if (!m_circular) {
+      if (req.trigger && !m_loggedNotCircular) {
+        m_loggedNotCircular = true;
+        TACHYON_LOG_WARN(
+            "agent: flush requested by pid {} ('{}') but the capture is not circular; start it with "
+            "--circular-mb to use the flight recorder",
+            req.pid, req.reason.empty() ? req.name : req.reason);
+      }
+      return makeErrorResponse(
+          std::nullopt,
+          makeError(ErrorCode::InvalidArgument, "flush requires a circular capture (circular_mb > 0)"));
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (req.trigger) {
+      // Rate limit: one flush at a time, and a pause after the previous accepted trigger.
+      const bool tooSoon =
+          m_haveTrigger && now - m_lastTrigger < std::chrono::milliseconds(m_config.flushCoalesceMs);
+      if (m_flushing || tooSoon) {
+        ++m_coalesced;
+        CaptureSummary previous;
+        previous.path = m_lastFlushPath;
+        TACHYON_LOG_DEBUG("agent: flush trigger '{}' coalesced ({} so far)", req.reason, m_coalesced);
+        return makeOkResponse(std::nullopt, previous);
+      }
+      m_haveTrigger = true;
+      m_lastTrigger = now;
+      job.reason = req.reason.empty() ? req.name : req.reason;
+      job.seconds = m_config.flushSeconds;
+      job.name = uniqueFlushName(processNameFor(req.pid, m_sessionExeStem) + "-" +
+                                 sanitizeFileStem(job.reason, 40) + "-" + timestampText());
+    } else {
+      if (m_flushing)
+        return makeErrorResponse(std::nullopt, makeError(ErrorCode::Busy, "a flush is already in progress"));
+      job.reason = req.reason.empty() ? req.name : req.reason;
+      job.seconds = req.seconds;
+      job.name = uniqueFlushName(req.name);
+    }
+    job.coalesced = m_coalesced;
     m_flushing = true;  // stop / cancel / shutdown wait for it instead of interleaving
+    if (req.trigger) {
+      // Answer now, flush in the background: the requester is the engine's main thread.
+      CaptureSummary planned;
+      planned.path = (m_sessionOutDir / (job.name + ".tachyon")).string();
+      m_lastFlushPath = planned.path;
+      if (m_flushWorker.joinable()) m_flushWorker.join();  // the previous one is done (m_flushing was false)
+      m_flushWorker = std::thread([this, job] {
+        auto flushed = performFlush(job);
+        if (!flushed.ok()) {
+          TACHYON_LOG_ERROR("agent: flush '{}' failed: {}", job.name, flushed.error().toString());
+          std::lock_guard lock(m_mutex);
+          emit(ErrorEvent{"flush '" + job.name + "' failed: " + flushed.error().message});
+        }
+        endFlush();
+      });
+      return makeOkResponse(std::nullopt, planned);
+    }
   }
-  // Clears the flag on every exit path (return or exception), so stop / cancel / shutdown cannot wedge.
   struct FlushGuard {
     Agent& agent;
-    ~FlushGuard() {
-      {
-        std::lock_guard lock(agent.m_mutex);
-        agent.m_flushing = false;
-      }
-      agent.m_flushDone.notify_all();
-    }
+    ~FlushGuard() { agent.endFlush(); }
   } flushGuard{*this};
-  // No lock across the backend call (it may take seconds and may call the progress callback).
-  auto result = m_backend->flush(req.name, req.seconds);
-  if (!result.ok()) return makeErrorResponse(std::nullopt, result.error());
-  // The flushed trace covers a window of the capture: add what the instrumented processes sent so far,
-  // clipped to that window. The spools keep growing for the rest of the capture.
-  std::vector<std::string> flushWarnings;
-  if (std::shared_ptr<inst::Ingest> ingest = currentIngest()) {
-    const std::vector<inst::SpoolInfo> spools = ingest->snapshot();
-    flushWarnings = mergeSpools(*ingest, spools, *result, true, false);
-  }
-  return makeOkResponse(std::nullopt, toSummary(*result, std::move(flushWarnings)));
+  auto summary = performFlush(job);
+  if (!summary.ok()) return makeErrorResponse(std::nullopt, summary.error());
+  return makeOkResponse(std::nullopt, *summary);
 }
 
 Response Agent::handleCancel() {
@@ -509,11 +730,14 @@ void Agent::shutdown() {
     }
   }
   std::thread worker;
+  std::thread flushWorker;
   {
     std::lock_guard lock(m_mutex);
     worker = std::move(m_worker);
+    flushWorker = std::move(m_flushWorker);
   }
   if (worker.joinable()) worker.join();
+  if (flushWorker.joinable()) flushWorker.join();
 }
 
 }  // namespace tachyon::agent

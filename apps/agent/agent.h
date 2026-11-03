@@ -30,16 +30,33 @@
 // capture ends the connections are drained, the backend converts as usual, and the spools are merged into the
 // finished trace (inst::mergeInstrumentation: scope / fiber / frame-mark / marker / plot / thread-name
 // chunks, kFlagHasInstrumentation). A `flush` merges a snapshot of the spools into the flushed trace, clipped
-// to its window. With no spooled data the trace is left byte for byte as the backend wrote it. A merge
-// failure is logged and the spool directory is kept (`tachyon-cli merge` can redo it); the capture still
-// completes. An `inst_hello` while no capture is running is answered ENOTFOUND: the SDK then falls back to
-// its sidecar file and retries. Only pids that belong to the capture may say hello (else ENOPRIV): any pid in
-// system mode, the attach pid in attach mode, the launched root pid (ITargetWatch::rootPid) in launch mode;
-// with follow_children the descendants are not known through the backend interface, so any pid is accepted
-// there (the peer pid check below still ties the data connection to the hello pid). Backends without
-// ITargetWatch (the mock) accept any pid in launch mode. Per capture the agent caps instrumented processes,
-// connections per process and spool bytes (AgentConfig), and closes data connections whose peer pid differs
-// from the hello pid.
+// to its window. With no spooled data the trace of a stop is left byte for byte as the backend wrote it (a
+// flush still gets its flush_reason entry). A merge failure is logged and the spool directory is kept
+// (`tachyon-cli merge` can redo it); the capture still completes. An `inst_hello` while no capture is running
+// is answered ENOTFOUND: the SDK then falls back to its sidecar file and retries. Only pids that belong to
+// the capture may say hello (else ENOPRIV): any pid in system mode, the attach pid in attach mode, the
+// launched root pid (ITargetWatch::rootPid) in launch mode; with follow_children the descendants are not
+// known through the backend interface, so any pid is accepted there (the peer pid check below still ties the
+// data connection to the hello pid). Backends without ITargetWatch (the mock) accept any pid in launch mode.
+// Per capture the agent caps instrumented processes, connections per process and spool bytes (AgentConfig),
+// and closes data connections whose peer pid differs from the hello pid.
+//
+// Flight recorder (WP-60): a start with circular_mb > 0 is a circular capture. The backend keeps the newest
+// samples; the instrumentation spools become rings (inst/spool.h) that keep the newest max(circular_mb, 64)
+// MiB per process. Any number of flushes can follow; each writes `<dir of the output>/<name>.tachyon` with
+// the last `seconds` of every kind of data (sampling and instrumentation clipped to the same window,
+// instrumented scopes of the window balanced) and a CaptureInfo that carries flush_reason, flush_name and
+// flush_window_s. `name` is made a safe file name (characters outside [A-Za-z0-9._-] become '_') and gets a
+// -N suffix when the file exists. A flush of a capture that is not circular is rejected. After a flush the
+// agent emits `flushed` to every client.
+//   * A flush request (CLI, viewer) is synchronous: the response carries the path.
+//   * A trigger (FlushRequest::trigger, sent by Tachyon_RequestFlush) is asynchronous so the engine thread is
+//     never held up: the agent uses its own window (AgentConfig::flushSeconds), names the file
+//     `<process>-<reason>-<YYYYMMDD-HHMMSS>`, answers ok with the planned path at once and flushes on a
+//     worker thread; a failure arrives as an `error` event. At most one flush runs at a time; triggers that
+//     arrive while one runs, or within flushCoalesceMs after the previous accepted trigger, are answered ok
+//     with the previous path, counted, and reported as `coalesced` by the next flushed event. A trigger while
+//     the capture is not circular is refused (the SDK call then returns 0) and logged once per capture.
 #pragma once
 
 #include "capture/capture_backend.h"
@@ -49,6 +66,7 @@
 #include "inst/merge.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
@@ -84,6 +102,19 @@ struct AgentConfig {
   // Close SDK connections whose peer process id is not the pid that said hello (Linux SO_PEERCRED, Windows
   // GetNamedPipeClientProcessId).
   bool verifyInstPeerPid = true;
+
+  // Flight recorder (WP-60).
+  // Circular captures keep the newest instrumentation in a ring of segment files of max(circular_mb,
+  // minRingBytes) per process (the total cap above still applies). ringSegmentBytes 0: ring / 8.
+  uint64_t minRingBytes = inst::kMinRingBytes;
+  uint64_t ringSegmentBytes = 0;
+  // Window of a flush requested by the SDK (Tachyon_RequestFlush), in seconds of trace.
+  uint32_t flushSeconds = 10;
+  // SDK triggers that arrive within this long after the previous accepted one are coalesced into it.
+  int flushCoalesceMs = 2000;
+  // A trigger flush waits this long before it looks at the capture, so that what the requester sent just
+  // before asking has been read from its connection.
+  int flushSettleMs = 100;
 };
 
 class Agent final : public control::IRequestHandler {
@@ -113,6 +144,19 @@ class Agent final : public control::IRequestHandler {
   control::Response handleStart(const control::StartRequest& req);
   control::Response handleStop();
   control::Response handleFlush(const control::FlushRequest& req);
+  struct FlushJob {
+    std::string name;    // final file stem
+    std::string reason;  // for the flushed event and the trace
+    uint32_t seconds = 0;
+    bool trigger = false;
+    uint32_t coalesced = 0;
+  };
+  // Runs one flush (backend flush, instrumentation merge, flushed event). m_flushing is held by the caller.
+  Result<control::CaptureSummary> performFlush(const FlushJob& job);
+  // Clears m_flushing and wakes the waiters.
+  void endFlush();
+  // A file stem for `requested` in the output directory of the session that does not exist yet.
+  std::string uniqueFlushName(const std::string& requested) const;
   control::Response handleCancel();
   control::Response handleInstHello(const control::InstHelloRequest& req);
 
@@ -138,7 +182,8 @@ class Agent final : public control::IRequestHandler {
   // Merges the spools into the trace of `result`; logs problems instead of failing the capture.
   // Returns the problems worth telling the client (they end up in CaptureSummary::warnings).
   std::vector<std::string> mergeSpools(inst::Ingest& ingest, const std::vector<inst::SpoolInfo>& spools,
-                                       const capture::CaptureResult& result, bool clip, bool removeWhenDone);
+                                       const capture::CaptureResult& result, bool clip, bool removeWhenDone,
+                                       const std::string& captureInfoPatch = {});
 
   std::unique_ptr<capture::ICaptureBackend> m_backend;
   AgentConfig m_config;
@@ -159,8 +204,16 @@ class Agent final : public control::IRequestHandler {
   std::atomic<double> m_progress{0.0};
   std::thread m_worker;
 
-  std::shared_ptr<inst::Ingest> m_ingest;  // guarded by m_mutex
-  bool m_circular = false;                 // guarded by m_mutex: the running capture is a flight recorder
+  std::thread m_flushWorker;                              // trigger flushes; guarded by m_mutex
+  std::filesystem::path m_sessionOutDir;                  // guarded by m_mutex: where flushes are written
+  std::string m_sessionExeStem;                           // launch target's file name without extension
+  bool m_loggedNotCircular = false;                       // guarded by m_mutex
+  bool m_haveTrigger = false;                             // guarded by m_mutex
+  std::chrono::steady_clock::time_point m_lastTrigger{};  // guarded by m_mutex
+  std::string m_lastFlushPath;                            // guarded by m_mutex: answer of coalesced triggers
+  uint32_t m_coalesced = 0;                               // guarded by m_mutex: since the last flushed event
+  std::shared_ptr<inst::Ingest> m_ingest;                 // guarded by m_mutex
+  bool m_circular = false;  // guarded by m_mutex: the running capture is a flight recorder
   capture::CaptureMode m_sessionMode = capture::CaptureMode::System;  // guarded by m_mutex
   uint32_t m_sessionPid = 0;                                          // attach target; guarded by m_mutex
   bool m_sessionFollow = false;                                       // follow_children; guarded by m_mutex

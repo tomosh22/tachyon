@@ -6,7 +6,10 @@
 //   start   <target> [start options] [--no-start] [--wait]
 //   stop    [--wait]
 //   resume                          starts the recording of a launch parked with `start --no-start`
-//   flush   --name N --seconds S
+//   flush   --name N --seconds S [--reason R]
+//             circular (flight recorder) captures only: writes the last S seconds to <out dir>/<N>.tachyon (N
+//             is made a safe file name and gets a -N suffix when it exists). `capture` prints the agent's
+//             `flushed` events (also those caused by Tachyon_RequestFlush) while it waits.
 //   cancel
 //   merge   TRACE.tachyon INST.tachyon-inst [--out PATH] [--clip] [--no-siblings] [--force]
 //             offline (no agent): merges the instrumentation stream of an SDK sidecar file, plus its numbered

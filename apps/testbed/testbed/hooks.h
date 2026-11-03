@@ -27,6 +27,19 @@ inline bool instrumentationEnabled() {
   return instrumentationFlag().load(std::memory_order_relaxed);
 }
 
+// Thread-safe. `--flush-on-hitch` (needs `--instrument`): the frames scenario calls
+// Tachyon_RequestFlush("hitch") right after each planted hitch frame ended.
+inline std::atomic<bool>& flushOnHitchFlag() {
+  static std::atomic<bool> flag{false};
+  return flag;
+}
+inline void setFlushOnHitch(bool on) {
+  flushOnHitchFlag().store(on, std::memory_order_relaxed);
+}
+inline bool flushOnHitchEnabled() {
+  return instrumentationEnabled() && flushOnHitchFlag().load(std::memory_order_relaxed);
+}
+
 // Scope that begins/ends a Tachyon event when instrumentation is on. The constructor is force-inlined so the
 // SDK captures a return address inside the caller, like tachyon::Scope. `id` must be a string literal.
 class InstScope {
@@ -97,6 +110,12 @@ inline void onHitch(uint64_t frameIndex) {
     const std::string text = "frame " + std::to_string(frameIndex);
     Tachyon_Marker("testbed.hitch", text.c_str(), TACHYON_MAKE_COLOR(255, 64, 64));
   }
+}
+// Thread-safe. Called by the frames thread after a hitch frame ended (its frame mark is out). Returns 1 when
+// the agent accepted the flush, 0 when it refused or is not there, -1 when --flush-on-hitch is off.
+inline int onHitchFrameEnded() {
+  if (!flushOnHitchEnabled()) return -1;
+  return Tachyon_RequestFlush("hitch");
 }
 // Thread-safe. Called on a scenario thread right after it was named (also set at the OS level).
 inline void onThreadNamed(const std::string& name) {

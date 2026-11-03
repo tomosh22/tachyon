@@ -257,5 +257,57 @@ TEST(ProtocolEvent, SpecEventLinesParse) {
   EXPECT_FALSE(decodeServerMessage("garbage").ok());
 }
 
+// WP-60: the optional flight recorder additions.
+TEST(ProtocolFlush, TriggerFieldsAreOptionalAndRoundTrip) {
+  // The plain request is unchanged on the wire.
+  EXPECT_EQ(encodeRequest({7, FlushRequest{"hitch", 10}}),
+            R"({"cmd":"flush","id":7,"name":"hitch","seconds":10})");
+  FlushRequest trigger;
+  trigger.name = "hitch";
+  trigger.seconds = 10;
+  trigger.reason = "hitch \"quoted\"";
+  trigger.trigger = true;
+  trigger.pid = 4242;
+  auto decoded = decodeRequest(encodeRequest({8, trigger}));
+  ASSERT_TRUE(decoded.ok());
+  const auto& f = std::get<FlushRequest>(decoded->body);
+  EXPECT_EQ(f.reason, "hitch \"quoted\"");
+  EXPECT_TRUE(f.trigger);
+  EXPECT_EQ(f.pid, 4242u);
+  // What the SDK sends (name, seconds, reason, trigger, pid) and an old client (name, seconds only).
+  auto sdk = decodeRequest(
+      R"({"id":1,"cmd":"flush","name":"hitch","seconds":10,"reason":"hitch","trigger":true,"pid":9})");
+  ASSERT_TRUE(sdk.ok());
+  EXPECT_TRUE(std::get<FlushRequest>(sdk->body).trigger);
+  auto old = decodeRequest(R"({"id":2,"cmd":"flush","name":"n","seconds":3})");
+  ASSERT_TRUE(old.ok());
+  EXPECT_FALSE(std::get<FlushRequest>(old->body).trigger);
+  EXPECT_TRUE(std::get<FlushRequest>(old->body).reason.empty());
+  EXPECT_FALSE(decodeRequest(R"({"id":3,"cmd":"flush","name":"n","seconds":3,"trigger":"yes"})").ok());
+}
+
+TEST(ProtocolFlush, FlushedEventRoundTrips) {
+  FlushedEvent e;
+  e.path = "/tmp/x/game-hitch-20261103-010203.tachyon";
+  e.name = "game-hitch-20261103-010203";
+  e.reason = "hitch";
+  e.duration_s = 9.5;
+  e.events_lost = 3;
+  EXPECT_EQ(encodeEvent(e).find("coalesced"), std::string::npos) << "only encoded when non-zero";
+  e.coalesced = 2;
+  auto decoded = decodeServerMessage(encodeEvent(e));
+  ASSERT_TRUE(decoded.ok());
+  const auto* back = std::get_if<FlushedEvent>(&std::get<Event>(*decoded));
+  ASSERT_NE(back, nullptr);
+  EXPECT_EQ(back->path, e.path);
+  EXPECT_EQ(back->name, e.name);
+  EXPECT_EQ(back->reason, "hitch");
+  EXPECT_DOUBLE_EQ(back->duration_s, 9.5);
+  EXPECT_EQ(back->events_lost, 3u);
+  EXPECT_EQ(back->coalesced, 2u);
+  EXPECT_TRUE(decodeServerMessage(R"({"event":"flushed","path":"p"})").ok());
+  EXPECT_FALSE(decodeServerMessage(R"({"event":"flushed"})").ok());
+}
+
 }  // namespace
 }  // namespace tachyon::control
