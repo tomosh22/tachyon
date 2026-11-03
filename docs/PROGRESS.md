@@ -56,7 +56,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
 | WP-71 | Scheduler events | A | merged (tracepoint path verified on CI's privileged step) | wp/71-sched-events | 2026-11-02 |
 | WP-72 | DWARF symbol provider | B | merged (WP-72b follow-up) | wp/72-dwarf-provider | 2026-10-25 |
-| WP-73 | Linux SDK transport and privileges | — | not started | wp/73-linux-sdk | |
+| WP-73 | Linux SDK transport and privileges | A | in progress | wp/73-linux-sdk-doctor | 2026-11-03 |
 
 ## Milestone gates
 
