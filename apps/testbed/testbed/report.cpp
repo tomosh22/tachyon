@@ -88,9 +88,26 @@ std::string checkShareList(const json& list, const char* what) {
   return {};
 }
 
+// True for a `measured` list in which nothing was measured at all: every share and every tick count is 0
+// (the thread never got the cpu while its scenario ran). Such a list cannot sum to 1.
+bool isStarvedMeasured(const json& list) {
+  if (!list.is_array() || list.empty()) return false;
+  for (const auto& entry : list) {
+    if (!entry.is_object() || !entry.contains("share") || !entry["share"].is_number() ||
+        entry["share"].get<double>() != 0.0 || !entry.contains("tsc_ticks") ||
+        !entry["tsc_ticks"].is_number_unsigned() || entry["tsc_ticks"].get<uint64_t>() != 0)
+      return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 Result<void> validateReportJson(const json& j) {
+  return validateReportJson(j, nullptr);
+}
+
+Result<void> validateReportJson(const json& j, std::vector<std::string>* warnings) {
   if (!j.is_object()) return invalid("report is not an object");
   if (j.value("schema", std::string()) != kReportSchema) return invalid("missing or unknown `schema`");
   const char* strings[] = {"tool", "platform", "mode"};
@@ -127,6 +144,15 @@ Result<void> validateReportJson(const json& j) {
       }
       for (const char* key : {"expected", "measured"}) {
         if (!thread.contains(key)) return invalid("scenario `" + name + "` thread is missing `" + key + "`");
+        if (std::string(key) == "measured" && isStarvedMeasured(thread[key])) {
+          // A starved thread (an overloaded machine gave it no cpu) is a finding about the machine, not a
+          // malformed report.
+          if (warnings != nullptr)
+            warnings->push_back("scenario `" + name + "` thread `" + thread["name"].get<std::string>() +
+                                "` measured nothing: it got no cpu while the scenario ran (the machine is "
+                                "overloaded); its shares are not meaningful");
+          continue;
+        }
         const std::string error = checkShareList(thread[key], key);
         if (!error.empty())
           return invalid("scenario `" + name + "` thread `" + thread["name"].get<std::string>() +

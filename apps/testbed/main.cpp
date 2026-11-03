@@ -125,11 +125,14 @@ int main(int argc, char** argv) {
     return 1;
   }
   const auto json = toJson(run.value());
-  if (auto valid = validateReportJson(json); !valid.ok()) {
+  std::vector<std::string> warnings;
+  if (auto valid = validateReportJson(json, &warnings); !valid.ok()) {
     std::fprintf(stderr, "tachyon-testbed: internal error, report fails its own schema: %s\n",
                  valid.error().toString().c_str());
     return 1;
   }
+  for (const std::string& warning : warnings)
+    std::fprintf(stderr, "tachyon-testbed: warning: %s\n", warning.c_str());
   const std::string text = json.dump(pretty ? 2 : -1);
   std::fprintf(stdout, "%s\n", text.c_str());
   return 0;
