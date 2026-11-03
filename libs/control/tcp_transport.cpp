@@ -372,11 +372,11 @@ Result<TcpEndpoint> parseTcpEndpoint(std::string_view text) {
   TcpEndpoint out;
   std::string_view port;
   if (!text.empty() && text.front() == '[') {
-    const size_t close = text.find(']');
-    if (close == std::string_view::npos || close + 1 >= text.size() || text[close + 1] != ':')
+    const size_t bracket = text.find(']');
+    if (bracket == std::string_view::npos || bracket + 1 >= text.size() || text[bracket + 1] != ':')
       return makeError(ErrorCode::InvalidArgument, "expected [ipv6-address]:port");
-    out.host = std::string(text.substr(1, close - 1));
-    port = text.substr(close + 2);
+    out.host = std::string(text.substr(1, bracket - 1));
+    port = text.substr(bracket + 2);
   } else {
     const size_t colon = text.rfind(':');
     if (colon == std::string_view::npos)

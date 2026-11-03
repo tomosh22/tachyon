@@ -58,8 +58,17 @@ Result<std::string> loadTokenFile(const std::filesystem::path& path, size_t minC
 }
 
 std::filesystem::path tokenFileFromEnvironment() {
+#if TACHYON_PLATFORM_WINDOWS
+  char* buffer = nullptr;
+  size_t length = 0;
+  std::filesystem::path result;
+  if (_dupenv_s(&buffer, &length, "TACHYON_AGENT_TOKEN_FILE") == 0 && buffer != nullptr) result = buffer;
+  std::free(buffer);
+  return result;
+#else
   const char* env = std::getenv("TACHYON_AGENT_TOKEN_FILE");
   return env != nullptr ? std::filesystem::path(env) : std::filesystem::path();
+#endif
 }
 
 }  // namespace tachyon::control

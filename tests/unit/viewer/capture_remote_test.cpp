@@ -124,9 +124,9 @@ TEST(CaptureRemote, ConnectDialogProbeAndSettings) {
   CaptureController& cap = rig.cap();
 
   // The probe tells what it found, and why not.
-  RemoteProbe ok = probeRemoteAgent(rig.remote.hostPort, pathToUtf8(rig.remote.tokenFile));
-  EXPECT_TRUE(ok.ok) << ok.message;
-  EXPECT_NE(ok.message.find("mock backend"), std::string::npos) << ok.message;
+  RemoteProbe good = probeRemoteAgent(rig.remote.hostPort, pathToUtf8(rig.remote.tokenFile));
+  EXPECT_TRUE(good.ok) << good.message;
+  EXPECT_NE(good.message.find("mock backend"), std::string::npos) << good.message;
   EXPECT_FALSE(probeRemoteAgent("not an address", pathToUtf8(rig.remote.tokenFile)).ok);
   EXPECT_FALSE(probeRemoteAgent(rig.remote.hostPort, "").ok);
   const RemoteProbe missing = probeRemoteAgent(rig.remote.hostPort, pathToUtf8(rig.dir.path() / "nope"));
