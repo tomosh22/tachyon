@@ -442,6 +442,25 @@ TEST(SchedConvert, SwitchWithMismatchedSampleTaskSetsTheOtherThreadFlag) {
             trace::kSwitchFlagStackFromOtherThread);
 }
 
+TEST(SchedConvert, AnEventMergedAheadOfItsThreadsForkDoesNotSplitTheThreadRecord) {
+  SchedSpool f("tracepoint");
+  f.meta().fork(kHolder, 1, kHolder, 1, kStart + 10, SchedSpool::id(1, 1, kStart + 10));
+  f.meta().comm(kHolder, kHolder, "prog", true, SchedSpool::id(kHolder, kHolder, kStart + 20));
+  // The waiter's first switch-out is merged before the parent's FORK record for it (a few ns apart).
+  f.switchSample(kHolder, kWaiter, kStart + 1000, 1, kWaiter, 1, 0);
+  f.meta().fork(kHolder, kHolder, kWaiter, kHolder, kStart + 1005,
+                SchedSpool::id(kHolder, kHolder, kStart + 1005));
+  f.switchSample(0, 0, kStart + 2100, 1, 0, 0, kWaiter, {kContextKernel, kKernelA});
+  ASSERT_TRUE(convertSpool(f.build(), f.out(), target(kHolder)).ok());
+  Built b = loadModel(f.out());
+  size_t records = 0;
+  for (const auto& t : b.model.threads) records += t.tid == kWaiter ? 1 : 0;
+  EXPECT_EQ(records, 1u) << "one thread record per live thread";
+  bool waiting = false;
+  for (const auto& iv : statesOf(b.model, kWaiter)) waiting |= iv.state == ThreadState::Waiting;
+  EXPECT_TRUE(waiting);
+}
+
 TEST(SchedConvert, WindowDropsOlderSchedulerEvents) {
   SchedSpool f("tracepoint");
   lockStream(f);

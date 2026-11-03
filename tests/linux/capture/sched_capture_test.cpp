@@ -175,7 +175,9 @@ std::map<uint32_t, size_t> lockThreads(const Loaded& l) {
   std::map<uint32_t, size_t> out;
   for (size_t t = 0; t < l.model.threads.size(); ++t) {
     const auto& th = l.model.threads[t];
-    if (th.pid == l.pid && th.name.rfind("tb-lock-", 0) == 0) out[th.tid] = t;
+    if (th.pid != l.pid || th.name.rfind("tb-lock-", 0) != 0) continue;
+    auto it = l.model.tidToThread.find(th.tid);  // the record the event streams are attached to
+    if (it != l.model.tidToThread.end()) out[th.tid] = it->second.get();
   }
   return out;
 }
@@ -314,6 +316,16 @@ TEST_F(SchedTracepointCapture, LockScenarioWaitersAreWokenByTheHolderSystemWide)
   ASSERT_FALSE(l.model.threads.empty());
   const auto locks = lockThreads(l);
   ASSERT_EQ(locks.size(), 2u) << "the two tb-lock threads are in the trace";
+  for (size_t t = 0; t < l.model.threads.size(); ++t) {
+    const auto& th = l.model.threads[t];
+    if (th.pid != l.pid) continue;
+    auto it = l.model.tidToThread.find(th.tid);
+    std::printf(
+        "[sched] thread index %zu tid %u name '%s' first_ts %llu last_ts %llu target %d; tidToThread -> "
+        "%lld\n",
+        t, th.tid, th.name.c_str(), (unsigned long long)th.first_ts, (unsigned long long)th.last_ts,
+        th.is_target ? 1 : 0, it == l.model.tidToThread.end() ? -1LL : (long long)it->second.get());
+  }
   for (const auto& [tid, thread] : locks) {
     uint64_t outs = 0, ins = 0, readies = 0, waking = 0, running = 0, wait = 0, ready = 0, unknown = 0,
              unknownNs = 0;

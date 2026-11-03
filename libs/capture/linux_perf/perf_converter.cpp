@@ -154,6 +154,7 @@ struct Thr {
   uint64_t startTs = 0, endTs = 0;
   bool preexisting = false;
   bool fromRundown = false;
+  bool inferred = false;  // created by an event of the thread seen before any FORK / rundown record for it
   bool exited = false;
   std::string name;
   uint64_t kept = 0;
@@ -381,6 +382,7 @@ uint32_t Converter::ensureThread(uint32_t tid, uint32_t proc, uint64_t ts) {
   t.tid = tid;
   t.proc = proc;
   t.preexisting = true;
+  t.inferred = true;
   t.startTs = m_startTs;
   (void)ts;
   m_threads.push_back(std::move(t));
@@ -480,6 +482,13 @@ void Converter::onFork(const ParsedRecord& r, bool rundown) {
       Thr& s = m_threads[stale->second];
       if (s.fromRundown && s.proc == proc && !s.exited && !rundown) {  // already known from the rundown
         s.fromRundown = false;
+        return;
+      }
+      if (s.inferred && s.proc == proc && !s.exited && !rundown) {
+        // An event of the thread was merged ahead of its FORK record (records of different cpus whose
+        // timestamps are a few ns apart): the FORK confirms the thread instead of replacing it, so that its
+        // events stay with one thread record.
+        s.inferred = false;
         return;
       }
       if (!s.exited) {
