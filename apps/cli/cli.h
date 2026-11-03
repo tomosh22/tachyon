@@ -23,6 +23,17 @@
 //             --symbols (repeatable) takes a symbol directory, file, or tracegen *.symbols.json override;
 //             --symbol-server (repeatable) a symbol store URL. Symbols matter for speedscope only. --out -
 //             writes to stdout (and prints no summary). With --json the summary is one JSON object on stdout.
+//   doctor  [--hz N] [--agent PATH]
+//             offline (no agent): Linux: checks kernel version, perf_event_paranoid and the other perf
+//             sysctls, capabilities of this process and of the agent binary, tracefs and scheduler
+//             tracepoints, trial perf_event_open calls, rlimits, ptrace scope, the agent socket directory and
+//             symbol sources. Each item prints PASS, WARN or FAIL with a fix hint. --hz (default 8000) is
+//             compared with kernel.perf_event_max_sample_rate; --agent names the agent binary (default: next
+//             to tachyon-cli, then $PATH); --socket / --pipe name the agent socket whose directory is
+//             checked. With --json stdout is one object
+//             {"schema":1,"platform","ok","exit_code","requested_hz","summary",
+//             "checks":[{"id","title","status","detail","hint"}]}. Exit 0 when nothing FAILed (WARN does not
+//             fail), 1 when any item FAILed, 3 on a usage error. Windows: prints a note, exits 0.
 //   capture <target> [start options] [--duration S]
 //             start + wait for --duration seconds or for the target to exit + stop + wait for capture_done
 //

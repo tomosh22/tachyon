@@ -23,3 +23,17 @@ if(TARGET sched_capture_linux_tests)
   target_compile_definitions(sched_capture_linux_tests PRIVATE TACHYON_TESTBED_EXE="$<TARGET_FILE:tachyon-testbed>")
   add_dependencies(sched_capture_linux_tests tachyon-testbed)
 endif()
+
+# WP-73: the SDK's Unix socket transport against the real agent process (--backend perf) and the CLI: sampled
+# data and the SDK's scopes in one trace, merged, no sidecar file. Skips like the tests above.
+tachyon_add_test(sdk_socket_linux_tests
+  SOURCES sdk_socket_test.cpp ../../unit/agent/process_util.cpp
+  DEPS tachyon::capture_linux_perf tachyon::capture tachyon::control tachyon::inst tachyon::trace
+       nlohmann_json::nlohmann_json
+  LABELS linux_privileged)
+if(TARGET sdk_socket_linux_tests)
+  target_compile_definitions(sdk_socket_linux_tests PRIVATE TACHYON_TESTBED_EXE="$<TARGET_FILE:tachyon-testbed>"
+                                                            TACHYON_AGENT_EXE="$<TARGET_FILE:tachyon-agent>"
+                                                            TACHYON_CLI_EXE="$<TARGET_FILE:tachyon-cli>")
+  add_dependencies(sdk_socket_linux_tests tachyon-testbed tachyon-agent tachyon-cli)
+endif()
