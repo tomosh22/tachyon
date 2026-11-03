@@ -55,6 +55,10 @@ struct DoctorEnv {
   std::string debuginfodUrls;                      // $DEBUGINFOD_URLS
   // Thread-safe by contract. True when the directory exists and the current user may create files in it.
   std::function<bool(const std::filesystem::path&)> isWritableDir;
+  // Thread-safe by contract. Mode bits (permissions only) and owner uid of a directory; false when it cannot
+  // be read. Null: the privacy check of the socket directory is skipped.
+  std::function<bool(const std::filesystem::path&, uint32_t& mode, uint32_t& owner)> statDir;
+  uint32_t uid = 0;  // the current user, for statDir's owner comparison
   // Trial perf_event_open of the cpu-clock event with callchains, closed again at once. Return 0 on success
   // or the errno. Null: the trial cannot be made on this platform (the check reports "unknown").
   std::function<int()> trialSystemWide;
