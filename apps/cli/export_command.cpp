@@ -299,7 +299,9 @@ int runExport(const std::vector<std::string>& args, bool json, std::ostream& out
     std::error_code sizeEc;
     const auto size = fs::file_size(fs::path(a.outPath), sizeEc);
     if (!sizeEc) bytes = size;
-    if (!result.ok()) fs::remove(fs::path(a.outPath), sizeEc);
+    // Only remove what we wrote: never delete a device or other special file named by --out.
+    if (!result.ok() && fs::is_regular_file(fs::path(a.outPath), sizeEc))
+      fs::remove(fs::path(a.outPath), sizeEc);
   }
   if (!result.ok()) {
     fail(json, out, err, result.error().code == ErrorCode::IoError ? "EIO" : "EINTERNAL",

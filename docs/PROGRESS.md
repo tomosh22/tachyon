@@ -50,7 +50,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-60 | Flight recorder mode | — | not started | wp/60-flight-recorder | |
 | WP-61 | Remote capture | — | not started | wp/61-remote | |
 | WP-62 | CI report tool | E | merged (WP-62b follow-up) | wp/62-ci-report | 2026-11-02 |
-| WP-63 | Exporters | E | in progress | wp/63-exporters | 2026-11-03 |
+| WP-63 | Exporters | E | merged | wp/63-exporters | 2026-11-03 |
 | WP-64 | Large-trace performance pass | — | not started | wp/64-perf-pass | |
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
@@ -198,7 +198,14 @@ The verifier passed it with no blocking defects. The release and ASan builds eac
 
 The verifier passed it. Frame percentiles (lower order statistic), per-thread state totals, top functions and scope stats match the fixtures' expected.json exactly. Analysis on medium takes 0.18–0.23 s against a 2 s budget. The baseline diff exit codes, malformed-input handling and determinism were all verified: output is byte-identical across runs and working directories, with no absolute paths. Orchestrator: completed the build/test/push when the implementer stopped, and fixed an MSVC C4996 (getenv) error in a test.
 
+## WP-63 notes
+
+Verifier PASS. The speedscope output validates against the official schema (vendored, byte-identical to the live one) on 7 fixtures, and per-function ns equal the generator's expected ticks. Chrome traces are well formed (M/X/i/C only, ordered per track, metadata complete), scope counts and durations match expected.json, and CPU slices sum to Running ticks. Robustness covers names, ids, ranges and exit codes. On medium, speedscope takes 0.35 s and produces 472 MiB (inherent to the sampled format); Chrome takes 0.023 s for 6.4 MiB. Orchestrator fix: a failed export only deletes `--out` when it is a regular file (it deleted /dev/full in the verifier's probe).
+
 ## Queued follow-ups
+
+- Shared symbol-setup helper: libs/report/analyze.cpp and apps/cli/export_command.cpp duplicate the locator, override, provider and resolve setup.
+- Flaky tests under ctest -j (pass alone): AgentInst.TheCliPrintsMergeWarningsOnStderrAndInJson, CancelTest.ResolveAllAsyncAcceptsAConstModel, PerfCapture.CircularCaptureFlushesTheLastSeconds, CancellationTest.TwentyMillionSamplesReturnWithinBudget. Queue a flake-fix WP.
 
 - WP-62b: the baseline diff compares top-N function shares only, so it misses a function rising from about 1% to about 4% in a flat profile. Fix: carry a larger internal function list in the baseline (all functions with at least 0.5% share), and compare absolute exclusive_ms and total CPU with thresholds. Also add notes for new or removed scopes and frame series, and a note when the current trace is partial.
 
