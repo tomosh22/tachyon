@@ -56,7 +56,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
 | WP-71 | Scheduler events | A | merged (tracepoint path verified on CI's privileged step) | wp/71-sched-events | 2026-11-02 |
 | WP-72 | DWARF symbol provider | B | merged (WP-72b follow-up) | wp/72-dwarf-provider | 2026-10-25 |
-| WP-73 | Linux SDK transport and privileges | A | in progress | wp/73-linux-sdk-doctor | 2026-11-03 |
+| WP-73 | Linux SDK transport and privileges | A | merged (verifier PASS; privileged SDK socket test ran on CI) | wp/73-linux-sdk-doctor | 2026-11-03 |
 
 ## Milestone gates
 
@@ -210,10 +210,14 @@ The verifier found a duplicate-ThreadRec defect (events after PERF_RECORD_EXIT r
 
 Verifier fix round complete; CI green (Windows job re-run once for the known SdkOverheadPerf 10 ns flake, queued to WP-QA1). Search highlight is now linear: a 1 MB line scrolled far right draws in 0.02 ms (budget 2 ms). Locate-file rules are checked to resolve to the chosen file, falling back to an exact-path rule. In mixed mode, sampled post-call rows are listed under the call's line (`InstructionRow::groupLine`); a leaf sample on a post-call instruction is credited to its own line by `linesForFunction` but listed under the call's line here (documented). PathPicker takes a title and hint. 50k-line file: worker open about 10 ms, panel frame about 0.07 ms. DIA source test in tests/windows/viewer needs Windows verification.
 
+## WP-73 notes
+
+Verifier PASS. `tachyon-cli doctor [--json] [--hz N] [--agent PATH] [--socket PATH]` runs 15 Linux checks with PASS/WARN/FAIL and fix hints (exit 0 / 1 on FAIL / 3 usage); Windows prints a note. Docs: apps/agent/LINUX.md, apps/cli/README.md. CI's privileged step ran SdkSocketPerf for real (real agent with the perf backend + instrumented testbed: events_lost 0, balanced scopes, no sidecar). Accepted deviation: `hasCapturePrivileges()` also accepts CAP_SYS_ADMIN and perf_event_paranoid <= 0. Open: the agent still refuses unprivileged users at paranoid 1–2 although the backend could do per-process captures (current behavior documented). Follow-ups: agent ENOPRIV message still says "root or CAP_PERFMON"; doctor treats a relative --socket as an unwritable directory and does not check the socket dir is 0700; ptrace_scope=1 PASS wording is optimistic; Windows doctor checks not implemented.
+
 ## Queued follow-ups
 
 - Shared symbol-setup helper: libs/report/analyze.cpp and apps/cli/export_command.cpp duplicate the locator, override, provider and resolve setup.
-- Flaky tests under ctest -j (pass alone): AgentInst.TheCliPrintsMergeWarningsOnStderrAndInJson, CancelTest.ResolveAllAsyncAcceptsAConstModel, PerfCapture.CircularCaptureFlushesTheLastSeconds, CancellationTest.TwentyMillionSamplesReturnWithinBudget. Queue a flake-fix WP.
+- WP-QA1: MERGED (tests only). Root causes: per-pid inst socket names collided between concurrent test processes (testAddress now uses a private per-process dir); perf sample floors assumed wall seconds instead of CPU seconds (now 0.5 × hz × measured CPU seconds, rings 8 MiB in tests); cancellation latency now measured as the query thread's CPU time (thread_cpu_time.h); integration tests take frame/wait expectations from the testbed report, assert no dropped markers, and retry only on the testbed's "measured shares sum to 0". CancelTest.ResolveAllAsync not reproduced (temp root hardened). Remaining flake items: apps/testbed validateReportJson should accept a starved thread (then drop the retry); the Windows `tachyon-inst-<pid>` pipe name is machine-global across test processes; SdkOverheadPerf.RuntimeDisabledBeginEndPairUnder10ns hit its 20 ns gate once on Windows; SdkSocketPerf failed once in about 80 verifier runs (cause not captured).
 
 - WP-62b: the baseline diff compares top-N function shares only, so it misses a function rising from about 1% to about 4% in a flat profile. Fix: carry a larger internal function list in the baseline (all functions with at least 0.5% share), and compare absolute exclusive_ms and total CPU with thresholds. Also add notes for new or removed scopes and frame series, and a note when the current trace is partial.
 
