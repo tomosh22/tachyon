@@ -11,10 +11,14 @@
 namespace tachyon::viewer {
 
 namespace {
-constexpr const char* kTitle = "Add symbol path";
-}
+constexpr const char* kDefaultTitle = "Add symbol path";
+constexpr const char* kDefaultHint =
+    "Choose a directory with symbol files (or a symbols file) for the unresolved modules.";
+}  // namespace
 
-void PathPicker::open(const std::filesystem::path& startDir) {
+void PathPicker::open(const std::filesystem::path& startDir, std::string title, std::string hint) {
+  m_title = title.empty() ? kDefaultTitle : std::move(title);
+  m_hint = hint.empty() ? kDefaultHint : std::move(hint);
   std::error_code ec;
   std::filesystem::path dir = startDir;
   if (dir.empty() || !std::filesystem::is_directory(dir, ec)) dir = std::filesystem::current_path(ec);
@@ -37,15 +41,14 @@ void PathPicker::navigate(const std::filesystem::path& dir) {
 std::optional<std::filesystem::path> PathPicker::draw() {
   if (!m_open) return std::nullopt;
   if (m_requestOpen) {
-    ImGui::OpenPopup(kTitle);
+    ImGui::OpenPopup(m_title.c_str());
     m_requestOpen = false;
   }
   std::optional<std::filesystem::path> chosen;
   ImGui::SetNextWindowSize(ImVec2(640.0f, 460.0f), ImGuiCond_Appearing);
   bool keepOpen = true;
-  if (ImGui::BeginPopupModal(kTitle, &keepOpen, ImGuiWindowFlags_NoSavedSettings)) {
-    ImGui::TextUnformatted(
-        "Choose a directory with symbol files (or a symbols file) for the unresolved modules.");
+  if (ImGui::BeginPopupModal(m_title.c_str(), &keepOpen, ImGuiWindowFlags_NoSavedSettings)) {
+    ImGui::TextWrapped("%s", m_hint.c_str());
     if (ImGui::Button("Up") && m_directory.has_parent_path() && m_directory.parent_path() != m_directory)
       navigate(m_directory.parent_path());
     ImGui::SameLine();

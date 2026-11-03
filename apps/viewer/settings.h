@@ -27,7 +27,11 @@ struct Settings {
   // other file is offered to the locator (used when its name matches the wanted symbol file).
   std::vector<std::string> symbolSearchPaths;
   std::string cacheDir;  // empty = <user cache dir>/tachyon/symbols (paths.h: defaultSymbolCacheDir)
+  // WP-34/45: how debug-info source paths map to files on this machine. `sourcePathMappings` are prefix
+  // rules (SourceLocator remaps, tried in order); `sourceRoots` are directories searched by the trailing
+  // components of the debug path. "Locate file..." in the Source panel appends to them.
   std::vector<SourcePathMapping> sourcePathMappings;
+  std::vector<std::string> sourceRoots;
   ThemeKind theme = ThemeKind::Dark;
   float uiScale = 1.0f;                  // multiplied with the display DPI scale
   std::vector<std::string> recentFiles;  // UTF-8, most recent first
@@ -51,6 +55,12 @@ struct Settings {
   // Not thread-safe. Appends `path` to symbolSearchPaths unless present or empty; returns whether it was
   // added.
   bool addSymbolSearchPath(const std::string& path);
+  // Not thread-safe (WP-45). Appends the rule unless an equal one exists or `from`/`to` is empty; returns
+  // whether it was added.
+  bool addSourcePathMapping(const SourcePathMapping& mapping);
+  // Not thread-safe (WP-45). Appends `root` to sourceRoots unless present or empty; returns whether it was
+  // added.
+  bool addSourceRoot(const std::string& root);
 };
 
 // Thread-safe: pure functions.

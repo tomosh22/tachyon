@@ -13,7 +13,22 @@ tachyon_add_test(viewer_tests
           status_banner_test.cpp status_bar_test.cpp status_symbols_test.cpp status_toast_test.cpp
           status_shortcuts_test.cpp status_followups_test.cpp
           inst_lanes_test.cpp inst_frames_plots_test.cpp inst_widget_test.cpp
-  DEPS tachyon::viewer_core tachyon::analysis tachyon::symbols)
+          source_model_test.cpp source_widget_test.cpp
+  DEPS tachyon::viewer_core tachyon::analysis tachyon::symbols tachyon::disasm tachyon::trace)
+
+# WP-45: the Source panel tests run against the profiler testbed (real symbols, source lines and code bytes).
+if(TARGET viewer_tests AND TARGET tachyon-testbed)
+  add_dependencies(viewer_tests tachyon-testbed)
+  target_compile_definitions(viewer_tests PRIVATE
+    TACHYON_TESTBED_EXE="$<TARGET_FILE:tachyon-testbed>"
+    TACHYON_TESTBED_SOURCE_DIR="${PROJECT_SOURCE_DIR}/apps/testbed/testbed")
+endif()
+# The hot/cold split fixture of the DWARF provider tests (only when g++ is available).
+if(TARGET viewer_tests AND TARGET dwarf_fixture_split)
+  add_dependencies(viewer_tests dwarf_fixture_split)
+  target_compile_definitions(viewer_tests PRIVATE
+    TACHYON_SPLIT_FIXTURE="${PROJECT_BINARY_DIR}/tests/unit/symbols/dwarf_fixtures/dwarf_fixture_split")
+endif()
 
 # Headless end-to-end checks of the real binary: no display, Null renderer, 100 frames.
 if(TARGET tachyon-viewer AND TACHYON_BUILD_TESTS)
