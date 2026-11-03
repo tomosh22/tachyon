@@ -257,7 +257,7 @@ class TimelineLod {
   // WP-64, graceful degradation. Frees at least `bytes` of level data (the fine strip level first, then the
   // finest stored levels one by one, always keeping the coarsest), only when the build has finished
   // (otherwise returns 0) and returns the bytes freed. Queries for the zooms of the dropped levels are then
-  // answered from the next coarser level or directly from the samples, which is exact but slower. NOT
+  // answered directly from the samples (a coarser level is wider than a pixel): exact but slower. NOT
   // thread-safe against queries or build(): the viewer calls it on the main thread between frames, where it
   // queries.
   size_t trimMemory(size_t bytes);
