@@ -1,0 +1,5 @@
+speedscope-file-format-schema.json
+  Source: https://www.speedscope.app/file-format-schema.json (the schema of the speedscope file format),
+  copied unmodified from dist/release/file-format-schema.json of the npm package speedscope@1.25.0
+  (https://registry.npmjs.org/speedscope/-/speedscope-1.25.0.tgz). Upstream: https://github.com/jlfwong/speedscope
+  License: MIT, Copyright (c) 2018 Jamie Wong. Used by tests/unit/export to validate the speedscope exporter.
