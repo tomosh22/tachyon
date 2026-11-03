@@ -9,6 +9,7 @@
 #include "capture/mock/mock_backend.h"
 #include "cli/cli.h"
 #include "control/client.h"
+#include "inst/decoder.h"
 #include "inst/merge.h"
 #include "trace/trace_reader.h"
 
@@ -60,10 +61,34 @@ class ScopedEnv {
 
 constexpr const char* kScenarios = "spin,lock,jobs,frames,fibers";
 
-// Runs the instrumented testbed to completion; returns its stdout report (the single JSON line).
-nlohmann::json runTestbed(const fs::path& log, const std::string& duration = "3") {
+// Per-thread ring size of the instrumented testbed. The SDK never blocks the application: when its flush
+// thread does not get the cpu for long enough the 64 KiB default ring overflows and records are dropped (and
+// counted). On a loaded machine (ctest -j, other builds) that is a matter of a few milliseconds, which would
+// make every exact count below depend on the scheduler, so these runs use rings that hold the whole run.
+constexpr const char* kRingKb = "16384";
+
+// The testbed validates its own report before printing it and refuses (exit 1) one in which a thread of a
+// scenario measured nothing at all, i.e. never got the cpu while the scenario ran. That says something about
+// the machine, not about the instrumentation under test.
+bool testbedWasStarved(const std::string& log) {
+  return log.find("report fails its own schema") != std::string::npos &&
+         log.find("measured shares sum to 0") != std::string::npos;
+}
+
+// Attempts at a run of the testbed on a machine so busy that a scenario thread gets no cpu (see above).
+constexpr int kTestbedAttempts = 3;
+
+// Runs the instrumented testbed to completion; returns its stdout report (the single JSON line), or null when
+// the testbed was starved and the run is worth repeating (`starved` is set in that case).
+nlohmann::json runTestbedOnce(const fs::path& log, bool& starved, const std::string& duration = "3") {
+  starved = false;
+  ScopedEnv ring(std::map<std::string, std::string>{{"TACHYON_RING_KB", kRingKb}});
   const int code = runToCompletion(
       TACHYON_TESTBED_EXE, {"--instrument", "--scenario", kScenarios, "--duration", duration}, log, 120000);
+  if (code != 0 && testbedWasStarved(readTextFile(log))) {
+    starved = true;
+    return nlohmann::json();
+  }
   EXPECT_EQ(code, 0) << readTextFile(log);
   std::istringstream lines(readTextFile(log));
   std::string line;
@@ -74,6 +99,34 @@ nlohmann::json runTestbed(const fs::path& log, const std::string& duration = "3"
   EXPECT_FALSE(report.is_discarded());
   EXPECT_TRUE(report.is_object()) << readTextFile(log);
   return report;
+}
+
+// Runs the testbed, repeating the run when it was starved. For runs that do not have a capture to restart.
+nlohmann::json runTestbed(const fs::path& log, const std::string& duration = "3") {
+  for (int attempt = 1;; ++attempt) {
+    bool starved = false;
+    nlohmann::json report = runTestbedOnce(log, starved, duration);
+    if (!starved || attempt == kTestbedAttempts) {
+      if (starved) ADD_FAILURE() << "the testbed was starved " << attempt << " times: " << readTextFile(log);
+      return report;
+    }
+  }
+}
+
+// The report's entry for the scenario `name` (null when the run had no such scenario).
+nlohmann::json scenarioReport(const nlohmann::json& report, const std::string& name) {
+  for (const auto& scenario : report["scenarios"])
+    if (scenario["name"].get<std::string>() == name) return scenario;
+  return nlohmann::json();
+}
+
+// Ticks the testbed measured inside the function `fn` of a scenario, over all of its threads.
+uint64_t measuredTicks(const nlohmann::json& scenario, const std::string& fn) {
+  uint64_t ticks = 0;
+  for (const auto& thread : scenario["threads"])
+    for (const auto& m : thread["measured"])
+      if (m["function"].get<std::string>() == fn) ticks += m["tsc_ticks"].get<uint64_t>();
+  return ticks;
 }
 
 // Everything the instrumented testbed run must have left in the trace.
@@ -118,8 +171,15 @@ void expectTestbedInstrumentation(const fs::path& tracePath, const nlohmann::jso
   }
   for (const char* expected :
        {"spin_cycle", "hot_a", "hot_b", "hot_c", "spin_rest", "lock_critical_section", "job_wait",
-        "job_execute", "frame", "frame_update", "frame_render", "frame_wait", "fiber_slice"})
+        "job_execute", "frame", "frame_update", "frame_render", "fiber_slice"})
     EXPECT_TRUE(scopeNames.count(expected) != 0) << "missing scope " << expected;
+  // The frames scenario only waits for the next 60 Hz tick when a frame was on time. A machine too busy to
+  // finish any frame in 16 ms (a loaded CI runner) runs hitch after hitch and legitimately never waits, so
+  // the scope is required exactly when the testbed's own report says it spent time waiting.
+  const nlohmann::json frames = scenarioReport(report, "frames");
+  ASSERT_TRUE(frames.is_object()) << "the report has no frames scenario";
+  if (measuredTicks(frames, "frame_wait") > 0)
+    EXPECT_TRUE(scopeNames.count("frame_wait") != 0) << "missing scope frame_wait";
   EXPECT_GT(lockWaits, 0u);
 
   // Thread names carry the OS thread ids the testbed reported itself, and every scope thread has one.
@@ -145,7 +205,10 @@ void expectTestbedInstrumentation(const fs::path& tracePath, const nlohmann::jso
 
   // Frame marks, plot, markers, fibers.
   const auto marks = reader.readFrameMarks().value();
-  ASSERT_GT(marks.size(), 20u);
+  // One mark per frame the testbed ran (the count itself depends on how busy the machine was).
+  const uint64_t frameCount = frames["details"]["frames"].get<uint64_t>();
+  ASSERT_GT(frameCount, 0u);
+  EXPECT_EQ(marks.size(), frameCount);
   uint64_t previous = 0;
   bool first = true;
   for (const auto& rec : marks) {
@@ -167,6 +230,7 @@ void expectTestbedInstrumentation(const fs::path& tracePath, const nlohmann::jso
     const MarkerRec m = rec;
     ++markerCounts[std::string(strings.get(m.name))];
   }
+  EXPECT_EQ(markerCounts[inst::kDroppedMarkerName], 0) << "the SDK dropped records (a ring overflowed)";
   EXPECT_EQ(markerCounts["testbed.scenario.begin"], 5);
   EXPECT_EQ(markerCounts["testbed.scenario.end"], 5);
 
@@ -217,28 +281,38 @@ TEST(InstIntegration, InstrumentedTestbedAgainstAnInProcessAgentWithTheMockBacke
   InProcessAgent a;
   auto client = control::Client::connectWithRetry(a.address, 5000);
   ASSERT_TRUE(client.ok());
-  control::StartRequest start;
-  start.mode = capture::CaptureMode::System;
-  start.out_path = (a.dir.path() / "tb.tachyon").string();
-  auto started = client->call(start, 10000);
-  ASSERT_TRUE(started.ok());
-  ASSERT_TRUE(started->ok) << started->error;
-
+  // One capture per attempt: a starved testbed run leaves a partial capture behind, which is simply stopped.
   nlohmann::json report;
-  {
-    ScopedEnv env({{"TACHYON_AGENT_PIPE", a.address}, {"TACHYON_SIDECAR", "off"}});
-    report = runTestbed(a.dir.path() / "testbed.log");
+  std::string path;
+  fs::path expectedPath;
+  for (int attempt = 0; attempt < kTestbedAttempts && report.is_null(); ++attempt) {
+    expectedPath = a.dir.path() / ("tb" + std::to_string(attempt) + ".tachyon");
+    control::StartRequest start;
+    start.mode = capture::CaptureMode::System;
+    start.out_path = expectedPath.string();
+    auto started = client->call(start, 10000);
+    ASSERT_TRUE(started.ok());
+    ASSERT_TRUE(started->ok) << started->error;
+
+    bool starved = false;
+    {
+      ScopedEnv env({{"TACHYON_AGENT_PIPE", a.address}, {"TACHYON_SIDECAR", "off"}});
+      report = runTestbedOnce(a.dir.path() / "testbed.log", starved);
+    }
+    auto stop = client->call(control::StopRequest{}, 10000);
+    ASSERT_TRUE(stop.ok());
+    ASSERT_TRUE(stop->ok) << stop->error;
+    auto done = client->waitForEvent(
+        [](const control::Event& e) { return std::holds_alternative<control::CaptureDoneEvent>(e); }, 60000);
+    ASSERT_TRUE(done.ok());
+    path = std::get<control::CaptureDoneEvent>(*done).summary.path;
+    if (!starved) break;
   }
-  auto stop = client->call(control::StopRequest{}, 10000);
-  ASSERT_TRUE(stop.ok());
-  ASSERT_TRUE(stop->ok) << stop->error;
-  auto done = client->waitForEvent(
-      [](const control::Event& e) { return std::holds_alternative<control::CaptureDoneEvent>(e); }, 60000);
-  ASSERT_TRUE(done.ok());
-  const std::string path = std::get<control::CaptureDoneEvent>(*done).summary.path;
-  ASSERT_EQ(fs::path(path), a.dir.path() / "tb.tachyon");
+  ASSERT_TRUE(report.is_object()) << "the testbed was starved in every attempt: "
+                                  << readTextFile(a.dir.path() / "testbed.log");
+  ASSERT_EQ(fs::path(path), expectedPath);
   expectTestbedInstrumentation(path, report);
-  EXPECT_FALSE(fs::exists(a.dir.path() / "tb.tachyon.inst"));
+  EXPECT_FALSE(fs::exists(expectedPath.string() + ".inst"));
 }
 
 TEST(InstIntegration, RealAgentProcessAndCliWithTheMockBackend) {
@@ -253,20 +327,28 @@ TEST(InstIntegration, RealAgentProcessAndCliWithTheMockBackend) {
   auto c = control::Client::connectWithRetry(address, 15000);
   ASSERT_TRUE(c.ok()) << readTextFile(dir.path() / "agent.log");
 
-  const fs::path out = dir.path() / "cli.tachyon";
-  ASSERT_EQ(
-      runToCompletion(TACHYON_CLI_EXE, {"--socket", address, "start", "--system", "--out", out.string()},
-                      dir.path() / "start.log"),
-      0)
-      << readTextFile(dir.path() / "start.log");
+  // One capture per attempt: a starved testbed run leaves a partial capture behind, which is simply stopped.
   nlohmann::json report;
-  {
-    ScopedEnv env({{"TACHYON_AGENT_PIPE", address}, {"TACHYON_SIDECAR", "off"}});
-    report = runTestbed(dir.path() / "testbed.log");
+  fs::path out;
+  for (int attempt = 0; attempt < kTestbedAttempts && report.is_null(); ++attempt) {
+    out = dir.path() / ("cli" + std::to_string(attempt) + ".tachyon");
+    ASSERT_EQ(
+        runToCompletion(TACHYON_CLI_EXE, {"--socket", address, "start", "--system", "--out", out.string()},
+                        dir.path() / "start.log"),
+        0)
+        << readTextFile(dir.path() / "start.log");
+    bool starved = false;
+    {
+      ScopedEnv env({{"TACHYON_AGENT_PIPE", address}, {"TACHYON_SIDECAR", "off"}});
+      report = runTestbedOnce(dir.path() / "testbed.log", starved);
+    }
+    ASSERT_EQ(
+        runToCompletion(TACHYON_CLI_EXE, {"--socket", address, "stop", "--wait"}, dir.path() / "stop.log"), 0)
+        << readTextFile(dir.path() / "stop.log");
+    if (!starved) break;
   }
-  ASSERT_EQ(
-      runToCompletion(TACHYON_CLI_EXE, {"--socket", address, "stop", "--wait"}, dir.path() / "stop.log"), 0)
-      << readTextFile(dir.path() / "stop.log");
+  ASSERT_TRUE(report.is_object()) << "the testbed was starved in every attempt: "
+                                  << readTextFile(dir.path() / "testbed.log");
   expectTestbedInstrumentation(out, report);
 
   agentProc.requestTerminate();

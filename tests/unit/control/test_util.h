@@ -31,14 +31,41 @@ inline unsigned long currentPid() {
 #endif
 }
 
-// Unique, short transport address: a pipe name on Windows, a /tmp socket path on Linux (sun_path is short).
+#if !TACHYON_PLATFORM_WINDOWS
+// A private (per test process) directory for socket files, removed when the process ends. The agent puts the
+// per-process instrumentation sockets next to its own socket, named after the hello pid only
+// (tachyon-inst-<pid>.sock, see instrumentationAddress), and the tests say hello with made-up pids (1234, 8,
+// ...): in a shared directory two test processes running at once (ctest -j) would fight over the same path.
+inline const std::filesystem::path& testSocketDir() {
+  struct Dir {
+    std::filesystem::path path;
+    unsigned long owner = currentPid();
+    Dir() {
+      path = "/tmp/tachyon-t-" + std::to_string(owner);
+      std::error_code ec;
+      std::filesystem::remove_all(path, ec);  // left over from a crashed run with the same pid
+      std::filesystem::create_directories(path, ec);
+    }
+    ~Dir() {
+      if (currentPid() != owner) return;  // a forked child exiting must not remove its parent's sockets
+      std::error_code ec;
+      std::filesystem::remove_all(path, ec);
+    }
+  };
+  static const Dir dir;
+  return dir.path;
+}
+#endif
+
+// Unique, short transport address: a pipe name on Windows, a socket path in a private /tmp directory on Linux
+// (sun_path is short).
 inline std::string testAddress(const std::string& tag) {
   static std::atomic<int> counter{0};
-  const std::string suffix = std::to_string(currentPid()) + "-" + tag + "-" + std::to_string(counter++);
 #if TACHYON_PLATFORM_WINDOWS
+  const std::string suffix = std::to_string(currentPid()) + "-" + tag + "-" + std::to_string(counter++);
   return R"(\\.\pipe\tachyon-test-)" + suffix;
 #else
-  return "/tmp/tachyon-t-" + suffix + ".sock";
+  return (testSocketDir() / (tag + "-" + std::to_string(counter++) + ".sock")).string();
 #endif
 }
 

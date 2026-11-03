@@ -1,10 +1,13 @@
 // Cooperative cancellation: a query returns within 50 ms of its flag being raised (4x under
-// AddressSanitizer), on `medium` and on a synthetic 20 M-sample model, in every phase of the queries.
+// AddressSanitizer), on `medium` and on a synthetic 20 M-sample model, in every phase of the queries. The
+// 50 ms (asserted at 2x) is the cpu time the query thread spends after the flag is raised, so that a machine
+// busy with other work cannot fail the test by keeping the thread off the cpu.
 #include "analysis/query.h"
 
 #include "aggregation_test_util.h"
 #include "analysis/query_executor.h"
 #include "analysis/thread_states.h"
+#include "thread_cpu_time.h"
 
 #include <gtest/gtest.h>
 
@@ -31,7 +34,10 @@ namespace {
 using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 using model::ThreadState;
+using testutil::cpuLatencyMs;
+using testutil::currentThreadCpuNs;
 using testutil::HandModel;
+using testutil::raiseFlag;
 
 #ifdef TACHYON_TEST_ASAN
 constexpr double kBudgetMs = 2 * 50.0 * 4;  // budget 50 ms, 4x under asan, asserted at 2x
@@ -46,10 +52,12 @@ double ms(Clock::time_point a, Clock::time_point b) {
 enum class Q { BottomUp, TopDown, Butterfly };
 
 // Runs `q` on a fresh thread, raises the flag after `delay` and returns {code of the result, latency in ms
-// from the flag store to the return}.
+// from the flag store to the return}. The latency is the query thread's cpu time between the two (see
+// thread_cpu_time.h); the wall-clock figure is kept for the diagnostics.
 struct Outcome {
   ErrorCode code = ErrorCode::Ok;
-  double latencyMs = 0;
+  double latencyMs = 0;      // cpu time of the query thread after the flag was raised
+  double wallLatencyMs = 0;  // wall-clock time, for diagnostics only
   bool cancelled() const { return code == ErrorCode::Cancelled; }
 };
 
@@ -58,6 +66,7 @@ Outcome runCancelled(const QueryContext& ctx, Q q, const Filter& filter, Functio
   std::atomic<bool> flag{false};
   std::atomic<int> codeOut{0};
   std::atomic<int64_t> endNs{0};
+  std::atomic<int64_t> endCpuNs{0};
   std::thread worker([&] {
     ErrorCode code = ErrorCode::Ok;
     switch (q) {
@@ -77,17 +86,19 @@ Outcome runCancelled(const QueryContext& ctx, Q q, const Filter& filter, Functio
         break;
       }
     }
+    endCpuNs = currentThreadCpuNs();
     endNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
     codeOut = static_cast<int>(code);
   });
   std::this_thread::sleep_for(delay);
   const auto raised = Clock::now();
-  flag.store(true);
+  const testutil::RaisePoint raisePoint = raiseFlag(worker, flag);
   worker.join();
   Outcome o;
   o.code = static_cast<ErrorCode>(codeOut.load());
   const auto end = Clock::time_point(std::chrono::nanoseconds(endNs.load()));
-  o.latencyMs = std::max(0.0, ms(raised, end));
+  o.wallLatencyMs = std::max(0.0, ms(raised, end));
+  o.latencyMs = cpuLatencyMs(raisePoint, endCpuNs.load());
   return o;
 }
 
@@ -104,8 +115,9 @@ void sweep(QueryContext& ctx, const char* label, FunctionKey someKey) {
     if (o.cancelled()) {
       ++cancelled;
       worst = std::max(worst, o.latencyMs);
-      EXPECT_LT(o.latencyMs, kBudgetMs) << label << " query " << static_cast<int>(q)
-                                        << (warm ? " (warm)" : " (cold)") << " delay " << d.count() << "us";
+      EXPECT_LT(o.latencyMs, kBudgetMs)
+          << label << " query " << static_cast<int>(q) << (warm ? " (warm)" : " (cold)") << " delay "
+          << d.count() << "us (cpu time; wall " << o.wallLatencyMs << " ms)";
     } else {
       EXPECT_EQ(o.code, ErrorCode::Ok);  // finished before the flag: fine, nothing to measure
     }
