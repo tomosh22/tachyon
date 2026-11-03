@@ -54,7 +54,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-64 | Large-trace performance pass | — | not started | wp/64-perf-pass | |
 | WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
-| WP-71 | Scheduler events | A | in progress | wp/71-sched-events | 2026-11-02 |
+| WP-71 | Scheduler events | A | merged (tracepoint path verified on CI's privileged step) | wp/71-sched-events | 2026-11-02 |
 | WP-72 | DWARF symbol provider | B | merged (WP-72b follow-up) | wp/72-dwarf-provider | 2026-10-25 |
 | WP-73 | Linux SDK transport and privileges | — | not started | wp/73-linux-sdk | |
 
@@ -201,6 +201,10 @@ The verifier passed it. Frame percentiles (lower order statistic), per-thread st
 ## WP-63 notes
 
 Verifier PASS. The speedscope output validates against the official schema (vendored, byte-identical to the live one) on 7 fixtures, and per-function ns equal the generator's expected ticks. Chrome traces are well formed (M/X/i/C only, ordered per track, metadata complete), scope counts and durations match expected.json, and CPU slices sum to Running ticks. Robustness covers names, ids, ranges and exit codes. On medium, speedscope takes 0.35 s and produces 472 MiB (inherent to the sampled format); Chrome takes 0.023 s for 6.4 MiB. Orchestrator fix: a failed export only deletes `--out` when it is a regular file (it deleted /dev/full in the verifier's probe).
+
+## WP-71 notes
+
+The verifier found a duplicate-ThreadRec defect (events after PERF_RECORD_EXIT re-created the thread). It was fixed and confirmed on CI: one ThreadRec per tid and no tid 4294967295. The fix also covers WP-70 captures. Real tracepoint numbers from CI's privileged step (lock scenario, 3 s): 5813 waits, 5813/5813 woken by the holder with unlock-path stacks in the testbed, every wait reason S (futex), 0 malformed records. Format-parser fuzzing (400k mutations, asan) was clean. Per-thread plans use the context_switch fallback (no wait reasons or wakers).
 
 ## Queued follow-ups
 

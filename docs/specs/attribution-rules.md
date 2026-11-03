@@ -35,3 +35,9 @@
   - Pieces exclude switched-out time.
   - scopeStats and lockSummary report wall time (end − begin).
 - **Locks:** a lock wait is a scope with colour 0x4C4F43FF. Its address is parsed from the scope data as hex; unparsable data is counted in `unparsedWaits`. The name is the scope id unless the id is the reserved "Tachyon.LockAcquire". contentionCount counts every acquire, including zero-length ones.
+
+## Clarifications added with WP-71 (2026-11-03, binding)
+- Linux exit: only prev_state EXIT_DEAD/EXIT_ZOMBIE (0x10/0x20) map to old_state 4. In the reported prev_state encoding 0x80 is TASK_IDLE (a wait), not TASK_DEAD.
+- Linux `context_switch` fallback (per-thread plans, or no tracefs): old_state 1 if preempted, otherwise 5. The wait reason is 0, there are no stacks and no ReadyRecs. CaptureInfo `sched` records the path, and a warning explains what is missing.
+- `old_tid`/`new_tid`/`readying_tid` 0 means "other task unknown/unnamed". The kernel's tid −1 (an exiting task that is no longer pid_alive) is attributed from the tracepoint payload, or to the CPU's last running task in the fallback, or dropped. It never creates a thread.
+- Events a thread emits after PERF_RECORD_EXIT attach to the exited thread's record.
