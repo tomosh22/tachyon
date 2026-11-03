@@ -218,6 +218,7 @@ TEST(SourceLocate, AbsolutePosixPathsKeepTheRootAsTarget) {
   ASSERT_TRUE(rule.has_value());
   EXPECT_EQ(rule->from, "/home/ci/work");
   EXPECT_EQ(fs::path(rule->to), tree.root() / "srcs");
+#ifndef _WIN32
   // Same absolute path under a new root: everything of the chosen path is shared.
   const auto shifted = deriveRemapRule("/nonexistent-root" + pathToUtf8(file), file);
   ASSERT_TRUE(shifted.has_value());
@@ -225,6 +226,7 @@ TEST(SourceLocate, AbsolutePosixPathsKeepTheRootAsTarget) {
   EXPECT_EQ(shifted->to, "/");
   symbols::SourceLocator locator(symbols::SourceLocatorConfig{{*shifted}, {}});
   EXPECT_TRUE(locator.locate("/nonexistent-root" + pathToUtf8(file)).ok());
+#endif
 }
 
 TEST(SourceLocate, FileWithAnotherNameBecomesAnExactMapping) {

@@ -9,13 +9,14 @@
 #include "analysis/query.h"
 #include "disasm/disassembler.h"
 #include "symbols/dwarf/dwarf_provider.h"
-#include "symbols/dwarf/elf_reader.h"
 #include "viewer/builtin_panels.h"
 #include "viewer/document.h"
 #include "viewer/paths.h"
 #include "viewer/source/source_panel.h"
 
 #if defined(TACHYON_TESTBED_EXE) && TACHYON_HAVE_LIBDW
+
+#include "symbols/dwarf/elf_reader.h"
 
 #include <algorithm>
 #include <map>
@@ -81,6 +82,7 @@ struct CallFn {
   Fn fn;
   size_t callIndex = 0;  // code[callIndex] is a call; code[callIndex + 1] is the return address
   bool found = false;
+  bool calleeNamed = false;  // the call is direct and its target is a function with a symbol
 };
 
 CallFn findCallFunction() {
@@ -105,10 +107,14 @@ CallFn findCallFunction() {
     Fn f = tb.function(name);
     for (size_t i = 0; i + 2 < f.code.size(); ++i) {
       if (f.code[i].isCall && f.code[i].valid && f.code[i + 1].valid) {
-        out.fn = std::move(f);
+        // Prefer a direct call to a function the symbols know: its text must carry the callee's name.
+        const bool named = f.code[i].hasTarget && provider.resolve(f.code[i].targetRva).resolved;
+        if (!named && out.found) continue;
+        out.fn = f;
         out.callIndex = i;
         out.found = true;
-        return out;
+        out.calleeNamed = named;
+        if (named) return out;
       }
     }
   }
@@ -570,6 +576,13 @@ TEST(SourceWidget, SamplesAfterACallAreLabelled) {
   // The call itself carries no time: the sample is attributed to the return address, not the call.
   EXPECT_EQ(view->instructions[cf.callIndex].ticks, 0u);
   EXPECT_TRUE(view->instructions[cf.callIndex].isCall);
+  // Call targets are symbolized through the module's symbols: "call 0x1230 <callee>".
+  if (cf.calleeNamed) {
+    const std::string& text = view->instructions[cf.callIndex].text;
+    std::printf("[source test] symbolized call: %s\n", text.c_str());
+    EXPECT_NE(text.find(" <"), std::string::npos) << text;
+    EXPECT_EQ(text.back(), '>') << text;
+  }
   // And it equals the query.
   auto ref = h.refContext();
   auto aggs = analysis::instructionsForFunction(*ref, {}, FunctionKey{ModuleIdx(0), cf.fn.rva});
