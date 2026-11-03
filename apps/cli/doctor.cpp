@@ -12,6 +12,7 @@
 #include <fstream>
 #include <ostream>
 #include <sstream>
+#include <system_error>
 
 #if defined(__linux__)
 #include "capture/linux_perf/perf_system.h"
@@ -518,7 +519,7 @@ void checkTrial(Context& c) {
   const int sysErr = haveSys ? c.env.trialSystemWide() : 0;
   const int pidErr = havePid ? c.env.trialPerProcess() : 0;
   const auto describe = [](int e) {
-    return std::string(std::strerror(e)) + " (errno " + std::to_string(e) + ")";
+    return std::generic_category().message(e) + " (errno " + std::to_string(e) + ")";
   };
 
   // System-wide.

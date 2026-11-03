@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <cerrno>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -550,6 +551,18 @@ TEST(Doctor, ExitCodeFollowsFailNotWarn) {
   EXPECT_NE(fail.str().find("[FAIL]"), std::string::npos);
 }
 
+#if !defined(__linux__)
+TEST(Doctor, OtherPlatformsPrintANoteAndSucceed) {
+  std::ostringstream out, err;
+  EXPECT_EQ(cli::run({"doctor"}, out, err), kExitOk);
+  EXPECT_NE(out.str().find("not implemented"), std::string::npos);
+  std::ostringstream json;
+  EXPECT_EQ(cli::run({"doctor", "--json"}, json, err), kExitOk);
+  EXPECT_EQ(nlohmann::json::parse(json.str())["ok"], true);
+}
+#endif
+
+#if defined(__linux__)
 TEST(Doctor, CliUsageErrors) {
   std::ostringstream out, err;
   EXPECT_EQ(cli::run({"doctor", "--hz", "abc"}, out, err), kExitUsage);
@@ -558,7 +571,6 @@ TEST(Doctor, CliUsageErrors) {
   EXPECT_EQ(cli::run({"doctor", "--hz", "0"}, out, err), kExitUsage);
 }
 
-#if defined(__linux__)
 // Smoke test on the machine running the tests: no crash, valid JSON, an exit code that matches the report.
 TEST(Doctor, RealMachineSmoke) {
   std::ostringstream out, err;
