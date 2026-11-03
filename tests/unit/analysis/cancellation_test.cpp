@@ -7,6 +7,7 @@
 #include "aggregation_test_util.h"
 #include "analysis/query_executor.h"
 #include "analysis/thread_states.h"
+#include "thread_cpu_time.h"
 
 #include <gtest/gtest.h>
 
@@ -18,14 +19,6 @@
 #include <functional>
 #include <random>
 #include <thread>
-
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#else
-#include <pthread.h>
-#include <time.h>
-#endif
 
 #if defined(__SANITIZE_ADDRESS__)
 #define TACHYON_TEST_ASAN 1
@@ -41,7 +34,10 @@ namespace {
 using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 using model::ThreadState;
+using testutil::cpuLatencyMs;
+using testutil::currentThreadCpuNs;
 using testutil::HandModel;
+using testutil::raiseFlag;
 
 #ifdef TACHYON_TEST_ASAN
 constexpr double kBudgetMs = 2 * 50.0 * 4;  // budget 50 ms, 4x under asan, asserted at 2x
@@ -55,40 +51,9 @@ double ms(Clock::time_point a, Clock::time_point b) {
 
 enum class Q { BottomUp, TopDown, Butterfly };
 
-// CPU time consumed so far by a thread, in ns. The cancellation requirement is a bound on the *work* a query
-// does after the flag is raised; wall-clock time also counts the time the scheduler keeps the thread off the
-// cpu, which on a shared or loaded machine (ctest -j, other builds) is arbitrary and says nothing about the
-// code under test. A cancelled query is runnable the whole time (it never blocks), so its cpu time is its
-// latency on an idle machine.
-int64_t threadCpuNs(std::thread::native_handle_type handle) {
-#ifdef _WIN32
-  FILETIME created, exited, kernel, user;
-  if (!GetThreadTimes(handle, &created, &exited, &kernel, &user)) return 0;
-  const auto ticks = [](const FILETIME& f) {
-    return static_cast<int64_t>((static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime);
-  };
-  return (ticks(kernel) + ticks(user)) * 100;  // 100 ns units
-#else
-  clockid_t clock;
-  timespec ts;
-  if (pthread_getcpuclockid(handle, &clock) != 0 || clock_gettime(clock, &ts) != 0) return 0;
-  return static_cast<int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
-#endif
-}
-
-int64_t currentThreadCpuNs() {
-#ifdef _WIN32
-  return threadCpuNs(GetCurrentThread());
-#else
-  timespec ts;
-  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return 0;
-  return static_cast<int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
-#endif
-}
-
 // Runs `q` on a fresh thread, raises the flag after `delay` and returns {code of the result, latency in ms
 // from the flag store to the return}. The latency is the query thread's cpu time between the two (see
-// threadCpuNs); the wall-clock figure is kept for the diagnostics.
+// thread_cpu_time.h); the wall-clock figure is kept for the diagnostics.
 struct Outcome {
   ErrorCode code = ErrorCode::Ok;
   double latencyMs = 0;      // cpu time of the query thread after the flag was raised
@@ -126,20 +91,14 @@ Outcome runCancelled(const QueryContext& ctx, Q q, const Filter& filter, Functio
     codeOut = static_cast<int>(code);
   });
   std::this_thread::sleep_for(delay);
-  // The worker's cpu time just before and just after the flag store brackets its progress at the store. If
-  // this thread was descheduled between the two reads the bracket is wide and the worker ran on in it, so
-  // only the part after the second read is certain to count; otherwise the (conservative) first read is used.
-  const int64_t cpuBefore = threadCpuNs(worker.native_handle());
   const auto raised = Clock::now();
-  flag.store(true);
-  const int64_t cpuAfter = threadCpuNs(worker.native_handle());
+  const testutil::RaisePoint raisePoint = raiseFlag(worker, flag);
   worker.join();
   Outcome o;
   o.code = static_cast<ErrorCode>(codeOut.load());
   const auto end = Clock::time_point(std::chrono::nanoseconds(endNs.load()));
   o.wallLatencyMs = std::max(0.0, ms(raised, end));
-  const int64_t cpuAtRaise = cpuAfter - cpuBefore > 1'000'000 ? cpuAfter : cpuBefore;
-  o.latencyMs = static_cast<double>(std::max<int64_t>(0, endCpuNs.load() - cpuAtRaise)) / 1e6;
+  o.latencyMs = cpuLatencyMs(raisePoint, endCpuNs.load());
   return o;
 }
 

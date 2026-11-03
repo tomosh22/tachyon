@@ -1,10 +1,12 @@
 // WP-53b: cancellation latency of the cold fiber-aware path (pairing by fiber, pieces, blend index) on a
 // model with 1 M scopes split by fiber switches: at most 50 ms after the flag (200 ms under
-// AddressSanitizer).
+// AddressSanitizer), measured as the query thread's cpu time (thread_cpu_time.h) so that a busy machine
+// cannot fail the test by keeping the thread off the cpu.
 #include "aggregation_test_util.h"
 #include "analysis/fibers.h"
 #include "analysis/query.h"
 #include "scope_test_util.h"
+#include "thread_cpu_time.h"
 
 #include <gtest/gtest.h>
 
@@ -28,10 +30,13 @@ namespace {
 using namespace std::chrono_literals;
 using Clock = std::chrono::steady_clock;
 using model::ThreadState;
+using testutil::cpuLatencyMs;
+using testutil::currentThreadCpuNs;
 using testutil::HandModel;
+using testutil::raiseFlag;
 using testutil::ScopeBuilder;
 
-// Budget 50 ms (200 ms under asan); asserted at 2x like the perf budgets, so a loaded runner does not flake.
+// Budget 50 ms (200 ms under asan), asserted at 2x like the perf budgets.
 #ifdef TACHYON_TEST_ASAN
 constexpr double kBudgetMs = 2 * 200.0;
 #else
@@ -77,22 +82,19 @@ TEST(FiberCancel, ColdFiberAwareBuildStopsWithinTheBudget) {
   for (const auto delay : {1ms, 10ms, 25ms, 45ms, 70ms, 100ms, 140ms, 200ms}) {
     QueryContext ctx(f.h.m, *f.h.svc, o);  // cold: nothing cached
     std::atomic<bool> flag{false};
-    std::atomic<int64_t> endNs{0};
+    std::atomic<int64_t> endCpuNs{0};
     std::atomic<int> code{0};
     std::thread worker([&] {
       auto r = bottomUpFunctions(ctx, {}, Cancel{&flag});
       code = r.ok() ? 0 : static_cast<int>(r.error().code);
-      endNs = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+      endCpuNs = currentThreadCpuNs();
     });
     std::this_thread::sleep_for(delay);
-    const auto raised = Clock::now();
-    flag = true;
+    const testutil::RaisePoint raised = raiseFlag(worker, flag);
     worker.join();
     if (code.load() != static_cast<int>(ErrorCode::Cancelled)) continue;  // finished before the flag
     ++cancelled;
-    const double ms = std::max(0.0, std::chrono::duration<double, std::milli>(
-                                        Clock::time_point(std::chrono::nanoseconds(endNs.load())) - raised)
-                                        .count());
+    const double ms = cpuLatencyMs(raised, endCpuNs.load());
     worst = std::max(worst, ms);
     EXPECT_LT(ms, kBudgetMs) << "cancel after " << delay.count() << " ms";
   }
