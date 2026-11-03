@@ -130,8 +130,17 @@ std::string parseExportArgs(const std::vector<std::string>& args, ExportArgs& a)
 
 fs::path defaultSymbolCacheDir() {
   auto env = [](const char* name) {
+#ifdef _WIN32
+    char* buffer = nullptr;
+    size_t length = 0;
+    std::string result;
+    if (_dupenv_s(&buffer, &length, name) == 0 && buffer != nullptr) result = buffer;
+    std::free(buffer);
+    return result;
+#else
     const char* v = std::getenv(name);
     return v != nullptr ? std::string(v) : std::string();
+#endif
   };
 #ifdef _WIN32
   const std::string local = env("LOCALAPPDATA");

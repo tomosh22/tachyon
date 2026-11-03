@@ -1,10 +1,10 @@
 #include "cli/cli.h"
 
 #include "capture/windows_etw/launch.h"
+#include "cli/export_command.h"
 #include "control/client.h"
 #include "control/protocol.h"
 #include "control/transport.h"
-#include "cli/export_command.h"
 #include "inst/merge.h"
 #include "inst/sidecar_paths.h"
 

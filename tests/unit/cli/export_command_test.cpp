@@ -214,7 +214,7 @@ TEST_F(ExportCommand, OutputIsDeterministic) {
   EXPECT_EQ(sa.str(), sb.str());
 }
 
-#ifdef TACHYON_CLI_EXE
+#if defined(TACHYON_CLI_EXE) && !defined(_WIN32)
 TEST_F(ExportCommand, BinaryExitCodes) {
   const std::string exe = TACHYON_CLI_EXE;
   EXPECT_EQ(std::system(("\"" + exe + "\" export \"" + tiny() + "\" --format chrome --out \"" +

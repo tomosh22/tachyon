@@ -21,8 +21,8 @@
 //             Perfetto / chrome://tracing (scopes, frame marks, markers, plots, per-CPU running slices).
 //             --threads takes OS thread ids; --from-ms / --to-ms are milliseconds from the trace start.
 //             --symbols (repeatable) takes a symbol directory, file, or tracegen *.symbols.json override;
-//             --symbol-server (repeatable) a symbol store URL. Symbols matter for speedscope only. --out - writes
-//             to stdout (and prints no summary). With --json the summary is one JSON object on stdout.
+//             --symbol-server (repeatable) a symbol store URL. Symbols matter for speedscope only. --out -
+//             writes to stdout (and prints no summary). With --json the summary is one JSON object on stdout.
 //   capture <target> [start options] [--duration S]
 //             start + wait for --duration seconds or for the target to exit + stop + wait for capture_done
 //
