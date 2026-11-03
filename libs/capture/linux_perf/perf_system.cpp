@@ -75,21 +75,31 @@ class LinuxPerfSystem final : public IPerfSystem {
     OpenOutcome out;
     perf_event_attr attr{};
     attr.size = sizeof(attr);
-    attr.type = PERF_TYPE_SOFTWARE;
-    attr.config = PERF_COUNT_SW_CPU_CLOCK;
-    attr.freq = 1;
-    attr.sample_freq = config.samplingHz;
+    const bool tracepoint = config.kind == EventConfig::Kind::Tracepoint;
+    if (tracepoint) {
+      attr.type = PERF_TYPE_TRACEPOINT;
+      attr.config = config.tracepointId;
+      attr.sample_period = 1;  // every occurrence
+    } else {
+      attr.type = PERF_TYPE_SOFTWARE;
+      attr.config = PERF_COUNT_SW_CPU_CLOCK;
+      attr.freq = 1;
+      attr.sample_freq = config.samplingHz;
+    }
     attr.sample_type = config.sampleType;
     attr.disabled = config.disabled ? 1 : 0;
     attr.inherit = config.inherit ? 1 : 0;
     attr.exclude_kernel = config.excludeKernel ? 1 : 0;
     attr.exclude_hv = 1;
     attr.exclude_callchain_kernel = (config.excludeCallchainKernel || config.excludeKernel) ? 1 : 0;
-    attr.mmap = 1;
-    attr.mmap2 = 1;
-    attr.comm = 1;
-    attr.comm_exec = 1;
-    attr.task = 1;
+    if (!tracepoint) {
+      attr.mmap = 1;
+      attr.mmap2 = 1;
+      attr.comm = 1;
+      attr.comm_exec = 1;
+      attr.task = 1;
+      attr.context_switch = config.contextSwitch ? 1 : 0;
+    }
     attr.sample_id_all = 1;
     attr.use_clockid = 1;
     attr.clockid = CLOCK_MONOTONIC_RAW;
@@ -98,10 +108,9 @@ class LinuxPerfSystem final : public IPerfSystem {
       attr.watermark = 1;
       attr.wakeup_watermark = config.wakeupBytes;
     }
-    attr.build_id = config.wantKernelBuildId ? 1 : 0;
+    attr.build_id = (config.wantKernelBuildId && !tracepoint) ? 1 : 0;
     long fd = ::syscall(SYS_perf_event_open, &attr, pid, cpu, -1, PERF_FLAG_FD_CLOEXEC);
-    if (fd < 0 && errno == EINVAL &&
-        config.wantKernelBuildId) {  // kernels before 5.12 reject the build_id bit
+    if (fd < 0 && errno == EINVAL && attr.build_id != 0) {  // kernels before 5.12 reject the build_id bit
       attr.build_id = 0;
       fd = ::syscall(SYS_perf_event_open, &attr, pid, cpu, -1, PERF_FLAG_FD_CLOEXEC);
     }
@@ -161,6 +170,15 @@ class LinuxPerfSystem final : public IPerfSystem {
     s.mlockKb = readSysctl("/proc/sys/kernel/perf_event_mlock_kb", 0);
     s.hasPerfCapability = hasCapability();
     return s;
+  }
+
+  std::filesystem::path tracefsRoot() override {
+    for (const char* candidate : {"/sys/kernel/tracing", "/sys/kernel/debug/tracing"}) {
+      std::error_code ec;
+      if (std::filesystem::exists(std::filesystem::path(candidate) / "events/sched/sched_switch/format", ec))
+        return candidate;
+    }
+    return {};
   }
 
   uint64_t nowNs() override {

@@ -69,6 +69,10 @@ struct ParsedRecord {
   uint64_t ip = 0, addr = 0, period = 0;
   const uint8_t* chain = nullptr;  // chainCount little-endian u64 values, not necessarily aligned
   uint64_t chainCount = 0;
+  // PERF_SAMPLE_RAW payload (tracepoint events): rawSize bytes at `raw`. A software event's sample carries a
+  // 4-byte all-zero area, so rawSize > 4 means a tracepoint record.
+  const uint8_t* raw = nullptr;
+  uint32_t rawSize = 0;
 
   // MMAP / MMAP2
   uint64_t mapAddr = 0, mapLen = 0, pgoff = 0;
@@ -130,6 +134,7 @@ class RecordBuilder {
     uint64_t ip = 0, addr = 0, period = 0;
     Id id;
     std::vector<uint64_t> chain;
+    std::vector<uint8_t> raw;  // tracepoint payload; written when the layout has RAW (empty: the 4-byte area)
     uint16_t misc = kMiscUser;
   };
   struct Mmap2 {
@@ -154,7 +159,10 @@ class RecordBuilder {
   void lost(uint64_t idValue, uint64_t lostCount, const Id& id);
   void lostSamples(uint64_t lostCount, const Id& id);
   void throttle(bool unthrottle, uint64_t time, uint64_t idValue, uint64_t streamId, const Id& id);
-  void switchCpuWide(bool out, uint32_t nextPrevPid, uint32_t nextPrevTid, const Id& id);
+  void switchCpuWide(bool out, uint32_t nextPrevPid, uint32_t nextPrevTid, const Id& id,
+                     bool preempt = false);
+  // PERF_RECORD_SWITCH (per-task events): no body besides the trailer.
+  void switchTask(bool out, const Id& id, bool preempt = false);
   // A record of an arbitrary type with `bodyBytes` zero bytes after the header (rounded up to 8), followed
   // by the trailer when `withTrailer`. For "unknown record type" tests.
   void raw(uint32_t type, uint16_t misc, size_t bodyBytes, const Id& id, bool withTrailer = true);

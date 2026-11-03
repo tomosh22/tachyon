@@ -60,6 +60,7 @@ struct LinuxPerfBackend::Session {
   std::map<int, int> ownerByCpu;  // per-thread plan: cpu -> fd that owns the cpu's ring
   std::vector<std::string> warnings;
   std::vector<uint32_t> roots;
+  perf::SchedPlan sched;
 };
 
 LinuxPerfBackend::LinuxPerfBackend(LinuxPerfBackendConfig config)
@@ -269,19 +270,45 @@ Result<void> LinuxPerfBackend::openTask(Session& session, const EventConfig& cfg
   return ok();
 }
 
+Result<void> LinuxPerfBackend::openSchedEvents(Session& session, const EventConfig& base, int pid, int cpu,
+                                               int ownerFd) {
+  if (!session.sched.tracepoints()) return ok();
+  for (uint32_t id : {session.sched.switchId, session.sched.wakeId}) {
+    if (id == 0) continue;
+    EventConfig cfg = base;
+    cfg.kind = EventConfig::Kind::Tracepoint;
+    cfg.tracepointId = id;
+    cfg.contextSwitch = false;
+    const perf::OpenOutcome o = m_system->openEvent(cfg, pid, cpu);
+    if (o.fd < 0) return perf::describeOpenError(o.err, cfg, m_system->sysctls(), pid, cpu);
+    Slot slot;
+    slot.fd = o.fd;
+    slot.cpu = cpu;
+    session.slots.push_back(std::move(slot));  // no ring of its own: it writes into the owner's
+    if (!m_system->setOutput(o.fd, ownerFd))
+      return makeError(
+          ErrorCode::Internal,
+          std::string("PERF_EVENT_IOC_SET_OUTPUT failed for a sched tracepoint: ") + std::strerror(errno));
+  }
+  return ok();
+}
+
 Result<void> LinuxPerfBackend::openPlan(Session& session, const CaptureOptions& options, bool systemWide) {
   const perf::SysctlInfo sys = m_system->sysctls();
   const uint32_t pageBytes = 4096;
   EventConfig cfg;
   cfg.samplingHz = options.samplingHz;
-  cfg.sampleType = perf::kBackendSampleType;
+  cfg.sampleType = session.info.layout.sampleType;
+  cfg.contextSwitch = session.sched.contextSwitch();
   cfg.wakeupBytes = std::max<uint32_t>(session.ringPages * pageBytes / 4, pageBytes);
   cfg.disabled = true;
   if (systemWide) {
     cfg.excludeKernel = false;
     cfg.excludeCallchainKernel = !options.kernelStacks;
-    for (uint32_t cpu : m_system->onlineCpus())
+    for (uint32_t cpu : m_system->onlineCpus()) {
       TACHYON_TRY(openSlot(session, cfg, -1, static_cast<int>(cpu)));
+      TACHYON_TRY(openSchedEvents(session, cfg, -1, static_cast<int>(cpu), session.slots.back().fd));
+    }
     session.excludeKernel = false;
     return ok();
   }
@@ -345,6 +372,51 @@ void LinuxPerfBackend::teardown(Session& session) {
   session.ownerByCpu.clear();
 }
 
+Result<void> LinuxPerfBackend::openEvents(Session& session, const CaptureOptions& options) {
+  // The record layout of the events: tracepoint captures add RAW to every event.
+  session.info.layout = perf::RecordLayout{
+      session.sched.tracepoints() ? perf::kSchedSampleType : perf::kBackendSampleType, true};
+  session.info.startTs = m_system->nowNs();
+  // System-wide when allowed; Launch / Attach fall back to per-thread events.
+  const bool trySystem = options.mode == CaptureMode::System || !m_config.forcePerThread;
+  // A task-bound sched_switch event sees only the switches out of its task and a task-bound sched_waking
+  // only the wakeups it issues, so the tracepoints are recorded in the system-wide plan only; the per-thread
+  // plan gets the task-bound PERF_RECORD_SWITCH out / in records instead.
+  const std::string perThreadReason =
+      "the per-thread plan cannot record scheduler tracepoints: a task-bound sched_switch event misses the "
+      "switches into the task and a task-bound sched_waking event the wakeups by other tasks";
+  auto demoteSched = [&](const std::string& why) {
+    session.sched = perf::fallbackSchedPlan(options.stackCSwitch, options.stackReady, why);
+    session.info.layout = perf::RecordLayout{perf::kBackendSampleType, true};
+  };
+  if (!trySystem && session.sched.tracepoints()) demoteSched(perThreadReason);
+  bool systemWide = false;
+  if (trySystem) {
+    auto r = openPlan(session, options, true);
+    if (r.ok()) {
+      systemWide = true;
+    } else if (options.mode == CaptureMode::System || r.error().code != ErrorCode::NoPrivilege) {
+      return r.error();
+    } else {
+      session.warnings.push_back("system-wide sampling is not permitted (" + r.error().message +
+                                 "); sampling the target's threads with inherit instead");
+      TACHYON_LOG_WARN("perf: {}", session.warnings.back());
+      teardown(session);
+      session.ringPages = m_config.ringPages;
+      session.kernelBuildId = true;
+      if (session.sched.tracepoints()) demoteSched(perThreadReason);
+    }
+  }
+  if (!systemWide) {
+    if (options.mode == CaptureMode::System)
+      return makeError(ErrorCode::NoPrivilege,
+                       "system mode needs system-wide sampling, which is disabled here");
+    TACHYON_TRY(openPlan(session, options, false));
+  }
+  session.systemWide = systemWide;
+  return ok();
+}
+
 Result<void> LinuxPerfBackend::beginRecording(const CaptureOptions& options,
                                               std::unique_ptr<perf::LaunchedProcess> child) {
   auto session = std::make_unique<Session>();
@@ -375,7 +447,6 @@ Result<void> LinuxPerfBackend::beginRecording(const CaptureOptions& options,
   if (options.mode != CaptureMode::System) session->roots = {options.pid};
 
   perf::SessionInfo& info = session->info;
-  info.layout = perf::RecordLayout{perf::kBackendSampleType, true};
   info.samplingHz = options.samplingHz;
   info.mode = std::string(captureModeName(options.mode));
   info.rootPid = options.mode == CaptureMode::System ? 0 : options.pid;
@@ -396,33 +467,36 @@ Result<void> LinuxPerfBackend::beginRecording(const CaptureOptions& options,
   }
   info.cpuCount = static_cast<uint32_t>(m_system->onlineCpus().size());
 
-  // Open the events. System-wide when allowed; Launch / Attach fall back to per-thread events.
-  session->info.startTs = m_system->nowNs();
-  const bool trySystem = options.mode == CaptureMode::System || !m_config.forcePerThread;
-  bool systemWide = false;
-  if (trySystem) {
-    auto r = openPlan(*session, options, true);
-    if (r.ok()) {
-      systemWide = true;
-    } else if (options.mode == CaptureMode::System || r.error().code != ErrorCode::NoPrivilege) {
-      return fail(r.error());
-    } else {
-      session->warnings.push_back("system-wide sampling is not permitted (" + r.error().message +
-                                  "); sampling the target's threads with inherit instead");
-      TACHYON_LOG_WARN("perf: {}", session->warnings.back());
-      teardown(*session);
-      session->ringPages = m_config.ringPages;
-      session->kernelBuildId = true;
-    }
+  // Open the events: the chosen plan (see openEvents) with the scheduler events of the sched plan. A refused
+  // tracepoint event is not fatal: the capture falls back to PERF_RECORD_SWITCH records and says so.
+  session->sched =
+      perf::planSched(m_config.forceContextSwitchFallback
+                          ? fs::path{}
+                          : (m_config.tracefsRoot.empty() ? m_system->tracefsRoot() : m_config.tracefsRoot),
+                      options.stackCSwitch, options.stackReady);
+  const size_t warningsBefore = session->warnings.size();
+  auto opened = openEvents(*session, options);
+  if (!opened.ok() && session->sched.tracepoints()) {
+    TACHYON_LOG_WARN("perf: sched tracepoints could not be opened ({}); using PERF_RECORD_SWITCH",
+                     opened.error().message);
+    teardown(*session);
+    session->warnings.resize(warningsBefore);
+    session->ringPages = m_config.ringPages;
+    session->kernelBuildId = true;
+    session->sched =
+        perf::fallbackSchedPlan(options.stackCSwitch, options.stackReady,
+                                "opening the tracepoint events failed: " + opened.error().message);
+    opened = openEvents(*session, options);
   }
-  if (!systemWide) {
-    if (options.mode == CaptureMode::System)
-      return fail(makeError(ErrorCode::NoPrivilege,
-                            "system mode needs system-wide sampling, which is disabled here"));
-    auto r = openPlan(*session, options, false);
-    if (!r.ok()) return fail(r.error());
+  if (!opened.ok()) return fail(opened.error());
+  for (const std::string& w : session->sched.warnings) {
+    session->warnings.push_back(w);
+    TACHYON_LOG_WARN("perf: {}", w);
   }
-  session->systemWide = systemWide;
+  info.sched = session->sched.info;
+  info.layout = perf::RecordLayout{
+      session->sched.tracepoints() ? perf::kSchedSampleType : perf::kBackendSampleType, true};
+  const bool systemWide = session->systemWide;
   info.plan = systemWide ? "system-wide" : "per-thread";
   info.kernelBuildId = session->kernelBuildId;
   info.excludeKernel = session->excludeKernel;
@@ -487,6 +561,7 @@ Result<void> LinuxPerfBackend::beginRecording(const CaptureOptions& options,
     m_child = std::move(child);
     m_diag = LinuxPerfDiagnostics{};
     m_diag.plan = m_session->info.plan;
+    m_diag.schedPath = m_session->sched.info.mode;
     m_diag.rings = m_session->info.ringCount;
     m_diag.ringPages = m_session->ringPages;
     m_diag.kernelBuildId = m_session->kernelBuildId;
@@ -499,9 +574,9 @@ Result<void> LinuxPerfBackend::beginRecording(const CaptureOptions& options,
     m_lifecycle.startSucceeded(options.circularMb > 0);
     m_state = CaptureState::Capturing;
   }
-  TACHYON_LOG_INFO("perf: capture started ({} mode, {} plan, {} Hz, {} rings x {} pages{})",
+  TACHYON_LOG_INFO("perf: capture started ({} mode, {} plan, {} Hz, {} rings x {} pages, sched: {}{})",
                    captureModeName(options.mode), info.plan, options.samplingHz, info.ringCount,
-                   m_diag.ringPages, options.circularMb > 0 ? ", circular" : "");
+                   m_diag.ringPages, m_diag.schedPath, options.circularMb > 0 ? ", circular" : "");
   return ok();
 }
 
@@ -548,6 +623,9 @@ perf::ConvertOptions LinuxPerfBackend::convertOptionsFor(const CaptureOptions& o
   j["circular_mb"] = options.circularMb;
   j["kernel_stacks"] = options.kernelStacks;
   j["plan"] = session.info.plan;
+  j["sched_path"] = session.sched.info.mode;
+  j["stack_cswitch"] = options.stackCSwitch;
+  j["stack_ready"] = options.stackReady;
   co.captureOptionsJson = j.dump();
   return co;
 }

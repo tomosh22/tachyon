@@ -10,3 +10,16 @@ if(TARGET perf_capture_linux_tests)
   target_compile_definitions(perf_capture_linux_tests PRIVATE TACHYON_TESTBED_EXE="$<TARGET_FILE:tachyon-testbed>")
   add_dependencies(perf_capture_linux_tests tachyon-testbed)
 endif()
+
+# WP-71: scheduler events (sched:sched_switch / sched_waking tracepoints, PERF_RECORD_SWITCH fallback) of the
+# testbed `lock` and `spin` scenarios. The tracepoint tests skip, with the reason, without tracefs or tracepoint
+# permission (the CI privileged step needs paranoid -1 and a mounted tracefs: it fails when any test skips); the
+# fallback tests need only perf_event_open.
+tachyon_add_test(sched_capture_linux_tests
+  SOURCES sched_capture_test.cpp
+  DEPS tachyon::capture_linux_perf tachyon::capture tachyon::analysis tachyon::model tachyon::trace
+  LABELS linux_privileged)
+if(TARGET sched_capture_linux_tests)
+  target_compile_definitions(sched_capture_linux_tests PRIVATE TACHYON_TESTBED_EXE="$<TARGET_FILE:tachyon-testbed>")
+  add_dependencies(sched_capture_linux_tests tachyon-testbed)
+endif()

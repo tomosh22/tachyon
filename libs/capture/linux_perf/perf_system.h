@@ -19,6 +19,14 @@ namespace tachyon::capture::perf {
 // PERF_COUNT_SW_CPU_CLOCK, freq mode, mmap + mmap2 + comm + comm_exec + task, sample_id_all, use_clockid with
 // CLOCK_MONOTONIC_RAW, exclude_hv).
 struct EventConfig {
+  // CpuClock: the sampling event, with the mmap / comm / task side-band records.
+  // Tracepoint: PERF_TYPE_TRACEPOINT with config = tracepointId, period 1. It carries only the sample_id
+  // trailer: no mmap / comm / task records, which the cpu-clock event of the same ring already delivers (a
+  // second copy would be a duplicate). Everything else below applies to both kinds.
+  enum class Kind : uint8_t { CpuClock, Tracepoint };
+  Kind kind = Kind::CpuClock;
+  uint64_t tracepointId = 0;
+  bool contextSwitch = false;  // CpuClock: also deliver PERF_RECORD_SWITCH / SWITCH_CPU_WIDE (WP-71 fallback)
   uint32_t samplingHz = 8000;
   uint64_t sampleType = kBackendSampleType;
   bool excludeKernel = false;  // no samples while in kernel mode (needed for unprivileged per-pid use)
@@ -80,6 +88,10 @@ class IPerfSystem {
   virtual uint64_t nowNs() = 0;
   // Thread-safe. Root of the proc filesystem (a fake directory in tests).
   virtual std::filesystem::path procRoot() { return "/proc"; }
+  // Thread-safe. The tracefs directory that holds events/<system>/<event>/{format,id}: for the real layer the
+  // first of /sys/kernel/tracing and /sys/kernel/debug/tracing that has events/sched/sched_switch; empty when
+  // there is none (no tracefs, or not readable). A fake directory in tests; the default is "no tracefs".
+  virtual std::filesystem::path tracefsRoot() { return {}; }
 };
 
 // Thread-safe. The real implementation over the perf_event_open syscall.

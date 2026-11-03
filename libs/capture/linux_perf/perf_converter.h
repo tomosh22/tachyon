@@ -22,8 +22,12 @@
 // (process, file, load bias). Their identity is the GNU build-id (from the MMAP2 record when the kernel
 // provided it, else from the file's .note.gnu.build-id).
 //
-// Hook for WP-71: kRecordSwitch / kRecordSwitchCpuWide and tracepoint samples are parsed but ignored today;
-// the dispatch in Converter::onRecord() is where they will produce ContextSwitchRec / ReadyRec.
+// Scheduler events (WP-71; the path is in the spool's SessionInfo::sched). Tracepoint mode: SAMPLE records
+// whose RAW payload is a sched_switch / sched_waking event (decoded with the formats stored in the session)
+// become ContextSwitchRec (old_state / old_wait_reason from prev_state, old_thread_stack = the sample's
+// callchain) and ReadyRec (readying_stack = the waker's callchain). Fallback: PERF_RECORD_SWITCH(_CPU_WIDE)
+// becomes a ContextSwitchRec without wait reason or stack and with Ready/Waiting from the preempt flag. In
+// launch / attach mode only events that involve a thread of the target set are kept.
 #pragma once
 
 #include "capture/linux_perf/spool.h"
@@ -71,6 +75,15 @@ struct ConvertStats {
   uint64_t eventsLost = 0;        // sum of PERF_RECORD_LOST / LOST_SAMPLES counts
   uint64_t throttleEvents = 0;    // THROTTLE records
   uint64_t throttledNs = 0;       // total time between THROTTLE and the matching UNTHROTTLE
+  // Scheduler events (WP-71): tracepoint samples or PERF_RECORD_SWITCH records seen / written.
+  uint64_t schedSwitchEvents = 0;
+  uint64_t schedWakeEvents = 0;
+  uint64_t switchesWritten = 0;  // ContextSwitchRec
+  uint64_t readiesWritten = 0;   // ReadyRec
+  uint64_t schedDroppedNotTarget = 0;
+  uint64_t schedDroppedWindow = 0;
+  uint64_t schedMalformed = 0;
+  uint64_t schedUnnamed = 0;  // switch records dropped: the task's tid was the kernel's -1 (exiting task)
   uint64_t framesTotal = 0;
   uint64_t framesUnmapped = 0;  // user frames outside every file mapping (absolute)
   uint64_t framesKernel = 0;

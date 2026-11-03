@@ -2,7 +2,8 @@
 //
 // One thread polls every ring (poll() on the event fds with a short timeout, so a slow trickle of records
 // still reaches the disk promptly), copies whatever is pending, splits it into SAMPLE records and everything
-// else, and appends each part to its spool file tagged with the ring id. SAMPLEs go to the data segments
+// else, and appends each part to its spool file tagged with the ring id. SAMPLEs (and the high-rate
+// SWITCH / SWITCH_CPU_WIDE records) go to the data segments
 // (rotating and size-limited in circular mode), all other records to meta.bin, which never shrinks. The
 // thread also feeds a DescendantTracker with FORK records (so the backend can tell when a followed process
 // tree has gone) and tallies LOST / THROTTLE records for live diagnostics. It does no conversion work.

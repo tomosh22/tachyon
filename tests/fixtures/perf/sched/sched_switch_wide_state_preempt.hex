@@ -1,0 +1,5 @@
+# sched_switch (wide prev_state): tb-lock-1 (4321) is preempted (TASK_REPORT_MAX), kworker/1:1 runs
+3c 01 00 00 e1 10 00 00 74 62 2d 6c 6f 63 6b 2d
+31 00 00 00 00 00 00 00 e1 10 00 00 78 00 00 00
+00 01 00 00 00 00 00 00 6b 77 6f 72 6b 65 72 2f
+31 3a 31 00 00 00 00 00 4d 00 00 00 64 00 00 00

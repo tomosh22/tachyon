@@ -215,7 +215,9 @@ void Drain::process(uint32_t ringId, const std::vector<uint8_t>& bytes) {
       forEachRecord(std::span<const uint8_t>(bytes), consumed, [&](std::span<const uint8_t> rec) {
         RecordHeader h;
         (void)readRecordHeader(rec, h);
-        if (h.type == kRecordSample) {
+        // Context-switch side-band records are as frequent as samples and as time-ordered: they rotate with
+        // the sample segments in circular mode instead of growing meta.bin without bound.
+        if (h.type == kRecordSample || h.type == kRecordSwitch || h.type == kRecordSwitchCpuWide) {
           ++samples;
           m_dataBuf.insert(m_dataBuf.end(), rec.begin(), rec.end());
           ParsedRecord pr;
