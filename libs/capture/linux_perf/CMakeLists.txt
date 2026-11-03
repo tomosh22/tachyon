@@ -3,6 +3,6 @@
 find_package(Threads REQUIRED)
 tachyon_add_library(capture_linux_perf
   SOURCES drain.cpp launch.cpp linux_perf_backend.cpp perf_converter.cpp perf_records.cpp perf_system.cpp
-          proc_snapshot.cpp ring_buffer.cpp sched_format.cpp sched_setup.cpp spool.cpp
+          proc_snapshot.cpp retention.cpp ring_buffer.cpp sched_format.cpp sched_setup.cpp spool.cpp
   PUBLIC_DEPS tachyon::capture tachyon::core tachyon::trace Threads::Threads
   PRIVATE_DEPS tachyon::symbols nlohmann_json::nlohmann_json)

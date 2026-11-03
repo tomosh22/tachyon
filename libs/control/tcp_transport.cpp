@@ -5,9 +5,11 @@
 #include "control/framed_connection.h"
 #include "core/platform.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -454,13 +456,21 @@ Result<std::unique_ptr<IListener>> listenTcp(const TcpEndpoint& endpoint) {
   return std::unique_ptr<IListener>(new TcpListener(fd, std::move(address)));
 }
 
+int connectShareMs(int remainingMs, size_t addressesLeft) {
+  if (remainingMs <= 0) return 0;
+  if (addressesLeft <= 1) return remainingMs;
+  return std::max(1, static_cast<int>(remainingMs / static_cast<int64_t>(addressesLeft)));
+}
+
 Result<std::unique_ptr<IConnection>> connectTcp(const TcpEndpoint& endpoint, int timeoutMs) {
   sock::ensureInit();
   AddrInfo resolved;
   TACHYON_TRY(resolved.resolve(endpoint, /*passive=*/false));
   const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
   Error last = makeError(ErrorCode::IoError, "no address to connect to for " + endpoint.host);
-  for (const addrinfo* ai = resolved.first(); ai != nullptr; ai = ai->ai_next) {
+  size_t addressesLeft = 0;
+  for (const addrinfo* ai = resolved.first(); ai != nullptr; ai = ai->ai_next) ++addressesLeft;
+  for (const addrinfo* ai = resolved.first(); ai != nullptr; ai = ai->ai_next, --addressesLeft) {
     const SockT fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (fd == kBadSock) {
       last = sockError(ErrorCode::IoError, "socket");
@@ -475,8 +485,11 @@ Result<std::unique_ptr<IConnection>> connectTcp(const TcpEndpoint& endpoint, int
     if (rc != 0 && sock::wouldBlock(err)) {
       const auto left =
           std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+      // This address gets its share of what is left, so one that hangs cannot starve the rest.
+      const int share = connectShareMs(left > 0 ? static_cast<int>(std::min<long long>(left, INT32_MAX)) : 0,
+                                       addressesLeft);
       short revents = 0;
-      const int pr = sock::pollOne(fd, kPollOut, left > 0 ? static_cast<int>(left) : 0, revents);
+      const int pr = sock::pollOne(fd, kPollOut, share, revents);
       if (pr == 0) {
         sock::closeSock(fd);
         last = makeError(ErrorCode::Timeout, "connect to " + formatTcpEndpoint(endpoint) + " timed out");

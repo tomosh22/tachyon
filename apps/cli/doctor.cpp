@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cerrno>
 #include <charconv>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <ostream>
@@ -642,12 +643,10 @@ void checkPtraceScope(Context& c) {
   const std::string detail = "value " + std::to_string(v) + ", launch captures are not affected";
   if (v <= 1 || ptrace) {
     c.add("ptrace_scope", title, DoctorStatus::Pass,
-          detail +
-              (v == 1
-                   ? "; attach works for descendants and, through perf's read access, other processes of the "
-                     "same user"
-               : ptrace && v > 1 ? "; CAP_SYS_PTRACE is present"
-                                 : ""));
+          detail + (ptrace ? "; CAP_SYS_PTRACE is present: attach works for any process the agent may signal"
+                    : v == 1 ? "; attach works only for descendants of the agent (processes it launched) "
+                               "unless the agent has CAP_SYS_PTRACE"
+                             : ""));
   } else {
     c.add("ptrace_scope", title, DoctorStatus::Warn,
           detail + (v >= 3 ? "; attach to running processes is blocked" : "; attach needs CAP_SYS_PTRACE"),
@@ -665,7 +664,11 @@ void checkSocketDir(Context& c) {
     c.add("socket_dir", title, DoctorStatus::Warn, "unknown: no socket address", "");
     return;
   }
-  const fs::path dir = fs::path(c.env.socketAddress).parent_path();
+  // A relative --socket names a file in the current directory (the agent resolves it the same way).
+  std::error_code absEc;
+  fs::path socketPath = fs::absolute(fs::path(c.env.socketAddress), absEc);
+  if (absEc) socketPath = c.env.socketAddress;
+  const fs::path dir = socketPath.parent_path();
   const std::string fix =
       "set $TACHYON_AGENT_PIPE (or --socket) to a socket path in a directory you can write, e.g. "
       "/run/user/<uid>/tachyon-agent.sock";
@@ -679,11 +682,30 @@ void checkSocketDir(Context& c) {
   const bool writable = c.env.isWritableDir ? c.env.isWritableDir(dir) : false;
   if (!writable) {
     c.add("socket_dir", title, DoctorStatus::Fail,
-          dir.string() + " does not exist or is not writable: the agent cannot create " + c.env.socketAddress,
+          dir.string() + " does not exist or is not writable: the agent cannot create " + socketPath.string(),
           fix);
-  } else {
-    c.add("socket_dir", title, DoctorStatus::Pass, c.env.socketAddress + " (directory writable)");
+    return;
   }
+  // The socket itself is 0600, but a directory others can write to lets them replace or pre-create it, and
+  // one they can list shows when the agent runs. It should be private to this user.
+  uint32_t mode = 0, owner = 0;
+  if (c.env.statDir && c.env.statDir(dir, mode, owner)) {
+    const bool wrongOwner = owner != c.env.uid;
+    if (wrongOwner || (mode & 077) != 0) {
+      char text[16];
+      std::snprintf(text, sizeof text, "%04o", static_cast<unsigned>(mode & 07777));
+      std::string what = dir.string() + " has mode " + text + " and is owned by uid " + std::to_string(owner);
+      what +=
+          wrongOwner ? ", not by you (uid " + std::to_string(c.env.uid) + ")" : ": other users can access it";
+      c.add("socket_dir", title, DoctorStatus::Warn,
+            what + "; the socket is " + socketPath.string() + " (directory writable)",
+            "use a private directory: `mkdir -m 700 -p $XDG_RUNTIME_DIR/tachyon` and pass --socket "
+            "$XDG_RUNTIME_DIR/tachyon/agent.sock, or `chmod 700 " +
+                dir.string() + "` if you own it");
+      return;
+    }
+  }
+  c.add("socket_dir", title, DoctorStatus::Pass, socketPath.string() + " (directory writable)");
 }
 
 void checkSymbols(Context& c) {
@@ -905,6 +927,14 @@ DoctorEnv makeSystemDoctorEnv(uint32_t requestedHz, const std::string& socketAdd
   env.isWritableDir = [](const fs::path& dir) {
     std::error_code e;
     return fs::is_directory(dir, e) && ::access(dir.c_str(), W_OK | X_OK) == 0;
+  };
+  env.uid = static_cast<uint32_t>(::geteuid());
+  env.statDir = [](const fs::path& dir, uint32_t& mode, uint32_t& owner) {
+    struct stat st {};
+    if (::stat(dir.c_str(), &st) != 0) return false;
+    mode = static_cast<uint32_t>(st.st_mode & 07777);
+    owner = static_cast<uint32_t>(st.st_uid);
+    return true;
   };
 
   // Trial events mirror the backend's: cpu-clock, callchain sampling, the backend's sample type.

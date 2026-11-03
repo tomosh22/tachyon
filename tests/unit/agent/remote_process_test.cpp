@@ -2,6 +2,7 @@
 // checks of the token file, the CLI's --agent tcp://... with `capture --fetch`, `fetch`, `processes`, token
 // failures, and the rule that the token never shows up in the agent's log.
 #include "../control/test_util.h"
+#include "capture/capture_backend.h"
 #include "control/client.h"
 #include "control/tcp.h"
 #include "fixture_util.h"
@@ -10,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <fstream>
 #include <thread>
@@ -235,6 +237,49 @@ TEST_F(RemoteProcess, TokenProblemsAreReportedAndLogged) {
   EXPECT_NE(log.find("authentication failed from 127.0.0.1:"), std::string::npos) << log;
   EXPECT_EQ(log.find(kToken), std::string::npos);
   EXPECT_EQ(log.find(wrongToken), std::string::npos);
+}
+
+// WP-66: `capture --fetch` on a flight recorder also fetches the traces flushed during the wait.
+TEST_F(RemoteProcess, CaptureFetchAlsoFetchesFlushedTraces) {
+  Process agent = startAgent();
+  const fs::path dir = m_localDir / "fetched";
+
+  std::atomic<int> flushesDone{0};
+  std::thread flusher([&] {
+    auto c = control::Client::connectWithRetry(m_tcp, 15000, kToken);
+    if (!c.ok()) return;
+    // Wait for the capture the CLI is about to start.
+    for (int i = 0; i < 200; ++i) {
+      auto st = c->call(control::StatusRequest{}, 5000);
+      if (st.ok() && st->ok &&
+          std::get<control::StatusBody>(st->body).state == capture::CaptureState::Capturing)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    for (const char* name : {"hitch-a", "hitch-b"}) {
+      control::FlushRequest f;
+      f.name = name;
+      f.seconds = 5;
+      auto r = c->call(f, 10000);
+      if (r.ok() && r->ok) ++flushesDone;
+    }
+  });
+  const int code = cli({"capture", "--attach", "1", "--circular-mb", "8", "--duration", "4", "--fetch",
+                        "--fetch-dir", dir.string(), "--out", "ring.tachyon"},
+                       "ring.txt");
+  flusher.join();
+  const std::string out = readTextFile(m_dir.path() / "ring.txt");
+  ASSERT_EQ(code, 0) << out << "\n" << agentLog();
+  ASSERT_EQ(flushesDone.load(), 2);
+  for (const char* name : {"hitch-a.tachyon", "hitch-b.tachyon", "ring.tachyon"}) {
+    const fs::path got = dir / name;
+    ASSERT_TRUE(fs::exists(got)) << name << "\n" << out;
+    EXPECT_TRUE(trace::TraceReader::open(got).ok()) << name;
+    EXPECT_NE(out.find(got.string()), std::string::npos) << "the local path of " << name << " is printed\n"
+                                                         << out;
+    EXPECT_FALSE(fs::exists(got.string() + ".part"));
+  }
+  stopAgent(agent);
 }
 
 }  // namespace

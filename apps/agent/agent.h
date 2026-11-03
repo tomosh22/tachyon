@@ -61,6 +61,7 @@
 
 #include "capture/capture_backend.h"
 #include "capture/windows_etw/target_watch.h"
+#include "control/safe_file.h"
 #include "control/server.h"
 #include "inst/ingest.h"
 #include "inst/merge.h"
@@ -70,8 +71,10 @@
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -130,6 +133,11 @@ struct AgentConfig {
   int flushSettleMs = 100;
 };
 
+// Thread-safe. A warning (empty when there is none) about the directory remote traces are written to: a
+// directory other users can write to without the sticky bit lets them replace files the agent created
+// (output files are created with O_EXCL|O_NOFOLLOW, which stops planted links, not renames). POSIX only.
+std::string remoteOutDirWarning(const std::filesystem::path& dir);
+
 class Agent final : public control::IRequestHandler {
  public:
   using EventSink = std::function<void(const control::Event&)>;
@@ -154,6 +162,8 @@ class Agent final : public control::IRequestHandler {
 
   // Thread-safe.
   capture::CaptureState state() const { return m_state.load(); }
+  // Thread-safe. How many whole-file SHA-256 computations fetch requests have caused (a cache hit adds none).
+  uint64_t hashComputations() const { return m_hashComputations.load(); }
 
  private:
   control::Response handleStatus(std::optional<int64_t> id);
@@ -171,13 +181,17 @@ class Agent final : public control::IRequestHandler {
     uint32_t seconds = 0;
     bool trigger = false;
     uint32_t coalesced = 0;
+    std::optional<control::FileIdentity> reserved;  // the file reserved for the flushed trace
+    std::filesystem::path dir;                      // where it is
   };
   // Runs one flush (backend flush, instrumentation merge, flushed event). m_flushing is held by the caller.
   Result<control::CaptureSummary> performFlush(const FlushJob& job);
   // Clears m_flushing and wakes the waiters.
   void endFlush();
-  // A file stem for `requested` in the output directory of the session that does not exist yet.
-  std::string uniqueFlushName(const std::string& requested) const;
+  // A file stem for `requested` in the output directory of the session: the file <stem>.tachyon is created
+  // empty (O_EXCL, never through a symlink) so the name is ours and nobody can plant a link there before
+  // the backend writes it; a taken name gets "-N". `identity` is the reserved file. Fails with IoError.
+  Result<std::string> reserveFlushName(const std::string& requested, control::FileIdentity& identity);
   control::Response handleCancel();
   control::Response handleInstHello(const control::InstHelloRequest& req);
 
@@ -215,8 +229,17 @@ class Agent final : public control::IRequestHandler {
   // status requests or other clients.
   mutable std::mutex m_remoteMutex;  // guards m_remoteClients
   std::set<control::ClientId> m_remoteClients;
-  std::mutex m_producedMutex;                  // guards m_produced
-  std::set<std::filesystem::path> m_produced;  // canonical paths of traces produced by this agent process
+  std::mutex m_producedMutex;  // guards m_produced and m_hashCache
+  // Canonical paths of traces produced by this agent process, with the identity of the file when it was
+  // produced: a fetch serves the file it opened only when that is still this file.
+  std::map<std::filesystem::path, control::FileIdentity> m_produced;
+  struct CachedHash {
+    uint64_t size = 0;
+    int64_t mtimeNs = 0;
+    std::string sha256;
+  };
+  std::atomic<uint64_t> m_hashComputations{0};
+  std::map<std::filesystem::path, CachedHash> m_hashCache;  // whole-file SHA-256 per (path, size, mtime)
 
   std::mutex m_mutex;
   std::condition_variable m_flushDone;             // signalled when m_flushing drops
@@ -236,9 +259,11 @@ class Agent final : public control::IRequestHandler {
   bool m_loggedNotCircular = false;                       // guarded by m_mutex
   bool m_haveTrigger = false;                             // guarded by m_mutex
   std::chrono::steady_clock::time_point m_lastTrigger{};  // guarded by m_mutex
-  std::string m_lastFlushPath;                            // guarded by m_mutex: answer of coalesced triggers
-  uint32_t m_coalesced = 0;                               // guarded by m_mutex: since the last flushed event
-  std::shared_ptr<inst::Ingest> m_ingest;                 // guarded by m_mutex
+  std::string m_lastFlushPath;  // guarded by m_mutex: answer of coalesced triggers (flush in flight or last)
+  std::optional<control::FileIdentity> m_outIdentity;  // reserved trace of a remote capture; m_mutex
+  std::filesystem::path m_outReservedPath;             // where it is; m_mutex
+  uint32_t m_coalesced = 0;                            // guarded by m_mutex: since the last flushed event
+  std::shared_ptr<inst::Ingest> m_ingest;              // guarded by m_mutex
   bool m_circular = false;  // guarded by m_mutex: the running capture is a flight recorder
   capture::CaptureMode m_sessionMode = capture::CaptureMode::System;  // guarded by m_mutex
   uint32_t m_sessionPid = 0;                                          // attach target; guarded by m_mutex

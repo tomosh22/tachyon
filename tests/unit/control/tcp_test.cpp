@@ -12,7 +12,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -446,6 +448,30 @@ TEST(TcpAuth, TooManyUnauthenticatedConnectionsAreClosed) {
   EXPECT_FALSE(*got) << "the third idle connection is closed without a word";
 }
 
+// ---- connect deadline split ----
+
+TEST(ConnectDeadline, EveryAddressGetsAShareAndLeftoversCarryOver) {
+  EXPECT_EQ(connectShareMs(5000, 1), 5000) << "the last (or only) address gets everything";
+  EXPECT_EQ(connectShareMs(5000, 2), 2500) << "a hanging first address cannot take the whole deadline";
+  EXPECT_EQ(connectShareMs(5000, 3), 1666);
+  // Simulate three addresses of which the first two hang for their whole share: the third still gets time.
+  int remaining = 5000;
+  int shares[3];
+  for (int i = 0; i < 3; ++i) {
+    shares[i] = connectShareMs(remaining, static_cast<size_t>(3 - i));
+    remaining -= shares[i];
+  }
+  EXPECT_GT(shares[2], 0);
+  EXPECT_GE(shares[2], shares[0]) << "later addresses are never worse off than earlier ones";
+  EXPECT_EQ(shares[0] + shares[1] + shares[2], 5000) << "the shares add up to the deadline";
+  // A first address that fails at once hands its share to the next ones.
+  EXPECT_EQ(connectShareMs(5000, 2), 2500);
+  EXPECT_EQ(connectShareMs(4990, 1), 4990);
+  EXPECT_EQ(connectShareMs(0, 3), 0);
+  EXPECT_EQ(connectShareMs(-5, 3), 0);
+  EXPECT_EQ(connectShareMs(1, 5), 1) << "never rounds a positive wait down to a non-wait";
+}
+
 // ---- token file ----
 
 #if !TACHYON_PLATFORM_WINDOWS
@@ -494,6 +520,50 @@ TEST(TokenFile, RefusesProblemFiles) {
   std::filesystem::create_directory(dir.path() / "dir");
   ::chmod((dir.path() / "dir").c_str(), 0700);
   EXPECT_FALSE(loadTokenFile(dir.path() / "dir", 1).ok()) << "a directory is not a token file";
+}
+
+TEST(TokenFile, RefusesASymlinkEvenToAGoodFile) {
+  TempDir dir;
+  const auto real = dir.path() / "real-token";
+  writeToken(real, kToken, 0600);
+  const auto link = dir.path() / "token";
+  std::filesystem::create_symlink(real, link);
+  auto r = loadTokenFile(link, 32);
+  ASSERT_FALSE(r.ok()) << "a symlink is never followed";
+  EXPECT_EQ(r.error().code, ErrorCode::InvalidArgument);
+  EXPECT_NE(r.error().message.find("symbolic link"), std::string::npos) << r.error().message;
+  EXPECT_EQ(r.error().message.find(kToken), std::string::npos);
+  EXPECT_TRUE(loadTokenFile(real, 32).ok()) << "the real file is fine";
+
+  const auto dangling = dir.path() / "dangling";
+  std::filesystem::create_symlink(dir.path() / "nowhere", dangling);
+  EXPECT_FALSE(loadTokenFile(dangling, 32).ok());
+}
+
+TEST(TokenFile, RefusesAFileOwnedByAnotherUser) {
+  if (::geteuid() != 0) GTEST_SKIP() << "needs root to give a file to another uid";
+  TempDir dir;
+  const auto path = dir.path() / "token";
+  writeToken(path, kToken, 0600);
+  ASSERT_EQ(::chown(path.c_str(), 54321, static_cast<gid_t>(-1)), 0) << std::strerror(errno);
+  auto r = loadTokenFile(path, 32);
+  ASSERT_FALSE(r.ok());
+  EXPECT_EQ(r.error().code, ErrorCode::NoPrivilege);
+  EXPECT_NE(r.error().message.find("54321"), std::string::npos) << r.error().message;
+  EXPECT_EQ(r.error().message.find(kToken), std::string::npos);
+  ASSERT_EQ(::chown(path.c_str(), 0, static_cast<gid_t>(-1)), 0);
+  EXPECT_TRUE(loadTokenFile(path, 32).ok()) << "root-owned files are accepted";
+}
+
+TEST(TokenFile, RefusesGroupReadableMode0640) {
+  TempDir dir;
+  const auto path = dir.path() / "token";
+  writeToken(path, kToken, 0640);
+  auto r = loadTokenFile(path, 32);
+  ASSERT_FALSE(r.ok());
+  EXPECT_EQ(r.error().code, ErrorCode::NoPrivilege);
+  EXPECT_NE(r.error().message.find("0640"), std::string::npos) << r.error().message;
+  EXPECT_NE(r.error().message.find("chmod 600"), std::string::npos);
 }
 #endif
 

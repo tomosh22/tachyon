@@ -5,10 +5,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(TACHYON_SDK_SOCKET_TEST sdk_socket_linux_test.cpp socket_owner_linux_test.cpp)
 endif()
 tachyon_add_test(inst_integration_tests
-  SOURCES testbed_ingest_test.cpp flight_recorder_mock_test.cpp ../../unit/agent/process_util.cpp
+  SOURCES testbed_ingest_test.cpp testbed_report_test.cpp flight_recorder_mock_test.cpp ../../unit/agent/process_util.cpp
           ${TACHYON_SDK_SOCKET_TEST}
   DEPS tachyon::agent_core tachyon::cli_core tachyon::capture tachyon::control tachyon::trace tachyon::inst
-       nlohmann_json::nlohmann_json
+       tachyon::testbed_core nlohmann_json::nlohmann_json
   LABELS integration)
 
 if(TARGET inst_integration_tests)

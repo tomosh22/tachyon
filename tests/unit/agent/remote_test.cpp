@@ -20,6 +20,7 @@
 #include <thread>
 
 #if TACHYON_PLATFORM_LINUX
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -607,6 +608,163 @@ TEST(RemoteProcesses, ListsTheAgentsProcesses) {
   ASSERT_TRUE(empty.ok());
   EXPECT_TRUE(empty->ok);
   EXPECT_TRUE(std::get<ProcessesBody>(empty->body).processes.empty());
+}
+
+// ---- WP-66: output files and fetch handles ----
+
+#if TACHYON_PLATFORM_LINUX
+TEST(RemoteOutput, ASymlinkPlantedAtThePlannedNameIsNeverWrittenThrough) {
+  RemoteHarness h(30'000);
+  const fs::path victimDir = h.dir.path() / "victim";
+  fs::create_directories(victimDir);
+  const fs::path existing = victimDir / "existing.txt";
+  std::ofstream(existing) << "KEEP ME";
+  const fs::path dangling = victimDir / "created-by-attack.txt";  // does not exist
+
+  std::error_code ec;
+  fs::create_symlink(dangling, h.outDir / "evil.tachyon", ec);
+  if (ec) GTEST_SKIP() << "cannot create symlinks here: " << ec.message();
+  fs::create_symlink(existing, h.outDir / "evil-1.tachyon", ec);
+  ASSERT_FALSE(ec);
+
+  auto c = h.remote();
+  const CaptureSummary s = captureOnce(c, attachStart("evil.tachyon"));
+  EXPECT_EQ(fs::path(s.path), h.outDir / "evil-2.tachyon") << "both planted names count as taken";
+  EXPECT_FALSE(fs::is_symlink(s.path));
+  EXPECT_EQ(slurp(s.path), slurp(h.fixture));
+  EXPECT_EQ(slurp(existing), "KEEP ME") << "the file behind the symlink is untouched";
+  EXPECT_FALSE(fs::exists(dangling)) << "the dangling target was not created";
+  EXPECT_TRUE(fs::is_symlink(h.outDir / "evil.tachyon"));
+  EXPECT_TRUE(fs::is_symlink(h.outDir / "evil-1.tachyon"));
+  // The produced file is still served.
+  auto fetched = fetchFile(c, s.path, h.localDir / "evil.tachyon");
+  ASSERT_TRUE(fetched.ok()) << fetched.error().toString();
+}
+
+TEST(RemoteOutput, ASymlinkPlantedAtAFlushNameIsNeverWrittenThrough) {
+  RemoteHarness h(30'000);
+  const fs::path existing = h.dir.path() / "existing-flush-victim.txt";
+  std::ofstream(existing) << "KEEP ME";
+  const fs::path dangling = h.dir.path() / "flush-victim-created.txt";
+  std::error_code ec;
+  fs::create_symlink(existing, h.outDir / "hitch.tachyon", ec);
+  if (ec) GTEST_SKIP() << "cannot create symlinks here: " << ec.message();
+  fs::create_symlink(dangling, h.outDir / "hitch-1.tachyon", ec);
+
+  auto c = h.remote();
+  StartRequest start = attachStart("ring.tachyon");
+  start.circular_mb = 8;
+  auto started = c.call(start, 10000);
+  ASSERT_TRUE(started.ok());
+  ASSERT_TRUE(started->ok) << started->error;
+  FlushRequest flush;
+  flush.name = "hitch";
+  flush.seconds = 5;
+  auto flushed = c.call(flush, 10000);
+  ASSERT_TRUE(flushed.ok());
+  ASSERT_TRUE(flushed->ok) << flushed->error;
+  const std::string path = std::get<CaptureSummary>(flushed->body).path;
+  EXPECT_EQ(fs::path(path), h.outDir / "hitch-2.tachyon");
+  EXPECT_FALSE(fs::is_symlink(path));
+  EXPECT_EQ(slurp(path), slurp(h.fixture));
+  EXPECT_EQ(slurp(existing), "KEEP ME");
+  EXPECT_FALSE(fs::exists(dangling));
+  (void)c.call(CancelRequest{}, 10000);
+}
+
+TEST(RemoteOutput, AFailedStartLeavesNoReservedFileBehind) {
+  RemoteHarness h(30'000);
+  auto c = h.remote();
+  auto first = c.call(attachStart("busy.tachyon"), 10000);
+  ASSERT_TRUE(first.ok());
+  ASSERT_TRUE(first->ok);
+  // A second start is refused (a capture is running): the name it picked must not stay behind.
+  auto second = c.call(attachStart("other.tachyon"), 10000);
+  ASSERT_TRUE(second.ok());
+  EXPECT_FALSE(second->ok);
+  EXPECT_EQ(second->code, ErrorCode::Busy);
+  EXPECT_FALSE(fs::exists(h.outDir / "other.tachyon"));
+  (void)c.call(CancelRequest{}, 10000);
+}
+#endif
+
+#if TACHYON_PLATFORM_LINUX
+TEST(RemoteOutput, TheOutputDirectoryIsCheckedForOtherWriters) {
+  TempDir dir;
+  const fs::path d = dir.path() / "out";
+  fs::create_directories(d);
+  ::chmod(d.c_str(), 0700);
+  EXPECT_TRUE(remoteOutDirWarning(d).empty());
+  ::chmod(d.c_str(), 0755);
+  EXPECT_TRUE(remoteOutDirWarning(d).empty()) << "readable by others is fine";
+  ::chmod(d.c_str(), 0775);
+  EXPECT_NE(remoteOutDirWarning(d).find("chmod go-w"), std::string::npos);
+  ::chmod(d.c_str(), 0777);
+  EXPECT_FALSE(remoteOutDirWarning(d).empty());
+  ::chmod(d.c_str(), 01777);
+  EXPECT_TRUE(remoteOutDirWarning(d).empty()) << "a sticky directory like /tmp cannot have files replaced";
+  EXPECT_TRUE(remoteOutDirWarning(d / "missing").empty());
+}
+#endif
+
+TEST(RemoteFetch, TheFileOpenedMustBeTheFileThatWasProduced) {
+  RemoteHarness h(60'000);
+  auto c = h.remote();
+  const CaptureSummary s = captureOnce(c, attachStart("swap.tachyon"));
+  auto ask = [&](const std::string& path) {
+    FetchRequest req;
+    req.path = path;
+    req.length = 16;
+    auto r = c.call(req, 5000);
+    EXPECT_TRUE(r.ok());
+    return std::move(*r);
+  };
+  EXPECT_TRUE(ask(s.path).ok);
+  // A local user replaces the produced file by another regular file of the same name (rename over it).
+  const fs::path other = h.outDir / "swap.tmp";
+  writeBlob(other, 60'000, 5);
+  fs::rename(other, s.path);
+  const Response r = ask(s.path);
+  EXPECT_FALSE(r.ok) << "a different file is not served just because the path is the produced one";
+  EXPECT_EQ(r.code, ErrorCode::NotFound);
+}
+
+TEST(RemoteFetch, TheWholeFileHashIsComputedOncePerFileVersion) {
+  RemoteHarness h(1'900'000);  // four chunks
+  auto c = h.remote();
+  const CaptureSummary s = captureOnce(c, attachStart("hash.tachyon"));
+  const std::string expected = *sha256OfFile(h.fixture);
+  ASSERT_EQ(h.agent->hashComputations(), 0u);
+  for (uint64_t offset = 0; offset < 1'900'000; offset += kMaxFetchChunkBytes) {
+    FetchRequest req;
+    req.path = s.path;
+    req.offset = offset;
+    req.want_sha256 = true;
+    auto r = c.call(req, 10000);
+    ASSERT_TRUE(r.ok());
+    ASSERT_TRUE(r->ok) << r->error;
+    EXPECT_EQ(std::get<FetchBody>(r->body).sha256, expected);
+  }
+  EXPECT_EQ(h.agent->hashComputations(), 1u) << "sha256:true on every chunk hashes the file once";
+  // A full fetch (resumable client) afterwards still does not rehash.
+  auto fetched = fetchFile(c, s.path, h.localDir / "hash.tachyon");
+  ASSERT_TRUE(fetched.ok()) << fetched.error().toString();
+  EXPECT_EQ(fetched->sha256, expected);
+  EXPECT_EQ(h.agent->hashComputations(), 1u);
+  // A changed file (new size or mtime) is hashed again, and the answer follows the content.
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  {
+    std::ofstream out(s.path, std::ios::binary | std::ios::app);
+    out << "more";
+  }
+  FetchRequest again;
+  again.path = s.path;
+  again.want_sha256 = true;
+  auto changed = c.call(again, 10000);
+  ASSERT_TRUE(changed.ok());
+  ASSERT_TRUE(changed->ok) << changed->error;
+  EXPECT_EQ(h.agent->hashComputations(), 2u);
+  EXPECT_EQ(std::get<FetchBody>(changed->body).sha256, *sha256OfFile(s.path));
 }
 
 }  // namespace

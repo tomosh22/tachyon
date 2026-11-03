@@ -89,15 +89,15 @@ fs::path Spool::segmentPath(uint64_t seq) const {
 
 Result<void> Spool::openSegmentLocked() {
   Segment seg;
-  seg.seq = m_nextSeq++;
+  seg.seq = m_nextSeq;
   seg.file = segmentPath(seg.seq);
+  // The next file is opened before the current one is let go: a failure leaves the spool exactly as it was.
+  std::ofstream next(seg.file, std::ios::binary | std::ios::trunc);
+  if (!next) return makeError(ErrorCode::IoError, "cannot create spool file " + seg.file.string());
+  ++m_nextSeq;
   m_file.close();
   m_file.clear();
-  m_file.open(seg.file, std::ios::binary | std::ios::trunc);
-  if (!m_file) {
-    m_ioError = true;
-    return makeError(ErrorCode::IoError, "cannot create spool file " + seg.file.string());
-  }
+  m_file = std::move(next);
   // Header, strings and thread names, so that the segment decodes on its own.
   const size_t before = m_buffer.size();
   m_buffer.insert(m_buffer.end(), m_prefixHeader.begin(), m_prefixHeader.end());
@@ -109,6 +109,10 @@ Result<void> Spool::openSegmentLocked() {
   m_segments.push_back(std::move(seg));
   ++m_stats.segmentsStarted;
   return ok();
+}
+
+uint64_t Spool::segmentLimitLocked(uint64_t prefix) const {
+  return std::max(m_segmentBytes, prefix + m_segmentBytes / 2);
 }
 
 Result<void> Spool::flushLocked() {
@@ -149,13 +153,24 @@ void Spool::dropOldestLocked() {
 
 void Spool::rotateLocked() {
   (void)flushLocked();
+  // Open the next segment first: when that fails nothing was discarded for it, the current segment keeps
+  // growing and the capture goes on; the rotation is tried again a little later.
+  if (auto opened = openSegmentLocked(); !opened.ok()) {
+    ++m_stats.segmentOpenFailures;
+    m_stats.lastOpenError = opened.error().message;
+    m_retryRotateAt = m_segments.back().bytes + std::max<uint64_t>(m_segmentBytes / 4, kMinSegmentBytes / 4);
+    return;
+  }
+  m_retryRotateAt = 0;
+  // Make room for the new segment (it may grow to its limit), never by discarding the two newest segments.
+  const Segment& fresh = m_segments.back();
+  const uint64_t freshBytes = segmentLimitLocked(fresh.prefix);
   uint64_t retained = 0;
-  for (const Segment& s : m_segments) retained += s.bytes;
-  while (m_segments.size() > 1 && retained + m_segmentBytes > m_maxBytes) {
+  for (size_t i = 0; i + 1 < m_segments.size(); ++i) retained += m_segments[i].bytes;
+  while (m_segments.size() > 2 && retained + freshBytes > m_maxBytes) {
     retained -= m_segments.front().bytes;
     dropOldestLocked();
   }
-  (void)openSegmentLocked();
 }
 
 bool Spool::notePrefixLocked(const uint8_t* frame, size_t bytes, const FramePeek& peek) {
@@ -196,13 +211,15 @@ bool Spool::notePrefixLocked(const uint8_t* frame, size_t bytes, const FramePeek
 void Spool::appendRingLocked(const uint8_t* frame, size_t bytes, const FramePeek& peek) {
   const bool retainedInPrefix = notePrefixLocked(frame, bytes, peek);
   const Segment& cur = m_segments.back();
-  if (cur.bytes > cur.prefix && cur.bytes + bytes > m_segmentBytes) {
+  if (cur.bytes > cur.prefix && cur.bytes + bytes > segmentLimitLocked(cur.prefix) &&
+      cur.bytes >= m_retryRotateAt) {
+    const uint64_t before = m_stats.segmentsStarted;
     rotateLocked();
     if (m_ioError) {
       recordDropLocked(peek);
       return;
     }
-    if (retainedInPrefix) {  // the new segment already starts with it
+    if (retainedInPrefix && m_stats.segmentsStarted != before) {  // the new segment already starts with it
       ++m_stats.framesWritten;
       m_stats.bytesWritten += bytes;
       if (peek.hasTimestamp && peek.ts > m_lastTs) m_lastTs = peek.ts;

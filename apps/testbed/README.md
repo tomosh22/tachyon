@@ -80,7 +80,7 @@ The interval used is recorded in `details.hitch_interval_ms`.
           "enforced": <bool>,              // true: split is enforced by construction (loop counts / deadlines)
           "tolerance": <number>,           // advisory absolute per-function share tolerance for consumers
           "expected": [ { "function": <string>, "share": <number> } ],   // shares in [0,1], sum to 1
-          "measured": [ { "function": <string>, "share": <number>, "tsc_ticks": <uint> } ]  // sum to 1
+          "measured": [ { "function": <string>, "share": <number>, "tsc_ticks": <uint> } ]  // sum to 1, or all 0 for a starved thread (stderr warning)
         }
       ],
       "details": { ... }                   // scenario specific object (see below); includes a "checksum"

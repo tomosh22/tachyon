@@ -1,6 +1,6 @@
 tachyon_add_test(agent_tests
   SOURCES agent_test.cpp agent_concurrency_test.cpp cli_test.cpp acceptance_test.cpp launch_agent_test.cpp
-          inst_agent_test.cpp flight_recorder_test.cpp process_util.cpp remote_test.cpp remote_process_test.cpp
+          inst_agent_test.cpp flight_recorder_test.cpp flight_hardening_test.cpp process_util.cpp remote_test.cpp remote_process_test.cpp
   DEPS tachyon::agent_core tachyon::cli_core tachyon::capture tachyon::control tachyon::trace tachyon::inst)
 
 if(TARGET agent_tests)

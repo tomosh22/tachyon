@@ -589,5 +589,82 @@ TEST(Doctor, RealMachineSmoke) {
 }
 #endif
 
+TEST(Doctor, RelativeSocketIsResolvedAgainstTheCurrentDirectory) {
+  Machine m;
+  DoctorEnv e = m.env();
+  // A bare file name is a socket in the current directory, not a socket in an unwritable "" directory.
+  std::error_code ec;
+  const fs::path cwd = fs::current_path(ec);
+  e.socketAddress = "tachyon-agent.sock";
+  std::vector<fs::path> asked;
+  e.isWritableDir = [&](const fs::path& d) {
+    asked.push_back(d);
+    return true;
+  };
+  const DoctorCheck bare = find(runDoctorChecks(e), "socket_dir");
+  EXPECT_EQ(bare.status, DoctorStatus::Pass) << bare.detail;
+  ASSERT_EQ(asked.size(), 1u);
+  EXPECT_EQ(asked[0], cwd);
+  EXPECT_NE(bare.detail.find((cwd / "tachyon-agent.sock").string()), std::string::npos) << bare.detail;
+  asked.clear();
+  e.socketAddress = "sub/dir/tachyon-agent.sock";
+  EXPECT_EQ(statusOf(e, "socket_dir"), DoctorStatus::Pass);
+  ASSERT_EQ(asked.size(), 1u);
+  EXPECT_EQ(asked[0], cwd / "sub/dir");
+}
+
+TEST(Doctor, SocketDirectoryShouldBePrivateToTheUser) {
+  Machine m;
+  DoctorEnv e = m.env();
+  e.uid = 1000;
+  uint32_t mode = 0700, owner = 1000;
+  e.statDir = [&](const fs::path&, uint32_t& m_, uint32_t& o_) {
+    m_ = mode;
+    o_ = owner;
+    return true;
+  };
+  EXPECT_EQ(statusOf(e, "socket_dir"), DoctorStatus::Pass) << "0700 and ours";
+  mode = 0755;
+  DoctorCheck open = find(runDoctorChecks(e), "socket_dir");
+  EXPECT_EQ(open.status, DoctorStatus::Warn);
+  EXPECT_NE(open.detail.find("0755"), std::string::npos) << open.detail;
+  EXPECT_NE(open.hint.find("chmod 700"), std::string::npos) << open.hint;
+  mode = 01777;  // /tmp
+  owner = 0;
+  open = find(runDoctorChecks(e), "socket_dir");
+  EXPECT_EQ(open.status, DoctorStatus::Warn);
+  EXPECT_NE(open.detail.find("not by you"), std::string::npos) << open.detail;
+  mode = 0700;  // private but somebody else's
+  owner = 33;
+  EXPECT_EQ(statusOf(e, "socket_dir"), DoctorStatus::Warn);
+  owner = 1000;
+  mode = 0750;
+  EXPECT_EQ(statusOf(e, "socket_dir"), DoctorStatus::Warn) << "group access counts";
+  // A warning never makes doctor fail.
+  EXPECT_EQ(runDoctorChecks(e).exitCode(), 0);
+  // An unreadable directory does not hide the check's other results.
+  e.statDir = [](const fs::path&, uint32_t&, uint32_t&) { return false; };
+  EXPECT_EQ(statusOf(e, "socket_dir"), DoctorStatus::Pass);
+}
+
+TEST(Doctor, PtraceScopeOneWordingIsAccurate) {
+  Machine m;
+  m.sysctl("yama/ptrace_scope", "1");
+  m.status(kPerfmon);
+  DoctorEnv e = m.env();
+  e.agent.xattrBlob = capBlob(3, true, kPerfmon);  // no CAP_SYS_PTRACE
+  const DoctorCheck noCap = find(runDoctorChecks(e), "ptrace_scope");
+  EXPECT_EQ(noCap.status, DoctorStatus::Pass);
+  EXPECT_NE(noCap.detail.find("only for descendants"), std::string::npos) << noCap.detail;
+  EXPECT_NE(noCap.detail.find("CAP_SYS_PTRACE"), std::string::npos);
+  EXPECT_EQ(noCap.detail.find("other processes of the same user"), std::string::npos) << noCap.detail;
+  m.status(kPerfmon | kSysPtrace);
+  e.agent.xattrBlob = capBlob(3, true, kPerfmon | kSysPtrace);
+  const DoctorCheck withCap = find(runDoctorChecks(e), "ptrace_scope");
+  EXPECT_EQ(withCap.status, DoctorStatus::Pass);
+  EXPECT_NE(withCap.detail.find("CAP_SYS_PTRACE is present"), std::string::npos) << withCap.detail;
+  EXPECT_EQ(withCap.detail.find("only for descendants"), std::string::npos) << withCap.detail;
+}
+
 }  // namespace
 }  // namespace tachyon::cli

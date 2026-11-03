@@ -175,7 +175,9 @@ non-loopback binds. Without `--listen` there is no network listener.
   started with `--allow-remote-launch` (it lets anyone holding the token run programs as the agent's user).
   Attach and system captures are allowed. A remote client cannot choose where traces go: `out_path` is reduced to
   a file name inside `--remote-out-dir` (default: the agent's working directory), existing names get a `-N`
-  suffix. `inst_hello` is accepted from local clients only.
+  suffix. The agent refuses `--listen` when that directory is writable by group or others without the sticky
+  bit, or owned by another user (a local user could swap a trace for a symlink): use a directory you own.
+  `inst_hello` is accepted from local clients only.
 * **`fetch`.** `{"cmd":"fetch","path","offset","length"}` streams a trace in chunks of at most 512 KiB (base64 in
   the JSON line), with the SHA-256 of the whole file on the final chunk. Only files the agent produced in this
   process lifetime are served (capture outputs and flushes). The requested path is canonicalised (`..` and every

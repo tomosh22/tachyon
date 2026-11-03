@@ -24,8 +24,10 @@ constexpr size_t kMaxTokenChars = 512;
 //   InvalidArgument  the token is empty, has fewer than `minChars` characters, exceeds kMaxTokenChars or
 //                    contains control characters or blanks,
 //   NoPrivilege      (POSIX) the file is readable or writable by group or others (mode & 077), so the secret
-//                    is not secret. `chmod 600` fixes it. Windows has no mode bits: keep the file in a
-//                    profile directory.
+//                    is not secret (`chmod 600` fixes it), or it is owned by neither the effective user nor
+//                    root. The checks run on the open descriptor (one open, O_NOFOLLOW): a symbolic link is
+//                    refused (InvalidArgument) and nothing is decided by path before the open. Windows has no
+//                    mode bits: keep the file in a profile directory.
 // Error messages never contain the token.
 Result<std::string> loadTokenFile(const std::filesystem::path& path, size_t minChars);
 

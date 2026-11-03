@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -15,6 +16,11 @@
 #include <set>
 #include <system_error>
 #include <unordered_map>
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace tachyon::inst {
 
@@ -30,6 +36,25 @@ fs::path tempPathFor(const fs::path& out) {
   fs::path tmp = out;
   tmp += ".merge-" + std::to_string(static_cast<uint64_t>(ticks)) + "-" + std::to_string(counter++) + ".tmp";
   return tmp;
+}
+
+// The temporary file for `out`, created empty with O_EXCL|O_NOFOLLOW (POSIX) so that the merge never writes
+// through a link someone planted at its name in a shared directory (WP-66); a taken name is skipped.
+// Elsewhere (or when the file cannot be created here) the name alone is returned and the writer reports the
+// problem.
+fs::path reserveTempPath(const fs::path& out) {
+#if !defined(_WIN32)
+  for (int attempt = 0; attempt < 16; ++attempt) {
+    fs::path tmp = tempPathFor(out);
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+      ::close(fd);
+      return tmp;
+    }
+    if (errno != EEXIST) return tmp;
+  }
+#endif
+  return tempPathFor(out);
 }
 
 // Chunk types the merge re-appends untouched, in this order.
@@ -399,7 +424,7 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
         "partial flag");
 
   // ---- write the new file ----
-  const fs::path tmp = tempPathFor(outPath);
+  const fs::path tmp = reserveTempPath(outPath);
   struct TempGuard {
     fs::path path;
     bool armed = true;

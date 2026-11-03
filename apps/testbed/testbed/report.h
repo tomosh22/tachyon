@@ -67,7 +67,12 @@ nlohmann::json toJson(const RunReport& report);
 
 // Thread-safe: pure function. Checks `json` against the documented schema: required keys and types, at least
 // one scenario/thread, every share in [0,1], and expected and measured shares summing to 1 (within 1e-6) per
-// thread.
+// thread (a starved thread is only a warning, see below).
 Result<void> validateReportJson(const nlohmann::json& json);
+
+// Thread-safe: pure function. As above, but a thread that was starved (every measured share and tick count is
+// 0: it got no cpu while its scenario ran) is accepted, with one entry in `warnings` (may be null) naming the
+// scenario and the thread. Anything else that does not sum to 1 is still an error.
+Result<void> validateReportJson(const nlohmann::json& json, std::vector<std::string>* warnings);
 
 }  // namespace tachyon::testbed
