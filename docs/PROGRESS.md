@@ -36,7 +36,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | merged | wp/42b-timeline-symbols | 2026-10-25 |
 | WP-43 | Call graph panel | D | merged | wp/43-call-graph | 2026-10-25 |
 | WP-44 | Function list and butterfly | D | merged | wp/44-function-list | 2026-10-25 |
-| WP-45 | Source and disassembly panel | D | in progress | wp/45-source-panel | 2026-11-03 |
+| WP-45 | Source and disassembly panel | D | merged | wp/45-source-panel | 2026-11-03 |
 | WP-46 | Thread interaction | D | merged | wp/46-thread-interaction | 2026-10-25 |
 | WP-47 | Search and Function Statistics | D | merged | wp/47-function-stats | 2026-10-25 |
 | WP-48 | Status, warnings, symbol progress | D | merged | wp/48-status-warnings | 2026-11-02 |
@@ -205,6 +205,10 @@ Verifier PASS. The speedscope output validates against the official schema (vend
 ## WP-71 notes
 
 The verifier found a duplicate-ThreadRec defect (events after PERF_RECORD_EXIT re-created the thread). It was fixed and confirmed on CI: one ThreadRec per tid and no tid 4294967295. The fix also covers WP-70 captures. Real tracepoint numbers from CI's privileged step (lock scenario, 3 s): 5813 waits, 5813/5813 woken by the holder with unlock-path stacks in the testbed, every wait reason S (futex), 0 malformed records. Format-parser fuzzing (400k mutations, asan) was clean. Per-thread plans use the context_switch fallback (no wait reasons or wakers).
+
+## WP-45 notes
+
+Verifier fix round complete; CI green (Windows job re-run once for the known SdkOverheadPerf 10 ns flake, queued to WP-QA1). Search highlight is now linear: a 1 MB line scrolled far right draws in 0.02 ms (budget 2 ms). Locate-file rules are checked to resolve to the chosen file, falling back to an exact-path rule. In mixed mode, sampled post-call rows are listed under the call's line (`InstructionRow::groupLine`); a leaf sample on a post-call instruction is credited to its own line by `linesForFunction` but listed under the call's line here (documented). PathPicker takes a title and hint. 50k-line file: worker open about 10 ms, panel frame about 0.07 ms. DIA source test in tests/windows/viewer needs Windows verification.
 
 ## Queued follow-ups
 
