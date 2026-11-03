@@ -3,6 +3,8 @@
 #include "control/sha256.h"
 #include "core/log.h"
 
+#include <algorithm>
+
 namespace tachyon::control {
 
 Server::Server(std::unique_ptr<IListener> listener, IRequestHandler& handler) : m_handler(handler) {
@@ -226,8 +228,13 @@ bool Server::authenticate(ClientEntry& entry) {
     return false;
   };
 
-  if (m_limiter.blocked(host, policy.maxFailures, policy.failureWindowMs))
+  if (m_limiter.blocked(host, policy.maxFailures, policy.failureWindowMs)) {
+    // Take the client's auth line (it sends it at once) before answering: closing a socket that still holds
+    // unread data resets the connection on some systems (Windows), and the answer would be lost.
+    std::string ignored;
+    (void)conn.readLine(ignored, std::min(policy.handshakeTimeoutMs, 1000));
     return reject("too many failed attempts from this address; try again later", std::nullopt, false);
+  }
 
   std::string line;
   auto got = conn.readLine(line, policy.handshakeTimeoutMs);
