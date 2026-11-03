@@ -383,6 +383,14 @@ int main(int argc, char** argv) {
     cfg.remoteOutDir = opt.remoteOutDir.empty() ? std::filesystem::current_path(ec)
                                                 : std::filesystem::absolute(opt.remoteOutDir, ec);
   }
+  // A root agent writing remote traces into a directory other users can rename in could be made to write
+  // through a planted symlink (the trace writer opens its output by name): refuse to serve TCP from there.
+  if (tcpListener) {
+    if (const std::string unsafe = agent::remoteOutDirWarning(cfg.remoteOutDir); !unsafe.empty()) {
+      TACHYON_LOG_ERROR("agent: refusing --listen: remote output directory: {}", unsafe);
+      return kExitUsage;
+    }
+  }
   cfg.maxInstSpoolBytes = static_cast<uint64_t>(opt.instSpoolMb) << 20;
   cfg.instSpoolRoot = opt.instSpoolDir;
   cfg.keepInstSpool = opt.keepInstSpool;
@@ -406,9 +414,6 @@ int main(int argc, char** argv) {
         "tachyon-agent listening on TCP {} (unencrypted, token authentication; remote launch {}; remote "
         "traces go to {})",
         tcpAddress, opt.allowRemoteLaunch ? "ALLOWED" : "disabled", cfg.remoteOutDir.string());
-  if (!tcpAddress.empty())
-    if (const std::string warning = agent::remoteOutDirWarning(cfg.remoteOutDir); !warning.empty())
-      TACHYON_LOG_WARN("tachyon-agent: remote output directory: {}", warning);
 
   while (!g_stopRequested.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
