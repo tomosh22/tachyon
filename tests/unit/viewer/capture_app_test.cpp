@@ -542,6 +542,34 @@ TEST(CaptureApp, CaptureDoneWarningsAndEventsLostAreSurfaced) {
   EXPECT_TRUE(sawWarningLevel);
 }
 
+// WP-67: what only the agent knows (spool caps, refused connections, failed merges) is in the banner of the
+// opened trace too, not only in toasts, and a sentence the trace already says is not repeated.
+TEST(CaptureApp, CaptureDoneWarningsAlsoShowInTheBannerOfTheOpenedTrace) {
+  const std::string address = newAddress("scripted_banner");
+  const std::vector<std::string> warnings = {"instrumentation spool of pid 7 hit its size cap",
+                                             "refused a connection from pid 9",
+                                             "merge of pid 4 failed: clock mapper"};
+  ScriptedAgent agent(address, fixture("tiny.tachyon"), warnings, /*lost=*/0);
+  CaptureRig rig("app_warnings_banner", address);
+  rig.connectOnly();
+  rig.cap().openDialog(capture::CaptureMode::System);
+  ASSERT_TRUE(rig.cap().submitDialog());
+  ASSERT_TRUE(rig.h.until([&] { return rig.phaseIs(AgentPhase::Capturing); }));
+  rig.cap().stopCapture();
+  ASSERT_TRUE(rig.h.until([&] { return rig.documentOpen(); }));
+  rig.h.frames(3);
+  WarningsBanner& banner = rig.h.app.warningsBanner();
+  ASSERT_TRUE(banner.visible());
+  size_t fromAgent = 0;
+  for (const CaptureWarning& w : banner.warnings()) fromAgent += w.kind == CaptureWarningKind::AgentWarning;
+  EXPECT_EQ(fromAgent, 3u);
+  bool sawCap = false;
+  for (const CaptureWarning& w : banner.warnings())
+    sawCap |= w.text.find("hit its size cap") != std::string::npos;
+  EXPECT_TRUE(sawCap);
+  EXPECT_TRUE(toastContains(rig.h.app, "hit its size cap")) << "the toasts stay";
+}
+
 TEST(CaptureApp, DestroyingTheAppWithARequestInFlightIsClean) {
   const std::string address = newAddress("inflight");
   BlackholeServer hung(address);

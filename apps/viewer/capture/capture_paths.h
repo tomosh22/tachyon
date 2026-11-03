@@ -4,6 +4,7 @@
 #include "viewer/paths.h"
 #include "viewer/settings.h"
 
+#include <cstdint>
 #include <ctime>
 #include <filesystem>
 #include <string>
@@ -26,11 +27,25 @@ std::filesystem::path capturesDir(const CaptureSettings& settings);
 std::filesystem::path defaultCaptureFile(const std::filesystem::path& dir, std::string_view stem,
                                          std::time_t when);
 
-// Thread-safe: pure function. Splits `text` like a shell: whitespace separates, '...' is literal, "..."
-// allows a backslash before a quote or a backslash; outside quotes a backslash escapes only a space, a quote
-// or a backslash (so Windows paths such as C:\tools\x.exe survive). `error` is set (and the result empty) on
-// an unterminated quote.
-std::vector<std::string> splitArguments(std::string_view text, std::string& error);
+// How splitArguments reads its text.
+enum class ArgumentStyle : uint8_t {
+  Posix,    // like a shell (see below)
+  Windows,  // CommandLineToArgvW
+  Native    // Windows on Windows, Posix elsewhere
+};
+
+// Thread-safe: pure function. Splits the Run dialog's arguments line.
+//   Posix: whitespace separates, '...' is literal, "..." allows a backslash before a quote or a backslash;
+//     outside quotes a backslash escapes only a space, a quote or a backslash, so `\\x` is `\x` as in a
+//     shell and Windows paths such as C:\tools\x.exe survive.
+//   Windows (WP-67): the CommandLineToArgvW rules, which the launcher's quoting inverts. Space and tab
+//     separate; `"` toggles quoting (inside quotes `""` is a literal quote); single quotes are ordinary
+//     characters; backslashes are literal unless they precede a `"`: 2n backslashes and a quote give n
+//     backslashes and toggle quoting, 2n+1 give n backslashes and a literal quote. `\\server\share` keeps
+//     both leading backslashes.
+// `error` is set (and the result empty) on an unterminated quote.
+std::vector<std::string> splitArguments(std::string_view text, std::string& error,
+                                        ArgumentStyle style = ArgumentStyle::Native);
 
 // Thread-safe: reads the OS. Path of the running executable (empty if unknown).
 std::filesystem::path currentExecutablePath();

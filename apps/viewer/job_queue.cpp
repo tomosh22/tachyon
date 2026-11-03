@@ -38,6 +38,13 @@ void JobQueue::cancel(JobId id) {
   }
 }
 
+bool JobQueue::cancelRequested(JobId id) const {
+  for (const auto& job : m_jobs) {
+    if (job->id == id) return job->context.cancelled();
+  }
+  return false;
+}
+
 void JobQueue::cancelAll() {
   for (auto& job : m_jobs) job->context.m_cancel.store(true, std::memory_order_relaxed);
 }

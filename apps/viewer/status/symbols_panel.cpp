@@ -128,6 +128,11 @@ void SymbolsPanel::draw(const PanelContext& context, bool* open) {
   if (context.settings && !context.settings->symbolSearchPaths.empty()) {
     ImGui::SeparatorText("Symbol search paths");
     for (const std::string& p : context.settings->symbolSearchPaths) ImGui::BulletText("%s", p.c_str());
+    if (m_host.scanRunning && m_host.scanRunning()) ImGui::TextDisabled("Scanning the search paths...");
+    if (m_host.pathProblems) {
+      for (const std::string& p : m_host.pathProblems())
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "%s", p.c_str());
+    }
   }
   ImGui::End();
 }

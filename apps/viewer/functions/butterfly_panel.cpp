@@ -65,8 +65,7 @@ ButterflyPanel::QuerySpec ButterflyPanel::currentSpec(const PanelContext& contex
   QuerySpec spec;
   if (!context.selection) return spec;
   const SelectionState& state = context.selection->state();
-  spec.key = state.selectedFunction;
-  if (spec.key && *spec.key == analysis::kRootKey) spec.key.reset();
+  spec.key = state.selectedFunction;  // kRootKey ("<no stack>") is queried too: WP-33b gives it a self row
   spec.base.filter = fl::makeFilter(state.timeFilter, m_restrictSubtree);
   const common::EffectiveScopeOptions scope = common::effectiveScopeOptions(context);
   bool inlineFrames = m_inline, blend = scope.blendScopes, fiber = scope.groupByFiber;
@@ -261,6 +260,10 @@ void ButterflyPanel::draw(const PanelContext& context, bool* open) {
   if (!context.selection->state().selectedFunction) {
     ImGui::TextDisabled("Select a function (Function List, Call Graph) to see its callers and callees.");
   } else if (m_data) {
+    if (showsNoStackRow()) {
+      ImGui::TextDisabled("%s", kNoStackNote);
+      ImGui::Spacing();
+    }
     drawTable(context, std::max(ImGui::GetContentRegionAvail().y, ImGui::GetFontSize() * 4.0f));
   } else if (m_query.pending()) {
     drawSpinner(ImGui::GetFontSize() * 0.5f, ImGui::GetColorU32(ImGuiCol_PlotHistogram));

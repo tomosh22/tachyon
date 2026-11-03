@@ -176,6 +176,13 @@ class SelectionBus {
   // Main-thread only. Resets everything (e.g. a new document) and publishes SelectionField::All once. The
   // ViewOptions survive: they are preferences.
   void clear();
+  // Main-thread only (WP-67). Rewrites every ThreadIdx in the state through `map` (a document swap that
+  // renumbered the threads: the viewer maps by pid/tid). A thread that maps to an invalid ThreadIdx is
+  // dropped: it leaves the time filter's thread list (the list itself goes when no entry is left, so the
+  // filter does not silently select no thread), and clears selectedThread, the hover, the selected wait, the
+  // navigation request's row and the highlight instances on it. Publishes SelectionField::All once, and only
+  // if something changed.
+  void remapThreads(const std::function<ThreadIdx(ThreadIdx)>& map);
 
   // Main-thread only.
   const SelectionState& state() const { return m_state; }

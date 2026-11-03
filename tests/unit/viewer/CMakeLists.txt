@@ -17,6 +17,8 @@ tachyon_add_test(viewer_tests
           capture_model_test.cpp session_explorer_catalog_test.cpp session_explorer_panel_test.cpp
           capture_agent_session_test.cpp capture_app_test.cpp capture_flight_recorder_test.cpp
           capture_remote_test.cpp
+          polish_banner_test.cpp polish_symbols_test.cpp polish_run_test.cpp polish_stream_test.cpp
+          polish_functions_test.cpp
           ../agent/process_util.cpp
   DEPS tachyon::viewer_core tachyon::analysis tachyon::symbols tachyon::disasm tachyon::trace
        tachyon::agent_core tachyon::control tachyon::capture)

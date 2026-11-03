@@ -26,8 +26,18 @@ bool isJsonFile(const fs::path& p) {
 
 SymbolPathReport applySymbolSearchPaths(symbols::SymbolService& service,
                                         const std::vector<std::string>& paths,
-                                        const std::vector<std::string>& servers, const fs::path& cacheDir) {
+                                        const std::vector<std::string>& servers, const fs::path& cacheDir,
+                                        const SymbolPathOptions& options) {
   SymbolPathReport report;
+  size_t droppedProblems = 0;
+  auto problem = [&](std::string text) {
+    if (report.problems.size() < kMaxSymbolPathProblems) {
+      report.problems.push_back(std::move(text));
+    } else {
+      ++droppedProblems;
+    }
+  };
+  auto cancelled = [&] { return options.cancel && options.cancel->load(std::memory_order_relaxed); };
   symbols::SymbolLocatorConfig config;
   config.servers = servers;
   config.cacheDir = cacheDir;
@@ -36,23 +46,53 @@ SymbolPathReport applySymbolSearchPaths(symbols::SymbolService& service,
     if (r.ok()) {
       ++report.overrides;
     } else {
-      report.problems.push_back(pathToUtf8(file) + ": " + r.error().toString());
+      problem(pathToUtf8(file) + ": " + r.error().toString());
     }
   };
   for (const std::string& utf8 : paths) {
+    if (cancelled()) {
+      report.cancelled = true;
+      break;
+    }
     const fs::path path = pathFromUtf8(utf8);
     std::error_code ec;
     if (fs::is_directory(path, ec)) {
       config.searchPaths.push_back(path);
       std::vector<fs::path> sidecars;
-      for (fs::directory_iterator it(path, fs::directory_options::skip_permission_denied, ec), end;
-           !ec && it != end; it.increment(ec)) {
+      size_t entries = 0;
+      bool stopped = false;
+      std::error_code listEc;
+      fs::directory_iterator it(path, listEc), end;
+      if (listEc) {
+        problem(utf8 + ": cannot read the directory (" + listEc.message() + ")");
+        continue;
+      }
+      for (; it != end; it.increment(listEc)) {
+        if (listEc) break;
+        if (entries >= options.maxDirectoryEntries) {
+          stopped = true;
+          break;
+        }
+        ++entries;
+        if ((entries & 0xFF) == 0 && cancelled()) break;
         std::error_code fileEc;
         if (it->is_regular_file(fileEc) && endsWith(pathToUtf8(it->path().filename()), ".symbols.json"))
           sidecars.push_back(it->path());
       }
+      if (listEc)
+        problem(utf8 + ": listing stopped after " + std::to_string(entries) + " files (" + listEc.message() +
+                ")");
+      if (stopped) {
+        ++report.scanStops;
+        problem(utf8 + ": scan stopped at " + std::to_string(entries) + " files (" +
+                std::to_string(sidecars.size()) +
+                " *.symbols.json found; the rest of the directory was not scanned)");
+      }
       std::sort(sidecars.begin(), sidecars.end());  // directory order is unspecified; keep the result stable
-      for (const fs::path& s : sidecars) addOverride(s);
+      for (const fs::path& s : sidecars) {
+        if (cancelled()) break;
+        addOverride(s);
+      }
     } else if (fs::is_regular_file(path, ec)) {
       if (isJsonFile(path)) {
         addOverride(path);
@@ -60,9 +100,12 @@ SymbolPathReport applySymbolSearchPaths(symbols::SymbolService& service,
         config.searchPaths.push_back(path);
       }
     } else {
-      report.problems.push_back(utf8 + ": does not exist");
+      problem(utf8 + ": does not exist");
     }
   }
+  if (cancelled()) report.cancelled = true;
+  if (droppedProblems > 0)
+    report.problems.push_back("... and " + std::to_string(droppedProblems) + " more problems");
   report.searchPaths = config.searchPaths.size();
   if (!config.searchPaths.empty()) service.configureLocator(std::move(config));
   return report;
@@ -71,7 +114,14 @@ SymbolPathReport applySymbolSearchPaths(symbols::SymbolService& service,
 Result<void> validateSymbolPath(const fs::path& path) {
   std::error_code ec;
   if (!fs::exists(path, ec)) return makeError(ErrorCode::NotFound, pathToUtf8(path) + " does not exist");
-  if (fs::is_directory(path, ec)) return ok();
+  if (fs::is_directory(path, ec)) {
+    std::error_code listEc;
+    fs::directory_iterator it(path, listEc);
+    if (listEc)
+      return makeError(ErrorCode::IoError,
+                       pathToUtf8(path) + ": cannot read the directory (" + listEc.message() + ")");
+    return ok();
+  }
   if (!fs::is_regular_file(path, ec))
     return makeError(ErrorCode::InvalidArgument, pathToUtf8(path) + " is not a file or directory");
   if (isJsonFile(path)) {

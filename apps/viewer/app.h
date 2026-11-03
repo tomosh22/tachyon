@@ -38,6 +38,7 @@ class QueryExecutor;
 namespace tachyon::viewer {
 
 struct StreamMailbox;     // app.cpp (WP-64)
+struct SymbolSetupRun;    // app.cpp (WP-67)
 class CaptureController;  // capture/capture_controller.h (WP-41)
 class IProcessLauncher;   // capture/process_launcher.h (WP-41)
 
@@ -84,6 +85,24 @@ struct AppOptions {
   // How often the ceiling is checked (the first check of a document is immediate); 0 = every frame.
   int memoryCheckMs = 1000;
 };
+
+// Thread-safe: pure function. WP-67: the options of the headless entry points (--selftest and --bench): no
+// persistence, no pacing, and no connection attempt to a capture agent (there is none to talk to, and a
+// failing attempt would only cost time and log noise).
+inline AppOptions makeHeadlessOptions(AppOptions options) {
+  options.persist = false;
+  options.pacing = false;
+  options.autoConnectAgent = false;
+  return options;
+}
+
+// Thread-safe: pure function. WP-67: the old model's ThreadIdx -> the new model's, by (pid, tid) (the first
+// thread of a pair wins, like TraceModel::tidToThread). A thread the new model lacks maps to an invalid
+// index. Returns null when every old index maps to itself (nothing to remap). Used when the complete model of
+// a streaming load replaces its preview: threads synthesised from samples (no ThreadRec) are numbered in
+// ascending tid order of what each model saw, so the same thread can move.
+std::function<ThreadIdx(ThreadIdx)> threadMapBetween(const model::TraceModel& from,
+                                                     const model::TraceModel& to);
 
 class App {
  public:
@@ -171,6 +190,13 @@ class App {
   // Main-thread only. Starts the symbol resolution of the open document again with a fresh SymbolService
   // (current settings and search paths); no-op without a document. Same cost note as addSymbolPath().
   void rerunSymbolResolution();
+  // Main-thread only (WP-67). What the symbol search paths of the current run reported once their worker
+  // finished (directory scans stopped at the entry cap, unreadable directories, rejected files); empty
+  // until then and for a run without search paths.
+  const std::vector<std::string>& symbolPathProblems() const { return m_symbolPathProblems; }
+  // Main-thread only (WP-67). True while the worker that scans the search paths is still running (the
+  // resolution of the modules starts when it is done).
+  bool symbolPathScanRunning() const { return m_symbolSetup != nullptr; }
 
  private:
   PanelContext panelContext() const;
@@ -181,6 +207,8 @@ class App {
   // Main-thread only. Installs a SymbolService on `document` and starts resolving; the workers report through
   // m_symbolMailbox (thread-safe), which wakes the event loop.
   void startSymbolResolution(Document& document);
+  void beginSymbolResolve(Document& document);  // resolveAllAsync of the document's service
+  void finishSymbolSetup();                     // the search-path worker is done
   void notifyDocumentChanged();
   void applyPendingStyle();
   void drawUi();
@@ -210,6 +238,8 @@ class App {
   uint64_t m_documentGeneration = 0;
   uint64_t m_symbolGeneration = 0;
   std::shared_ptr<SymbolMailbox> m_symbolMailbox;
+  std::unique_ptr<SymbolSetupRun> m_symbolSetup;  // WP-67: after m_document, m_symbolMailbox; destroyed first
+  std::vector<std::string> m_symbolPathProblems;
 
   MemoryGovernor m_memory;
   uint64_t m_memoryModelBytes = 0;  // TraceModel::residentBytes() of the document of m_memoryGeneration

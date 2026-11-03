@@ -30,8 +30,7 @@ int main(int argc, char** argv) {
 
   if (cli.selftestPath) {
     // Headless: no SDL video, no GL; layout and settings are neither read for writing nor persisted.
-    options.persist = false;
-    options.pacing = false;
+    options = makeHeadlessOptions(options);
     App app(makeNullRenderer(), options);
     std::string error;
     if (!app.init(error)) {
@@ -45,10 +44,8 @@ int main(int argc, char** argv) {
 
   if (cli.benchPath) {
     // Headless frame-time benchmark (WP-64): a tall display so that all rows of a big trace are on screen.
-    options.persist = false;
-    options.pacing = false;
+    options = makeHeadlessOptions(options);
     options.streamingLoad = false;
-    options.autoConnectAgent = false;
     App app(makeNullRenderer(1920.0f, 6000.0f), options);
     std::string error;
     if (!app.init(error)) {

@@ -55,6 +55,9 @@ class JobQueue {
   JobId submit(std::string label, Work work, Done done = {});
   // Main-thread only. Requests cancellation; the job body must poll JobContext::cancelled().
   void cancel(JobId id);
+  // Main-thread only. True if cancel() / cancelAll() was requested for the active job `id` (false for an
+  // unknown or completed job).
+  bool cancelRequested(JobId id) const;
   // Main-thread only.
   void cancelAll();
   // Main-thread only. Joins finished jobs and invokes their completions in submission order. Completions may

@@ -24,6 +24,9 @@ struct SymbolsPanelHost {
   std::function<void()> addSymbolPath;  // open the picker
   std::function<void()> retry;          // re-run the symbol resolution of the document
   std::function<void(ToastLevel, std::string)> toast;
+  // WP-67: what the last scan of the search paths found wrong (stopped scans, unreadable directories).
+  std::function<const std::vector<std::string>&()> pathProblems;
+  std::function<bool()> scanRunning;  // the search paths are still being scanned
 };
 
 class SymbolsPanel final : public IPanel {

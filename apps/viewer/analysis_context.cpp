@@ -7,28 +7,6 @@
 
 namespace tachyon::viewer {
 
-NodeChildIndex::NodeChildIndex(const model::TraceModel& model) {
-  const size_t n = model.nodes.size();
-  m_offsets.assign(n + 1, 0);
-  for (size_t i = 1; i < n; ++i) {
-    const uint32_t p = model.nodes[i].parent.get();
-    if (p < n) ++m_offsets[p + 1];
-  }
-  for (size_t i = 0; i < n; ++i) m_offsets[i + 1] += m_offsets[i];
-  m_children.resize(m_offsets[n]);
-  std::vector<uint32_t> fill(m_offsets.begin(), m_offsets.begin() + static_cast<std::ptrdiff_t>(n));
-  for (size_t i = 1; i < n; ++i) {
-    const uint32_t p = model.nodes[i].parent.get();
-    if (p < n) m_children[fill[p]++] = static_cast<uint32_t>(i);
-  }
-}
-
-std::span<const uint32_t> NodeChildIndex::children(uint32_t node) const {
-  if (node >= nodeCount()) return {};
-  return std::span<const uint32_t>(m_children)
-      .subspan(m_offsets[node], m_offsets[node + 1] - m_offsets[node]);
-}
-
 AnalysisSnapshot::AnalysisSnapshot(std::shared_ptr<const model::TraceModel> model,
                                    std::shared_ptr<symbols::SymbolService> symbols,
                                    analysis::AggregationOptions options, uint64_t symbolGeneration,
@@ -86,12 +64,6 @@ void AnalysisContext::setCacheBudget(size_t bytes) const {
   const std::lock_guard<std::mutex> lock(m_mutex);
   m_cacheBudget = bytes;
   for (const auto& s : m_snapshots) s->context().cache().setBudget(bytes);
-}
-
-std::shared_ptr<const NodeChildIndex> AnalysisContext::childIndex() const {
-  const std::lock_guard<std::mutex> lock(m_mutex);
-  if (!m_childIndex) m_childIndex = std::make_shared<const NodeChildIndex>(m_owner.model());
-  return m_childIndex;
 }
 
 size_t AnalysisContext::snapshotCount() const {

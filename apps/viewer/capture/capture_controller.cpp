@@ -271,7 +271,8 @@ void CaptureController::testRemote() {
       });
 }
 
-void CaptureController::fetchRemote(const std::string& remotePath, bool openWhenDone, bool isCapture) {
+void CaptureController::fetchRemote(const std::string& remotePath, bool openWhenDone, bool isCapture,
+                                    std::vector<std::string> warnings) {
   if (remotePath.empty()) return;
   for (const RemoteTransfer& t : m_transfers)
     if (t.remotePath == remotePath && t.state == RemoteTransfer::State::Running) return;
@@ -295,6 +296,7 @@ void CaptureController::fetchRemote(const std::string& remotePath, bool openWhen
   t.localPath = local;
   t.openWhenDone = openWhenDone;
   t.isCapture = isCapture;
+  t.warnings = std::move(warnings);
   m_transfers.push_back(std::move(t));
   constexpr size_t kMaxTransfers = 100;
   if (m_transfers.size() > kMaxTransfers)
@@ -393,7 +395,7 @@ void CaptureController::onTransferDone(size_t index, bool ok, const std::string&
       f.fetched = true;
     }
   }
-  finishLocalCapture(t.localPath, t.openWhenDone);
+  finishLocalCapture(t.localPath, t.openWhenDone, std::move(t.warnings));
 }
 
 void CaptureController::cancelTransfer(size_t index) {
@@ -532,7 +534,8 @@ void CaptureController::onCaptureDone(const AgentEvent& e) {
   toast(s.events_lost > 0 ? ToastLevel::Warning : ToastLevel::Info, message);
   // Problems that did not fail the capture. The trace's own warnings (the CaptureInfo the converters write)
   // are shown by the warnings banner once the trace is open (WP-48); what only the agent knows (spool caps
-  // hit, refused connections, merge failures) has no place in the trace, so it is toasted here.
+  // hit, refused connections, merge failures) has no place in the trace, so it is toasted here and (WP-67)
+  // handed to the banner for the trace, which shows it when the trace is open.
   constexpr size_t kMaxToasted = 3;
   for (size_t i = 0; i < s.warnings.size() && i < kMaxToasted; ++i) toast(ToastLevel::Warning, s.warnings[i]);
   if (s.warnings.size() > kMaxToasted)
@@ -544,18 +547,20 @@ void CaptureController::onCaptureDone(const AgentEvent& e) {
     // The trace is on the agent's machine: bring it here first (in the background); it is listed and opened
     // when it has arrived.
     const bool open = m_host.settings && m_host.settings->capture.autoOpen;
-    fetchRemote(s.path, open, /*isCapture=*/true);
+    fetchRemote(s.path, open, /*isCapture=*/true, s.warnings);
     return;
   }
   const bool open = m_host.settings && m_host.settings->capture.autoOpen && !s.path.empty();
   if (!s.path.empty())
-    finishLocalCapture(path, open);
+    finishLocalCapture(path, open, s.warnings);
   else if (m_host.capturesChanged)
     m_host.capturesChanged();
 }
 
 // A finished capture that is a file on this machine: remember it, refresh the Session Explorer and open it.
-void CaptureController::finishLocalCapture(const std::filesystem::path& path, bool open) {
+void CaptureController::finishLocalCapture(const std::filesystem::path& path, bool open,
+                                           std::vector<std::string> warnings) {
+  if (!warnings.empty() && m_host.captureWarnings) m_host.captureWarnings(path, std::move(warnings));
   if (m_host.settings) {
     std::error_code ec;
     const std::filesystem::path absolute = std::filesystem::absolute(path, ec);

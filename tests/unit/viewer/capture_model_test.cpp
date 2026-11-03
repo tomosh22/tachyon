@@ -18,7 +18,8 @@ using namespace tachyon::viewer::capture_test;
 
 TEST(CaptureArgs, SplitsLikeAShell) {
   std::string error;
-  auto a = splitArguments("  --scene  \"My Level\" 'single quoted' plain\\ space \"a\\\"b\" ", error);
+  auto a = splitArguments("  --scene  \"My Level\" 'single quoted' plain\\ space \"a\\\"b\" ", error,
+                          ArgumentStyle::Posix);
   EXPECT_TRUE(error.empty());
   ASSERT_EQ(a.size(), 5u);
   EXPECT_EQ(a[0], "--scene");
@@ -28,21 +29,21 @@ TEST(CaptureArgs, SplitsLikeAShell) {
   EXPECT_EQ(a[4], "a\"b");
   EXPECT_TRUE(splitArguments("", error).empty());
   EXPECT_TRUE(splitArguments("   ", error).empty());
-  a = splitArguments("\"\" x", error);  // an empty quoted argument is an argument
+  a = splitArguments("\"\" x", error, ArgumentStyle::Posix);  // an empty quoted argument is an argument
   ASSERT_EQ(a.size(), 2u);
   EXPECT_EQ(a[0], "");
 }
 
 TEST(CaptureArgs, KeepsWindowsPathsAndReportsUnterminatedQuotes) {
   std::string error;
-  auto a = splitArguments(R"(C:\tools\x.exe --cfg "D:\my dir\a.ini")", error);
+  auto a = splitArguments(R"(C:\tools\x.exe --cfg "D:\my dir\a.ini")", error, ArgumentStyle::Posix);
   EXPECT_TRUE(error.empty());
   ASSERT_EQ(a.size(), 3u);
   EXPECT_EQ(a[0], R"(C:\tools\x.exe)");
   EXPECT_EQ(a[2], R"(D:\my dir\a.ini)");
-  EXPECT_TRUE(splitArguments("a \"b c", error).empty());
+  EXPECT_TRUE(splitArguments("a \"b c", error, ArgumentStyle::Posix).empty());
   EXPECT_NE(error.find("unterminated"), std::string::npos);
-  EXPECT_TRUE(splitArguments("a 'b c", error).empty());
+  EXPECT_TRUE(splitArguments("a 'b c", error, ArgumentStyle::Posix).empty());
   EXPECT_FALSE(error.empty());
 }
 
