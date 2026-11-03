@@ -20,7 +20,11 @@
 #include <vector>
 
 #if !TACHYON_PLATFORM_WINDOWS
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace tachyon::control {
@@ -315,6 +319,36 @@ TEST(TcpAuth, NoAuthLineWithinTheTimeoutDropsTheClient) {
   ASSERT_TRUE(eof.ok());
   EXPECT_FALSE(*eof);
 }
+
+#if !TACHYON_PLATFORM_WINDOWS
+// The handshake timeout bounds the whole auth line: a peer dribbling bytes without a newline is still
+// dropped.
+TEST(TcpAuth, DribblingBytesDoesNotExtendTheHandshake) {
+  AuthPolicy policy;
+  policy.handshakeTimeoutMs = 300;
+  TcpFixture f(policy);
+  const std::string hostPort = f.tcpAddress.substr(f.tcpAddress.find("//") + 2);
+  const int port = std::stoi(hostPort.substr(hostPort.rfind(':') + 1));
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(fd, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(static_cast<uint16_t>(port));
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ASSERT_EQ(::connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)), 0);
+  const auto start = std::chrono::steady_clock::now();
+  bool closed = false;
+  while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+    if (::send(fd, " ", 1, MSG_NOSIGNAL) != 1) {
+      closed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  ::close(fd);
+  EXPECT_TRUE(closed) << "a dribbling client kept the handshake open for 5 s";
+}
+#endif
 
 TEST(TcpAuth, UnauthenticatedClientsReceiveNoEvents) {
   TcpFixture f;

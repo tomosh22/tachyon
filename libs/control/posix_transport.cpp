@@ -156,7 +156,14 @@ Result<void> applySocketOwner(const std::string& path, const SocketOwner& owner)
   if (!owner.set()) return ok();
   const uid_t uid = static_cast<uid_t>(owner.uid);
   const gid_t gid = owner.gid >= 0 ? static_cast<gid_t>(owner.gid) : static_cast<gid_t>(-1);
-  if (::chown(path.c_str(), uid, gid) < 0)
+  // The socket's directory may belong to the target user, who could swap the socket for a symlink: never
+  // follow it (lchown), and only touch a socket this process owns.
+  struct stat st {};
+  if (::lstat(path.c_str(), &st) < 0) return sysError(ErrorCode::IoError, "lstat " + path);
+  if (!S_ISSOCK(st.st_mode) || st.st_uid != ::geteuid())
+    return makeError(ErrorCode::IoError,
+                     path + " is not a socket owned by the agent; not changing its owner");
+  if (::lchown(path.c_str(), uid, gid) < 0)
     return sysError(errno == EPERM ? ErrorCode::NoPrivilege : ErrorCode::IoError,
                     "chown " + path + " to uid " + std::to_string(owner.uid));
   return ok();
