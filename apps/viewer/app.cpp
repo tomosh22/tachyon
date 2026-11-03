@@ -7,6 +7,8 @@
 #include "symbols/dia/dia_provider.h"
 #include "symbols/dwarf/dwarf_provider.h"
 #include "viewer/builtin_panels.h"
+#include "viewer/capture/capture_controller.h"
+#include "viewer/capture/session_explorer_panel.h"
 #include "viewer/paths.h"
 #include "viewer/source/source_panel.h"
 #include "viewer/status/symbol_paths.h"
@@ -54,6 +56,7 @@ App::App(std::unique_ptr<IRenderer> renderer, AppOptions options)
 
 App::~App() {
   m_jobs.cancelAll();
+  m_capture.reset();   // joins the agent worker (it wakes the renderer) before the renderer is shut down
   m_document.reset();  // joins the symbol workers (they wake the renderer) before the renderer is shut down
   if (m_selectionSub != SelectionBus::kNoSubscription) m_selection.unsubscribe(m_selectionSub);
   if (m_imgui) {
@@ -121,6 +124,41 @@ bool App::init(std::string& error) {
     host.toast = [this](ToastLevel level, std::string text) { toast(level, std::move(text)); };
     m_panels.add(makeSourcePanel(std::move(host)), false);  // opened by "Show source" requests
   }
+  {
+    // WP-41: the agent connection / capture dialogs, the Capture panel and the Session Explorer.
+    IRenderer* renderer = m_renderer.get();
+    CaptureHost host;
+    host.settings = &m_settings;
+    host.jobs = &m_jobs;
+    host.toast = [this](ToastLevel level, std::string text) { toast(level, std::move(text)); };
+    host.openFile = [this](const std::filesystem::path& path) { openFile(path); };
+    host.wake = [renderer] { renderer->wake(); };
+    host.requestRedraw = [this] { requestRedraw(); };
+    host.saveSettings = [this] {
+      if (m_options.persist) saveSettings();
+    };
+    host.showPanel = [this](const char* name) {
+      if (PanelEntry* p = m_panels.find(name)) p->open = true;
+      requestRedraw();
+    };
+    host.capturesChanged = [this] {
+      if (PanelEntry* p = m_panels.find(kSessionExplorerPanelName)) {
+        if (auto* explorer = dynamic_cast<SessionExplorerPanel*>(p->panel.get())) explorer->refresh();
+      }
+    };
+    m_capture = std::make_unique<CaptureController>(std::move(host), m_options.processLauncher);
+    m_panels.add(makeCapturePanel(*m_capture), false);  // opened when a capture starts or from the menu
+    SessionExplorerHost explorer;
+    explorer.settings = &m_settings;
+    explorer.saveSettings = [this] {
+      if (m_options.persist) saveSettings();
+    };
+    explorer.openFile = [this](const std::filesystem::path& path) { openFile(path); };
+    explorer.toast = [this](ToastLevel level, std::string text) { toast(level, std::move(text)); };
+    explorer.wake = [renderer] { renderer->wake(); };
+    explorer.launcher = m_capture->sharedLauncher();
+    m_panels.add(makeSessionExplorerPanel(std::move(explorer)), false);  // opened from the View menu
+  }
   registerBuiltinPanelShortcuts(m_shortcuts);
   m_shortcuts.add("Source", "Ctrl+F", "Search in the file (Source panel focused)");
   m_shortcuts.add("Source", "Enter / Shift+Enter, F3 / Shift+F3", "Next / previous match");
@@ -143,6 +181,7 @@ bool App::init(std::string& error) {
   });
   registerCommands();
   applyPendingStyle();
+  if (m_options.autoConnectAgent) m_capture->connectAtStartup();
   return true;
 }
 
@@ -184,6 +223,26 @@ void App::registerCommands() {
                   [this] { m_selection.requestPanel(kFunctionStatsPanelName); }});
   m_commands.add({"help.palette", "Help: Command Palette", "Ctrl+P", [this] { m_paletteRequested = true; }});
   m_commands.add({"help.shortcuts", "Help: Keyboard Shortcuts", "?", [this] { m_shortcutSheet.open(); }});
+  m_commands.add({"capture.run", "Capture: Run Application...", "",
+                  [this] { m_capture->openDialog(capture::CaptureMode::Launch); }});
+  m_commands.add({"capture.attach", "Capture: Attach to Process...", "",
+                  [this] { m_capture->openDialog(capture::CaptureMode::Attach); }});
+  m_commands.add({"capture.system", "Capture: System Capture...", "",
+                  [this] { m_capture->openDialog(capture::CaptureMode::System); }});
+  m_commands.add({"capture.stop", "Capture: Stop", "", [this] { m_capture->stopCapture(); }});
+  m_commands.add({"capture.cancel", "Capture: Cancel", "", [this] { m_capture->cancelCapture(); }});
+  m_commands.add(
+      {"capture.resume", "Capture: Resume Parked Launch", "", [this] { m_capture->resumeCapture(); }});
+  m_commands.add({"capture.agent.start", "Capture: Start Agent", "",
+                  [this] { m_capture->startAgent(m_capture->agentNeedsElevation()); }});
+  m_commands.add(
+      {"capture.agent.reconnect", "Capture: Reconnect to Agent", "", [this] { m_capture->reconnect(); }});
+  m_commands.add({"capture.window", "Capture: Show Capture Window", "", [this] {
+                    if (PanelEntry* p = m_panels.find(kCapturePanelName)) p->open = true;
+                  }});
+  m_commands.add({"capture.explorer", "Capture: Show Session Explorer", "", [this] {
+                    if (PanelEntry* p = m_panels.find(kSessionExplorerPanelName)) p->open = true;
+                  }});
   m_commands.add({"symbols.addPath", "Symbols: Add Symbol Path...", "", [this] {
                     std::filesystem::path start;
                     if (!m_settings.symbolSearchPaths.empty())
@@ -373,6 +432,7 @@ bool App::frame(int waitMs) {
   for (const std::string& dropped : events.droppedFiles) openFile(pathFromUtf8(dropped));
   m_jobs.pump();
   pumpSymbolEvents();
+  m_capture->pump();
 
   applyPendingStyle();
   m_renderer->beginFrame();
@@ -392,14 +452,16 @@ int App::run() {
   const auto framePeriod = std::chrono::microseconds(1000000 / std::max(1, m_options.targetFps));
   while (!m_quit) {
     const auto start = Clock::now();
-    const bool busy = m_jobs.activeCount() > 0 || m_redrawFrames > 0;
+    const bool busy = m_jobs.activeCount() > 0 || m_redrawFrames > 0 || m_capture->hasPending();
     if (busy || !m_options.pacing) {
       frame(0);
     } else {
       // Idle: block on events instead of rendering continuously.
       const PlatformEvents events = m_renderer->pollEvents(m_options.idleTimeoutMs);
       if (events.quit) m_quit = true;
-      if (pumpSymbolEvents()) frame(0);
+      // The agent's events wake the loop; a running capture redraws its timer every idle timeout.
+      const bool captureWork = m_capture->hasPending() || m_capture->active();
+      if (pumpSymbolEvents() || captureWork) frame(0);
       if (events.hadInput || !events.droppedFiles.empty()) {
         m_redrawFrames = 3;
         for (const std::string& dropped : events.droppedFiles) openFile(pathFromUtf8(dropped));
@@ -468,6 +530,7 @@ void App::drawUi() {
     }
   }
 
+  m_capture->draw();
   if (auto chosen = m_fileBrowser.draw()) openFile(*chosen);
   if (auto chosen = m_pathPicker.draw()) {
     std::string error;
@@ -495,6 +558,7 @@ void App::drawMenuBar() {
     if (ImGui::MenuItem("Quit", "Ctrl+Q")) requestQuit();
     ImGui::EndMenu();
   }
+  m_capture->drawMenu();
   if (ImGui::BeginMenu("View")) {
     for (PanelEntry& e : m_panels.entries()) ImGui::MenuItem(e.panel->name(), nullptr, &e.open);
     ImGui::Separator();
@@ -542,6 +606,7 @@ void App::drawStatusBar() {
       m_statusBar.update(m_document.get(), m_documentGeneration);
       m_statusBar.draw(m_document.get(), m_selection.state(), m_lastError);
       if (m_statusBar.symbolsClicked()) m_selection.requestPanel(SymbolsPanel::kName);
+      m_capture->drawStatusSegment();
       const std::vector<JobQueue::Info> jobs = m_jobs.active();
       if (!jobs.empty()) {
         const JobQueue::Info& job = jobs.front();

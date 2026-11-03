@@ -3,6 +3,7 @@
 
 #include "core/result.h"
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -14,6 +15,35 @@ enum class ThemeKind : uint8_t { Dark, Light };
 struct SourcePathMapping {
   std::string from, to;
   bool operator==(const SourcePathMapping&) const = default;
+};
+
+// WP-41: agent connection, capture dialogs and the Session Explorer. Strings are UTF-8.
+struct CaptureSettings {
+  // Where the Session Explorer scans and new captures go; empty = <user data dir>/captures.
+  std::string capturesDir;
+  // Agent address (socket path / pipe name); empty = control::defaultAgentAddress().
+  std::string agentAddress;
+  // Agent executable; empty = tachyon-agent next to the viewer binary.
+  std::string agentExe;
+  // Backend of an agent started by the viewer: "mock", "perf" or "etw"; empty = etw on Windows, perf on
+  // Linux.
+  std::string agentBackend;
+  // Extra arguments for an agent started by the viewer (e.g. --mock-fixture FILE).
+  std::vector<std::string> agentArgs;
+  bool autoConnect = true;  // try to reach a running agent at startup
+  bool autoOpen = true;     // open the trace when a capture finishes
+  // Last used values of the Run / Attach dialogs.
+  std::string exe, args, cwd;
+  std::vector<std::string> env;  // "KEY=VALUE"
+  bool startImmediately = true;
+  uint32_t samplingHz = 8000;
+  uint32_t circularMb = 0;
+  bool followChildren = false;
+  std::string childFilter;
+  bool kernelStacks = true;
+
+  // Thread-safe: pure function on the value.
+  bool operator==(const CaptureSettings&) const = default;
 };
 
 struct Settings {
@@ -40,6 +70,8 @@ struct Settings {
   // widget).
   bool blendScopes = true;
   double frameBudgetMs = 16.67;
+  // WP-41
+  CaptureSettings capture;
 
   // Thread-safe: pure function on the value.
   bool operator==(const Settings&) const = default;

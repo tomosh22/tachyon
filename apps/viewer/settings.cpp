@@ -34,6 +34,84 @@ std::vector<std::string> readStringArray(const json& j, const char* key, std::ve
   return out;
 }
 
+void readString(const json& j, const char* key, std::string& out) {
+  const auto it = j.find(key);
+  if (it == j.end()) return;
+  if (it->is_string()) {
+    out = it->get<std::string>();
+  } else {
+    TACHYON_LOG_WARN("settings: 'capture.{}' is not a string, using default", key);
+  }
+}
+
+void readBool(const json& j, const char* key, bool& out) {
+  const auto it = j.find(key);
+  if (it == j.end()) return;
+  if (it->is_boolean()) {
+    out = it->get<bool>();
+  } else {
+    TACHYON_LOG_WARN("settings: 'capture.{}' is not a boolean, using default", key);
+  }
+}
+
+void readUint(const json& j, const char* key, uint32_t& out, uint32_t maxValue) {
+  const auto it = j.find(key);
+  if (it == j.end()) return;
+  if (it->is_number() && std::isfinite(it->get<double>()) && it->get<double>() >= 0.0) {
+    out = static_cast<uint32_t>(std::min(it->get<double>(), static_cast<double>(maxValue)));
+  } else {
+    TACHYON_LOG_WARN("settings: 'capture.{}' is not a non-negative number, using default", key);
+  }
+}
+
+CaptureSettings readCaptureSettings(const json& j) {
+  CaptureSettings c;
+  if (!j.is_object()) {
+    TACHYON_LOG_WARN("settings: 'capture' is not an object, using defaults");
+    return c;
+  }
+  readString(j, "capturesDir", c.capturesDir);
+  readString(j, "agentAddress", c.agentAddress);
+  readString(j, "agentExe", c.agentExe);
+  readString(j, "agentBackend", c.agentBackend);
+  c.agentArgs = readStringArray(j, "agentArgs", c.agentArgs);
+  readBool(j, "autoConnect", c.autoConnect);
+  readBool(j, "autoOpen", c.autoOpen);
+  readString(j, "exe", c.exe);
+  readString(j, "args", c.args);
+  readString(j, "cwd", c.cwd);
+  c.env = readStringArray(j, "env", c.env);
+  readBool(j, "startImmediately", c.startImmediately);
+  readUint(j, "samplingHz", c.samplingHz, 1'000'000);
+  readUint(j, "circularMb", c.circularMb, 1'000'000);
+  readBool(j, "followChildren", c.followChildren);
+  readString(j, "childFilter", c.childFilter);
+  readBool(j, "kernelStacks", c.kernelStacks);
+  return c;
+}
+
+json captureSettingsToJson(const CaptureSettings& c) {
+  json j;
+  j["capturesDir"] = c.capturesDir;
+  j["agentAddress"] = c.agentAddress;
+  j["agentExe"] = c.agentExe;
+  j["agentBackend"] = c.agentBackend;
+  j["agentArgs"] = c.agentArgs;
+  j["autoConnect"] = c.autoConnect;
+  j["autoOpen"] = c.autoOpen;
+  j["exe"] = c.exe;
+  j["args"] = c.args;
+  j["cwd"] = c.cwd;
+  j["env"] = c.env;
+  j["startImmediately"] = c.startImmediately;
+  j["samplingHz"] = c.samplingHz;
+  j["circularMb"] = c.circularMb;
+  j["followChildren"] = c.followChildren;
+  j["childFilter"] = c.childFilter;
+  j["kernelStacks"] = c.kernelStacks;
+  return j;
+}
+
 }  // namespace
 
 Settings Settings::load(const std::filesystem::path& path) {
@@ -98,6 +176,7 @@ Settings Settings::load(const std::filesystem::path& path) {
       TACHYON_LOG_WARN("settings: 'frameBudgetMs' is not a positive number, using default");
     }
   }
+  if (const auto it = j.find("capture"); it != j.end()) s.capture = readCaptureSettings(*it);
   if (const auto it = j.find("sourcePathMappings"); it != j.end()) {
     if (it->is_array()) {
       s.sourcePathMappings.clear();
@@ -130,6 +209,7 @@ Result<void> Settings::save(const std::filesystem::path& path) const {
   j["recentFiles"] = recentFiles;
   j["blendScopes"] = blendScopes;
   j["frameBudgetMs"] = frameBudgetMs;
+  j["capture"] = captureSettingsToJson(capture);
 
   std::error_code ec;
   if (path.has_parent_path()) {
