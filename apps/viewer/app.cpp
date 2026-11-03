@@ -299,6 +299,7 @@ void App::notifyDocumentChanged() {
 // WP-67: scans the symbol search paths (directory listings and `*.symbols.json` reads) off the UI thread.
 struct SymbolSetupRun {
   std::shared_ptr<symbols::SymbolService> service;
+  const Document* document = nullptr;  // the run is joined before its document is closed or replaced
   std::atomic<bool> cancel{false};
   std::atomic<bool> ready{false};
   SymbolPathReport report;  // written by the thread before `ready`
@@ -322,8 +323,12 @@ void App::finishSymbolSetup() {
   if (m_symbolPathProblems.size() > kMaxToasted)
     toast(ToastLevel::Warning, "... and " + std::to_string(m_symbolPathProblems.size() - kMaxToasted) +
                                    " more symbol path problems (see the Symbols panel)");
-  if (!run->report.cancelled && m_document && m_document->symbols() == run->service)
+  // The service reaches the document (and so analysis snapshots on other threads) only now, right before
+  // resolveAllAsync: its setup phase must not overlap the const lookups of running queries.
+  if (!run->report.cancelled && m_document && m_document.get() == run->document) {
+    m_document->setSymbols(run->service);
     beginSymbolResolve(*m_document);
+  }
 }
 
 bool App::pumpSymbolEvents() {
@@ -373,19 +378,22 @@ void App::startSymbolResolution(Document& document) {
   m_symbolMailbox = std::make_shared<SymbolMailbox>();
   IRenderer* renderer = m_renderer.get();
   m_symbolMailbox->wake = [renderer] { renderer->wake(); };
-  document.setSymbols(service);
   m_symbolPathProblems.clear();
-  m_symbolSetup.reset();  // joins a worker of an earlier run
+  m_symbolSetup.reset();         // joins a worker of an earlier run
+  document.setSymbols(nullptr);  // until the new service is attached (snapshots keep an old one alive)
   // WP-48: explicit symbol search paths from the Symbols panel / settings. WP-67: scanning them (a directory
   // listing and one JSON read per `*.symbols.json`) runs on a worker; the modules are resolved when it is
-  // done. Until then the service answers every lookup as unresolved. Nothing else reads what the worker
+  // done. Until then the new service stays private to the run (the document has none meanwhile), so no
+  // analysis thread can call into it while resolveAllAsync sets it up. Nothing else reads what the worker
   // writes (the overrides and the locator).
   if (m_settings.symbolSearchPaths.empty()) {
+    document.setSymbols(service);
     beginSymbolResolve(document);
     return;
   }
   auto run = std::make_unique<SymbolSetupRun>();
   run->service = service;
+  run->document = &document;
   SymbolSetupRun* raw = run.get();
   run->thread = std::thread([raw, service, paths = m_settings.symbolSearchPaths,
                              servers = m_settings.symbolServers, cacheDir, renderer] {

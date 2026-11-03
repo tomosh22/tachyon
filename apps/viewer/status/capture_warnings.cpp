@@ -59,8 +59,10 @@ struct Collector {
   void addText(CaptureWarningKind kind, std::string text) {
     if (haveLost && saysEventsLost(text)) return;
     if (haveThrottle && saysThrottled(text)) return;
+    // Case-insensitive: the agent re-emits the trace's merge warnings as "instrumentation: ..." while the
+    // trace's own copy reads "Instrumentation: ...".
     for (const CaptureWarning& w : out)
-      if (w.text == text) return;
+      if (w.text.size() == text.size() && containsNoCase(w.text, text)) return;
     out.push_back({kind, std::move(text)});
   }
   void addStrings(const json& array, CaptureWarningKind kind, const std::string& prefix) {

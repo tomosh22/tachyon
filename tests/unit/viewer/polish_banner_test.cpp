@@ -141,3 +141,14 @@ TEST(PolishBanner, ALossyTraceFromThePerfConverterShowsEachLineOnceInTheBanner) 
   EXPECT_EQ(count(w, CaptureWarningKind::Throttled), 1u);
   EXPECT_EQ(w.size(), 3u);
 }
+
+// The agent re-emits the trace's merge warnings as "instrumentation: <w>"; the trace's copy reads
+// "Instrumentation: <w>". Shown once.
+TEST(PolishWarnings, AgentCopiesOfMergeWarningsAreShownOnce) {
+  const auto w = collectCaptureWarnings(
+      modelWithInfo(
+          R"json({"instrumentation": {"merges": [{"warnings": ["pid 7: 3 unmatched scope ends"]}]}})json"),
+      {"instrumentation: pid 7: 3 unmatched scope ends"});
+  EXPECT_EQ(count(w, CaptureWarningKind::InstrumentationWarning), 1u);
+  EXPECT_EQ(count(w, CaptureWarningKind::AgentWarning), 0u);
+}
