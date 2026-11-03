@@ -1518,8 +1518,7 @@ Result<void> TimelineLod::sampleStrip(const SampleStripQuery& q, SampleStripResu
   // Fine strip level: pixel spans between half the base width and the base width (an approximation like every
   // level; the exact direct path below serves narrower pixels and threads that are not built yet).
   if (q.mode == QueryMode::Auto && im.geo.fineCount > 0 && !im.fineDropped.load(std::memory_order_relaxed) &&
-      (q.t1 - q.t0) / q.pixelWidth >= im.geo.fineWidth &&
-      im.isReady(t)) {
+      (q.t1 - q.t0) / q.pixelWidth >= im.geo.fineWidth && im.isReady(t)) {
     out.level = static_cast<uint8_t>(im.geo.fineLevel);
     const uint32_t* fine = im.threads[t].fine.data();
     lodPass(im.geo.fineWidth, im.geo.fineCount,
@@ -1688,9 +1687,10 @@ void fusedLevelPass(const BandCell* band, const uint32_t* dominant, const StripC
           bestKey = (covs[x] != 0 && key > bestKey) ? key : bestKey;
         }
         column.stack = CallstackIdx(0xFFFFFFFFu - static_cast<uint32_t>(bestKey));
-        column.share = std::min(1.0f, static_cast<float>(bestKey >> 32) / (255.0f * static_cast<float>(coverSum)));
-        column.coverage = std::min(1.0f, static_cast<float>(coverSum) * toFloat(w) /
-                                             (255.0f * toFloat(sw.cur.width())));
+        column.share =
+            std::min(1.0f, static_cast<float>(bestKey >> 32) / (255.0f * static_cast<float>(coverSum)));
+        column.coverage =
+            std::min(1.0f, static_cast<float>(coverSum) * toFloat(w) / (255.0f * toFloat(sw.cur.width())));
       }
       stripCols[c] = column;
     }

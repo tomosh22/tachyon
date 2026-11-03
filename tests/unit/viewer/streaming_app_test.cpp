@@ -1,6 +1,7 @@
-// WP-64: the viewer opens big traces in stages. A preview document is shown while the rest loads, the complete
-// document replaces it with the user's place kept, closing the preview abandons the load, and a newer open
-// supersedes a load in flight. The loading thread is held at a gate while the test looks at the preview.
+// WP-64: the viewer opens big traces in stages. A preview document is shown while the rest loads, the
+// complete document replaces it with the user's place kept, closing the preview abandons the load, and a
+// newer open supersedes a load in flight. The loading thread is held at a gate while the test looks at the
+// preview.
 #include "viewer/app.h"
 #include "viewer/timeline/timeline_panel.h"
 
@@ -55,12 +56,14 @@ class Gate {
 
 class Harness {
  public:
-  explicit Harness(std::shared_ptr<Gate> g, std::vector<double> stages = {0.3}) : gate(std::move(g)), app(makeNullRenderer(), options(gate, std::move(stages))) {
+  explicit Harness(std::shared_ptr<Gate> g, std::vector<double> stages = {0.3})
+      : gate(std::move(g)), app(makeNullRenderer(), options(gate, std::move(stages))) {
     std::string error;
     EXPECT_TRUE(app.init(error)) << error;
     ImGuiIO& io = ImGui::GetIO();
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
-    timeline = dynamic_cast<ThreadsTimelinePanel*>(app.panels().find(ThreadsTimelinePanel::kName)->panel.get());
+    timeline =
+        dynamic_cast<ThreadsTimelinePanel*>(app.panels().find(ThreadsTimelinePanel::kName)->panel.get());
     for (PanelEntry& e : app.panels().entries()) e.open = e.panel.get() == timeline;
   }
   ~Harness() {

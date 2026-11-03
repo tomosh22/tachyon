@@ -1,5 +1,5 @@
-// WP-64: queries, thread states and the LOD built on a streaming preview (a prefix of the file) are consistent
-// with the complete model, and rebuilding on the complete model gives the complete answer.
+// WP-64: queries, thread states and the LOD built on a streaming preview (a prefix of the file) are
+// consistent with the complete model, and rebuilding on the complete model gives the complete answer.
 #include "analysis/lod.h"
 #include "analysis/query.h"
 #include "analysis/thread_states.h"
@@ -21,7 +21,8 @@ std::filesystem::path generated(const std::string& file) {
 }
 
 struct Prepared {
-  Prepared(const std::string& name, double fraction) : svc(std::vector<std::string>{}, std::filesystem::path{}) {
+  Prepared(const std::string& name, double fraction)
+      : svc(std::vector<std::string>{}, std::filesystem::path{}) {
     model::LoadOptions opt;
     opt.prefixFraction = fraction;
     auto r = TraceModel::load(generated(name + ".tachyon"), opt);

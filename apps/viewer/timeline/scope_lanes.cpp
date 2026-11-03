@@ -105,7 +105,8 @@ uint8_t ScopeTrack::flagsOver(size_t first, size_t count) const {
     return out;
   }
   for (; i < last && i % kFlagBlock != 0; ++i) out = static_cast<uint8_t>(out | flags[i]);
-  for (; i + kFlagBlock <= last; i += kFlagBlock) out = static_cast<uint8_t>(out | flagBlocks[i / kFlagBlock]);
+  for (; i + kFlagBlock <= last; i += kFlagBlock)
+    out = static_cast<uint8_t>(out | flagBlocks[i / kFlagBlock]);
   for (; i < last; ++i) out = static_cast<uint8_t>(out | flags[i]);
   return out;
 }
@@ -594,8 +595,8 @@ void ScopeLanesView::drawRow(ImDrawList* dl, const model::TraceModel& model, con
         batch.add(it.x0, y0, it.x1, y1, toIm(c));
         ++m_stats.items;
         m_stats.merged += merged ? 1 : 0;
-        if (m_record || track.flagsOver(it.first, it.count) != 0 || (!merged && it.x1 - it.x0 > labelMinWidth) ||
-            (m_highlightId && !merged)) {
+        if (m_record || track.flagsOver(it.first, it.count) != 0 ||
+            (!merged && it.x1 - it.x0 > labelMinWidth) || (m_highlightId && !merged)) {
           m_decorated.push_back(it);
         }
       }

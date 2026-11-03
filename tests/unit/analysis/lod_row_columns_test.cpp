@@ -51,7 +51,8 @@ TEST(LodRowColumns, MatchesSeparateQueriesAtEveryZoom) {
     auto lod = buildLod(m, opt);
     ASSERT_TRUE(lod.ok());
     std::vector<std::pair<uint64_t, uint64_t>> windows;
-    // Every level width x {0.45 .. 4.2} per pixel, at three positions, plus windows sticking out of the trace.
+    // Every level width x {0.45 .. 4.2} per pixel, at three positions, plus windows sticking out of the
+    // trace.
     for (const LodLevelInfo& l : lod->levels()) {
       for (double f : {0.45, 0.9, 1.0, 1.7, 3.6, 3.99, 4.2}) {
         const uint64_t w = static_cast<uint64_t>(static_cast<double>(l.bucketWidth) * f * 301);

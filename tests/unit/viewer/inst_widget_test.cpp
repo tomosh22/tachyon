@@ -903,8 +903,8 @@ TEST(InstWidget, AMergedItemIsMarkedWhenALockWaitOrAnUnterminatedScopeIsInsideTh
   paired->byThread.resize(m.threads.size());
   const uint64_t t0 = m.header.start_ts;
   const StringIdx id = m.strings.find("Frame");
-  // 300 tiny depth-0 scopes inside one pixel of the full view; the 150th is a lock wait and the last one never
-  // ends. Before WP-64 only the first scope of the group decided how the merged item was drawn.
+  // 300 tiny depth-0 scopes inside one pixel of the full view; the 150th is a lock wait and the last one
+  // never ends. Before WP-64 only the first scope of the group decided how the merged item was drawn.
   const uint64_t base = t0 + (m.header.end_ts - m.header.start_ts) / 3;
   for (uint64_t i = 0; i < 300; ++i) {
     analysis::ScopeInstance s;
@@ -917,8 +917,8 @@ TEST(InstWidget, AMergedItemIsMarkedWhenALockWaitOrAnUnterminatedScopeIsInsideTh
   }
   h.widget().scopeLanes().inject(buildScopeLanes(paired, m.threads.size()), false);
   h.frames(3);
-  const DrawnScopeItem* merged = h.findItem(
-      [&](const DrawnScopeItem& i) { return i.thread == main_ && i.depth == 0 && i.count > 1; });
+  const DrawnScopeItem* merged =
+      h.findItem([&](const DrawnScopeItem& i) { return i.thread == main_ && i.depth == 0 && i.count > 1; });
   ASSERT_NE(merged, nullptr);
   EXPECT_TRUE(merged->lock) << "a lock wait in the middle of the group must mark the merged item";
   EXPECT_TRUE(merged->unterminated) << "an unterminated scope in the group must mark the merged item";

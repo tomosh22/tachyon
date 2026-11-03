@@ -1,6 +1,6 @@
-// WP-64: graceful degradation of the timeline LOD under a memory ceiling - trimMemory() frees the fine strip level
-// and then the finest levels, LodOptions::maxBytes picks a coarser base level up front; queries stay correct (they
-// fall back to the next coarser level or to the samples).
+// WP-64: graceful degradation of the timeline LOD under a memory ceiling - trimMemory() frees the fine strip
+// level and then the finest levels, LodOptions::maxBytes picks a coarser base level up front; queries stay
+// correct (they fall back to the next coarser level or to the samples).
 #include "analysis/lod.h"
 #include "lod_test_util.h"
 
@@ -37,7 +37,8 @@ TEST(LodMemory, TrimmingFreesTheFineLevelThenTheFinestLevelsAndKeepsTheCoarsest)
   const size_t freedFine = lod->trimMemory(1);
   EXPECT_GT(freedFine, 0u);
   EXPECT_TRUE(lod->trimState().fineDropped);
-  EXPECT_EQ(lod->trimState().droppedLevels, 0u) << "levels are only dropped when the fine level was not enough";
+  EXPECT_EQ(lod->trimState().droppedLevels, 0u)
+      << "levels are only dropped when the fine level was not enough";
   EXPECT_EQ(lod->memoryBytes(), before - freedFine);
 
   const size_t freedLevel = lod->trimMemory(before);  // everything but the coarsest level

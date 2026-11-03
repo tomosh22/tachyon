@@ -57,8 +57,8 @@ class Document {
   uint64_t totalSamples() const;
 
   // WP-64 (streaming load): a preview document holds a time prefix of the file (model().loadStatus) and is
-  // replaced by the complete document of the same stream. Panels that want to keep the user's place across the
-  // swap compare streamId(): documents of one open share it (0 = not part of a stream).
+  // replaced by the complete document of the same stream. Panels that want to keep the user's place across
+  // the swap compare streamId(): documents of one open share it (0 = not part of a stream).
   bool isPreview() const { return !m_model->loadStatus.complete; }
   uint64_t streamId() const { return m_streamId; }
   // Main-thread only, before the document is shown.

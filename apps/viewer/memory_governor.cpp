@@ -81,7 +81,8 @@ bool MemoryGovernor::update(const MemorySources& src, uint64_t ceiling) {
   if (st.usedBytes > ceiling && st.stage < MemoryStage::ModelOverCeiling && model + lod > ceiling) {
     st.stage = MemoryStage::ModelOverCeiling;
     st.message = "The trace needs " + formatBytes(model) + " in memory, more than the memory ceiling (" +
-                 formatBytes(ceiling) + "); everything optional was freed. Raise the limit under View > Memory limit.";
+                 formatBytes(ceiling) +
+                 "); everything optional was freed. Raise the limit under View > Memory limit.";
   }
   return st.stage != before;
 }

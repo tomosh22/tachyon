@@ -1,6 +1,6 @@
-// WP-64: the memory ceiling. The governor's stages on fake sources, the setting, and the real thing in the app:
-// a ceiling below what the trace needs makes the viewer free timeline detail levels and stop caching analysis
-// results, tells the user, and keeps everything working.
+// WP-64: the memory ceiling. The governor's stages on fake sources, the setting, and the real thing in the
+// app: a ceiling below what the trace needs makes the viewer free timeline detail levels and stop caching
+// analysis results, tells the user, and keeps everything working.
 #include "viewer/app.h"
 #include "viewer/memory_governor.h"
 #include "viewer/settings.h"
@@ -146,7 +146,8 @@ class AppHarness {
     std::string error;
     EXPECT_TRUE(app.init(error)) << error;
     ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
-    auto* panel = dynamic_cast<ThreadsTimelinePanel*>(app.panels().find(ThreadsTimelinePanel::kName)->panel.get());
+    auto* panel =
+        dynamic_cast<ThreadsTimelinePanel*>(app.panels().find(ThreadsTimelinePanel::kName)->panel.get());
     timeline = &panel->widget();
     for (PanelEntry& e : app.panels().entries()) e.open = e.panel.get() == panel;
   }
@@ -194,7 +195,8 @@ TEST(MemoryCeilingApp, NothingIsDegradedWithRoom) {
 }
 
 TEST(MemoryCeilingApp, ARuntimeCeilingBelowTheNeedFreesLodLevelsAndTellsTheUser) {
-  AppHarness h(0);  // no ceiling at first (and the settings default is not used: override 0 = settings percent)
+  AppHarness h(
+      0);  // no ceiling at first (and the settings default is not used: override 0 = settings percent)
   h.app.setMemoryCeilingPercent(0);
   h.open("medium.tachyon");
   ASSERT_EQ(h.app.memoryStatus().stage, MemoryStage::Normal);
@@ -209,7 +211,8 @@ TEST(MemoryCeilingApp, ARuntimeCeilingBelowTheNeedFreesLodLevelsAndTellsTheUser)
   EXPECT_EQ(st.stage, MemoryStage::LodReduced);
   EXPECT_GT(st.lodFreedBytes, 0u);
   EXPECT_LT(h.timeline->lodBytes(), lodBefore);
-  EXPECT_LE(h.timeline->lodBytes() + model, model + lodBefore / 3 + lodBefore / 8) << "within the ceiling (+slack of a level)";
+  EXPECT_LE(h.timeline->lodBytes() + model, model + lodBefore / 3 + lodBefore / 8)
+      << "within the ceiling (+slack of a level)";
   EXPECT_TRUE(h.timeline->lodTrim().fineDropped || h.timeline->lodTrim().droppedLevels > 0);
   // The user is told: a toast and the banner.
   EXPECT_GT(h.app.toasts().toasts().size(), toasts);
@@ -250,5 +253,6 @@ TEST(MemoryCeilingApp, TheMenuSettingIsSavedAndAppliedAtOnce) {
   EXPECT_EQ(h.app.memoryCeiling(), 0u);
   h.app.setMemoryCeilingPercent(5);  // below the minimum: clamped
   EXPECT_EQ(h.app.settings().memoryCeilingPercent, Settings::kMinMemoryCeilingPercent);
-  EXPECT_EQ(h.app.memoryCeiling(), memoryCeilingBytes(Settings::kMinMemoryCeilingPercent, physicalMemoryBytes()));
+  EXPECT_EQ(h.app.memoryCeiling(),
+            memoryCeilingBytes(Settings::kMinMemoryCeilingPercent, physicalMemoryBytes()));
 }

@@ -10,8 +10,8 @@ const char* cliUsage() {
   return "usage: tachyon-viewer [options] [trace.tachyon]\n"
          "  --config <path>     settings file to use (default: the user config dir)\n"
          "  --selftest <trace>  headless: open the trace, run 100 frames, exit 0 on success\n"
-         "  --bench <trace>     headless frame-time benchmark: open the trace with the timeline and the analysis\n"
-         "                      panels, then measure steady, panning and zooming frames (CPU ms) and print them\n"
+         "  --bench <trace>     headless frame-time benchmark: open the trace, then measure steady,\n"
+         "                      panning and zooming frames (CPU ms) with the timeline and panels open\n"
          "  --bench-frames <n>  frames per --bench phase (default 300)\n"
          "  -h, --help          show this help\n";
 }

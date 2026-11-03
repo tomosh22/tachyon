@@ -180,7 +180,8 @@ Settings Settings::load(const std::filesystem::path& path) {
     if (it->is_number_integer() && it->get<int64_t>() >= 0) {
       const int64_t v = it->get<int64_t>();
       s.memoryCeilingPercent =
-          v == 0 ? 0u : static_cast<uint32_t>(std::clamp<int64_t>(v, Settings::kMinMemoryCeilingPercent, 100));
+          v == 0 ? 0u
+                 : static_cast<uint32_t>(std::clamp<int64_t>(v, Settings::kMinMemoryCeilingPercent, 100));
     } else {
       TACHYON_LOG_WARN("settings: 'memoryCeilingPercent' is not a non-negative integer, using default");
     }

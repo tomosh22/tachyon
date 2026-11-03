@@ -114,7 +114,8 @@ int runBench(App& app, const std::filesystem::path& trace, const BenchOptions& o
   for (const auto& s : model.samplesByThread) samples += s.ts.size();
   const timeline::TimeLimits limits = widget.limits();
   out << "bench: file=" << pathToUtf8(trace.filename()) << " threads=" << model.threads.size()
-      << " samples=" << samples << " modules=" << model.modules.size() << " nodes=" << model.nodes.size() << '\n';
+      << " samples=" << samples << " modules=" << model.modules.size() << " nodes=" << model.nodes.size()
+      << '\n';
   char line[320];
   std::snprintf(line, sizeof line,
                 "bench: open %.2f s (load + thread states), timeline index +%.2f s, symbols + settle +%.2f s",
@@ -156,11 +157,13 @@ int runBench(App& app, const std::filesystem::path& trace, const BenchOptions& o
   // Pan across a 1/20 window; the offset is not a multiple of a pixel so the row caches never hit.
   const double panSpan = total / 20.0;
   runPhase("pan", [&](int i) {
-    widget.setView({(total - panSpan) * static_cast<double>(i) / static_cast<double>(std::max(n - 1, 1)) + 0.37,
-                    panSpan});
+    widget.setView(
+        {(total - panSpan) * static_cast<double>(i) / static_cast<double>(std::max(n - 1, 1)) + 0.37,
+         panSpan});
   });
   // Zoom from the whole trace to ~1 ms (clock-dependent: 1e-3 * ticks/s) and back out, logarithmically.
-  const double minSpan = std::max(static_cast<double>(model.header.clock_frequency_hz) * 1e-3, limits.minSpan);
+  const double minSpan =
+      std::max(static_cast<double>(model.header.clock_frequency_hz) * 1e-3, limits.minSpan);
   runPhase("zoom", [&](int i) {
     const double t = std::fabs(2.0 * static_cast<double>(i) / static_cast<double>(std::max(n - 1, 1)) - 1.0);
     const double span = std::exp(std::log(minSpan) + (std::log(total) - std::log(minSpan)) * t);
@@ -169,14 +172,15 @@ int runBench(App& app, const std::filesystem::path& trace, const BenchOptions& o
 
   bool allUnderBudget = true;
   for (const Phase& p : phases) {
-    std::snprintf(line, sizeof line,
-                  "bench: %-6s frames=%d cpu_ms p50=%.2f p95=%.2f max=%.2f (wall mean %.2f) rows drawn=%u pending=%u",
-                  p.name, n, p.stats.p50, p.stats.p95, p.stats.max, p.stats.wallMean, p.rowsDrawn, p.rowsPending);
+    std::snprintf(
+        line, sizeof line,
+        "bench: %-6s frames=%d cpu_ms p50=%.2f p95=%.2f max=%.2f (wall mean %.2f) rows drawn=%u pending=%u",
+        p.name, n, p.stats.p50, p.stats.p95, p.stats.max, p.stats.wallMean, p.rowsDrawn, p.rowsPending);
     out << line << '\n';
     allUnderBudget = allUnderBudget && p.stats.p95 <= options.fpsBudgetMs;
   }
-  std::snprintf(line, sizeof line, "bench: 60 fps budget %.1f ms (p95 of CPU frame time): %s", options.fpsBudgetMs,
-                allUnderBudget ? "HOLDS" : "EXCEEDED");
+  std::snprintf(line, sizeof line, "bench: 60 fps budget %.1f ms (p95 of CPU frame time): %s",
+                options.fpsBudgetMs, allUnderBudget ? "HOLDS" : "EXCEEDED");
   out << line << '\n';
   return 0;
 }

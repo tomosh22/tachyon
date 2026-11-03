@@ -70,8 +70,9 @@ struct AppOptions {
   // WP-41: try to connect to a running agent at startup (silently; also needs Settings::capture.autoConnect).
   bool autoConnectAgent = true;
   // WP-64: open big traces in stages. A file of at least `streamMinFileBytes` is loaded as previews of the
-  // fractions in `streamStages` (each shown as soon as it is ready), then in full; the complete document replaces
-  // the last preview and the timeline keeps its view. Off for small files and when `streamingLoad` is false.
+  // fractions in `streamStages` (each shown as soon as it is ready), then in full; the complete document
+  // replaces the last preview and the timeline keeps its view. Off for small files and when `streamingLoad`
+  // is false.
   bool streamingLoad = true;
   uint64_t streamMinFileBytes = 64ull << 20;
   std::vector<double> streamStages = {0.05};
@@ -211,7 +212,7 @@ class App {
   std::shared_ptr<SymbolMailbox> m_symbolMailbox;
 
   MemoryGovernor m_memory;
-  uint64_t m_memoryModelBytes = 0;       // TraceModel::residentBytes() of the document of m_memoryGeneration
+  uint64_t m_memoryModelBytes = 0;  // TraceModel::residentBytes() of the document of m_memoryGeneration
   uint64_t m_memoryGeneration = ~0ull;
   std::chrono::steady_clock::time_point m_lastMemoryCheck{};
   JobQueue::JobId m_openJob = 0;

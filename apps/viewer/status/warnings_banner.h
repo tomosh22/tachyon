@@ -23,8 +23,8 @@ class WarningsBanner {
   bool dismissed() const { return m_dismissed; }
   // Main-thread only. Hides the banner for the current document.
   void dismiss();
-  // Main-thread only (WP-64). Adds a warning that does not come from the model (e.g. the memory ceiling made the
-  // viewer free data); replaces an earlier one of the same kind and shows the banner again even if it was
+  // Main-thread only (WP-64). Adds a warning that does not come from the model (e.g. the memory ceiling made
+  // the viewer free data); replaces an earlier one of the same kind and shows the banner again even if it was
   // dismissed. Lives until the document changes.
   void addNotice(CaptureWarningKind kind, std::string text);
   // Main-thread only. Draws the banner as a top side bar (below the main menu bar) when visible().

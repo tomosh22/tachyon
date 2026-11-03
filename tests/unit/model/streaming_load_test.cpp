@@ -202,7 +202,8 @@ TEST(StreamingLoad, CancellingBeforeTheStartReturnsCancelled) {
   LoadOptions opt;
   opt.cancel = &cancel;
   int snapshots = 0;
-  auto r = TraceModel::loadProgressive(fixturePath("medium"), opt, {0.25}, [&](TraceModel&&) { ++snapshots; });
+  auto r =
+      TraceModel::loadProgressive(fixturePath("medium"), opt, {0.25}, [&](TraceModel&&) { ++snapshots; });
   EXPECT_EQ(snapshots, 0);
   ASSERT_FALSE(r.ok());
   EXPECT_EQ(r.error().code, ErrorCode::Cancelled);

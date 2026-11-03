@@ -456,7 +456,8 @@ void App::openFile(const std::filesystem::path& path) {
   auto loaded = std::make_shared<Loaded>();
   m_lastError.clear();
   m_redrawFrames = std::max(m_redrawFrames, 3);
-  // Big files open in stages (WP-64): a preview of the first part of the capture is shown while the rest loads.
+  // Big files open in stages (WP-64): a preview of the first part of the capture is shown while the rest
+  // loads.
   std::error_code sizeError;
   const uint64_t fileBytes = std::filesystem::file_size(path, sizeError);
   const bool streaming = m_options.streamingLoad && !sizeError && fileBytes >= m_options.streamMinFileBytes &&
@@ -520,7 +521,8 @@ void App::openFile(const std::filesystem::path& path) {
       });
 }
 
-// Takes the newest preview of the loading job, if any, and shows it (the complete document replaces it later).
+// Takes the newest preview of the loading job, if any, and shows it (the complete document replaces it
+// later).
 void App::pumpStream() {
   if (!m_stream || m_openJob == 0) return;
   std::shared_ptr<const model::TraceModel> preview;
@@ -535,9 +537,10 @@ void App::pumpStream() {
   const model::LoadStatus& status = preview->loadStatus;
   const double hz = static_cast<double>(std::max<uint64_t>(preview->header.clock_frequency_hz, 1));
   char text[160];
-  std::snprintf(text, sizeof text, "Showing the first %.1f s of %.1f s while the rest of the trace loads (%.0f%%)",
-                static_cast<double>(preview->header.end_ts - preview->header.start_ts) / hz,
-                static_cast<double>(status.fullEndTs - preview->header.start_ts) / hz, status.fraction() * 100.0);
+  std::snprintf(
+      text, sizeof text, "Showing the first %.1f s of %.1f s while the rest of the trace loads (%.0f%%)",
+      static_cast<double>(preview->header.end_ts - preview->header.start_ts) / hz,
+      static_cast<double>(status.fullEndTs - preview->header.start_ts) / hz, status.fraction() * 100.0);
   toast(ToastLevel::Info, text);
 }
 
@@ -709,7 +712,8 @@ void App::drawMenuBar() {
       for (const Choice c : {Choice{50, "50%"}, Choice{60, "60%"}, Choice{75, "75% (default)"},
                              Choice{90, "90%"}, Choice{0, "No limit"}}) {
         std::string label = c.name;
-        if (c.percent != 0 && physical != 0) label += "  (" + formatBytes(memoryCeilingBytes(c.percent, physical)) + ")";
+        if (c.percent != 0 && physical != 0)
+          label += "  (" + formatBytes(memoryCeilingBytes(c.percent, physical)) + ")";
         if (ImGui::MenuItem(label.c_str(), nullptr, m_settings.memoryCeilingPercent == c.percent))
           setMemoryCeilingPercent(c.percent);
       }

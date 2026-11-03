@@ -5,15 +5,17 @@
 // query caches. The ceiling is Settings::memoryCeilingPercent of the physical RAM (default 75%, 0 = none).
 //
 // Degradation, in this order, one stage per update() that finds the total above the ceiling:
-//   1. LodReduced     the timeline's sample mipmap data is freed (the fine strip level, then the finest LOD levels
-//                     one by one, always keeping the coarsest); the zooms those levels served are answered from
-//                     the next coarser level or straight from the samples - exact, but slower at busy rows.
-//   2. CachesLimited  the analysis query caches are cleared and their budget shrinks to what the ceiling leaves
-//                     (to nothing): queries are recomputed instead of cached.
+//   1. LodReduced        the timeline's sample mipmap data is freed (the fine strip level, then the finest
+//                        LOD levels one by one, always keeping the coarsest); the zooms those levels
+//                        served are answered from the next coarser level or straight from the samples -
+//                        exact, but slower at busy rows.
+//   2. CachesLimited     the analysis query caches are cleared and their budget shrinks to what the
+//                        ceiling leaves (to nothing): queries are recomputed instead of cached.
 //   3. ModelOverCeiling  the trace itself does not fit; nothing more can be freed. Only reported.
 // Nothing is restored automatically (that would make the memory use flap); re-opening the trace rebuilds
 // everything with the then current ceiling. The timeline LOD also receives the ceiling up front, as a byte
-// budget for its levels, so that a trace which cannot afford the full index is built coarse in the first place.
+// budget for its levels, so that a trace which cannot afford the full index is built coarse in the first
+// place.
 #pragma once
 
 #include <cstdint>
@@ -35,7 +37,8 @@ enum class MemoryStage : uint8_t { Normal, LodReduced, CachesLimited, ModelOverC
 
 // What the governor can measure and free. All callbacks run on the calling (main) thread.
 struct MemorySources {
-  std::function<uint64_t()> modelBytes;  // TraceModel::residentBytes() (the caller caches it: it is O(strings))
+  // TraceModel::residentBytes() (the caller caches it: it is O(strings)).
+  std::function<uint64_t()> modelBytes;
   std::function<uint64_t()> lodBytes;    // timeline index bytes
   std::function<uint64_t()> cacheBytes;  // analysis caches
   // Frees at least `bytes` of timeline index; returns the bytes freed (0 = nothing left to free).

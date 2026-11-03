@@ -133,8 +133,8 @@ TEST(ModelLoadPerf, MediumFirstPreview) {
     best = std::min(best, s);
   }
   Loaded full = timedLoad(path);
-  std::printf("[model perf] medium first preview (5%% of the sample chunks): %.3f s (full load %.3f s)\n", best,
-              full.seconds);
+  std::printf("[model perf] medium first preview (5%% of the sample chunks): %.3f s (full load %.3f s)\n",
+              best, full.seconds);
   EXPECT_LT(best, 0.4 * 2);
   EXPECT_LT(best, full.seconds);
 }

@@ -22,7 +22,8 @@ enum class CaptureWarningKind : uint8_t {
   InstrumentationWarning,
   ConverterWarning,
   Partial,
-  MemoryDegraded  // WP-64: the memory ceiling made the viewer free optional data (added by the App, not by the model)
+  MemoryDegraded  // WP-64: the memory ceiling made the viewer free optional data (added by the App, not by
+                  // the model)
 };
 
 struct CaptureWarning {

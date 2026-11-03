@@ -224,8 +224,9 @@ class ScopeLanesView {
   // Lines a row of `thread` needs: 0 when the thread has no scopes (or the set is ready and empty for it),
   // 1 while the set is pending (the pending look).
   uint32_t linesFor(ThreadIdx thread, bool expanded) const;
-  // True when the (ready) set has scopes for `thread`; while the set is not ready, when the trace has scope or
-  // fiber events on `thread` (WP-64: rows of threads without any do not reserve a line for the pending look).
+  // True when the (ready) set has scopes for `thread`; while the set is not ready, when the trace has scope
+  // or fiber events on `thread` (WP-64: rows of threads without any do not reserve a line for the pending
+  // look).
   bool mayHaveScopes(ThreadIdx thread) const;
 
   // Main-thread only. Draws the lines of one row. `rowTop` is the screen y of the row top; the lane block

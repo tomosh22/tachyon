@@ -68,7 +68,8 @@ double frameMs(const TimelineLod& lod, size_t rows, size_t flameRows, uint64_t t
       rq.t1 = t1;
       rq.pixelWidth = kPixels;
       (void)lod.rowColumns(rq, buf.band, buf.strip);
-      sink += static_cast<uint64_t>(buf.band.columns[7].running * 100) + buf.strip.columns[kPixels / 2].stack.get();
+      sink += static_cast<uint64_t>(buf.band.columns[7].running * 100) +
+              buf.strip.columns[kPixels / 2].stack.get();
     }
     StateBandQuery bq;
     bq.thread = th;
@@ -183,9 +184,9 @@ FrameReport worstFrame(const TimelineLod& lod, const std::vector<Zoom>& zooms, s
 }
 
 // Both call patterns measured alternately on the same buffers, zoom by zoom, so that machine noise hits both.
-std::pair<FrameReport, FrameReport> worstFrameInterleaved(const TimelineLod& lod, const std::vector<Zoom>& zooms,
-                                                          size_t rows, int reps, unsigned partsA,
-                                                          unsigned partsB) {
+std::pair<FrameReport, FrameReport> worstFrameInterleaved(const TimelineLod& lod,
+                                                          const std::vector<Zoom>& zooms, size_t rows,
+                                                          int reps, unsigned partsA, unsigned partsB) {
   Buffers buf;
   uint64_t sink = 0;
   FrameReport ra, rb;
@@ -271,7 +272,8 @@ TEST(LodPerf, FusedVersusSeparateMicro) {
   model::TraceModel& m = *loaded;
   ASSERT_TRUE(buildThreadStates(m).ok());
   LodOptions microOptions;
-  if (const char* step = std::getenv("TACHYON_LOD_STEP")) microOptions.levelStep = static_cast<uint32_t>(std::atoi(step));
+  if (const char* step = std::getenv("TACHYON_LOD_STEP"))
+    microOptions.levelStep = static_cast<uint32_t>(std::atoi(step));
   auto lod = buildLod(m, microOptions);
   ASSERT_TRUE(lod.ok());
   std::printf("[lod perf] micro: levelStep %u, LOD memory %.2f B/sample\n", microOptions.levelStep,

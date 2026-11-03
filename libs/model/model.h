@@ -139,12 +139,12 @@ struct LoadOptions {
   // Optional cancellation flag, polled between work items; when it becomes true load() returns Cancelled.
   const std::atomic<bool>* cancel = nullptr;
   // Streaming (WP-64). In (0, 1): load only a time PREFIX of the file: every chunk except all but the first
-  // ceil(fraction * N) of its N Samples chunks. The result is a self-contained, consistent model of the capture
-  // so far: header.end_ts is clamped to the end of the loaded samples, event records (context switches, ready
-  // events, scopes, marks, plots) at or past it are dropped, tables (strings, frames, callstack nodes, modules,
-  // threads) are complete so ids equal those of the complete load (threads without a ThreadRec are
-  // synthesised from the loaded records only), and TraceModel::loadStatus.complete is false. 1 (or a file
-  // with fewer than 2 Samples chunks) loads everything.
+  // ceil(fraction * N) of its N Samples chunks. The result is a self-contained, consistent model of the
+  // capture so far: header.end_ts is clamped to the end of the loaded samples, event records (context
+  // switches, ready events, scopes, marks, plots) at or past it are dropped, tables (strings, frames,
+  // callstack nodes, modules, threads) are complete so ids equal those of the complete load (threads without
+  // a ThreadRec are synthesised from the loaded records only), and TraceModel::loadStatus.complete is false.
+  // 1 (or a file with fewer than 2 Samples chunks) loads everything.
   double prefixFraction = 1.0;
   // Stored in TraceModel::loadStatus.generation (loadProgressive numbers its snapshots).
   uint32_t generation = 0;
@@ -153,11 +153,11 @@ struct LoadOptions {
 // How much of the file a model holds (streaming load, WP-64). A model is immutable once it is returned; a
 // preview is replaced by a later, larger model, never extended in place.
 struct LoadStatus {
-  bool complete = true;               // false: a prefix preview (LoadOptions::prefixFraction)
-  uint32_t generation = 0;            // 0 for the first snapshot of a load, increasing
-  uint32_t sampleChunksLoaded = 0;    // Samples chunks decoded into this model
-  uint32_t sampleChunksTotal = 0;     // Samples chunks in the file
-  uint64_t fullEndTs = 0;             // header.end_ts of the file (header.end_ts is clamped in a preview)
+  bool complete = true;             // false: a prefix preview (LoadOptions::prefixFraction)
+  uint32_t generation = 0;          // 0 for the first snapshot of a load, increasing
+  uint32_t sampleChunksLoaded = 0;  // Samples chunks decoded into this model
+  uint32_t sampleChunksTotal = 0;   // Samples chunks in the file
+  uint64_t fullEndTs = 0;           // header.end_ts of the file (header.end_ts is clamped in a preview)
   uint64_t samplesLoaded = 0;
   // Thread-safe: pure function. Fraction of the Samples chunks that are loaded, in [0, 1].
   double fraction() const {

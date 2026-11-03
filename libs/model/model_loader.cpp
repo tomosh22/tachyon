@@ -318,9 +318,9 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
   for (size_t i = 0; i < chunks.size(); ++i)
     if (chunks[i].type == static_cast<uint32_t>(ChunkType::Samples)) sampleIdx.push_back(i);
 
-  // Streaming prefix (LoadOptions::prefixFraction): keep the first `keep` Samples chunks. Every other chunk is
-  // decoded (writers put the event chunks anywhere between the sample chunks); the event records past the end
-  // of the loaded samples are dropped further down.
+  // Streaming prefix (LoadOptions::prefixFraction): keep the first `keep` Samples chunks. Every other chunk
+  // is decoded (writers put the event chunks anywhere between the sample chunks); the event records past the
+  // end of the loaded samples are dropped further down.
   const size_t sampleChunksTotal = sampleIdx.size();
   const bool prefix = options.prefixFraction > 0.0 && options.prefixFraction < 1.0 && sampleIdx.size() >= 2;
   if (prefix) {
@@ -727,8 +727,8 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
   if (prefix) {
     uint64_t maxTs = 0;
     for (uint64_t t : chunkMaxTs) maxTs = std::max(maxTs, t);
-    const uint64_t end = std::max<uint64_t>(maxTs + std::max<uint64_t>(m.sampleIntervalTicks, 1),
-                                            m.header.start_ts + 1);
+    const uint64_t end =
+        std::max<uint64_t>(maxTs + std::max<uint64_t>(m.sampleIntervalTicks, 1), m.header.start_ts + 1);
     if (end < m.header.end_ts) m.header.end_ts = end;
     dropFrom(m.contextSwitches, m.header.end_ts);
     dropFrom(m.readyEvents, m.header.end_ts);
