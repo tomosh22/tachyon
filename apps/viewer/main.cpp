@@ -1,6 +1,7 @@
 // tachyon-viewer entry point. SDL_main.h renames main() so SDL2main can provide the Windows entry point
 // (console subsystem, UTF-8 argv).
 #include "viewer/app.h"
+#include "viewer/bench.h"
 #include "viewer/cli_args.h"
 #include "viewer/paths.h"
 
@@ -38,6 +39,25 @@ int main(int argc, char** argv) {
       return 1;
     }
     const int rc = app.runSelfTest(*cli.selftestPath, 100, std::cout);
+    std::cout.flush();
+    return rc;
+  }
+
+  if (cli.benchPath) {
+    // Headless frame-time benchmark (WP-64): a tall display so that all rows of a big trace are on screen.
+    options.persist = false;
+    options.pacing = false;
+    options.streamingLoad = false;
+    options.autoConnectAgent = false;
+    App app(makeNullRenderer(1920.0f, 6000.0f), options);
+    std::string error;
+    if (!app.init(error)) {
+      std::cerr << "bench: FAILED init: " << error << '\n';
+      return 1;
+    }
+    BenchOptions bench;
+    bench.framesPerPhase = cli.benchFrames;
+    const int rc = runBench(app, *cli.benchPath, bench, std::cout);
     std::cout.flush();
     return rc;
   }

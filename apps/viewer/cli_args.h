@@ -12,6 +12,8 @@ struct CliArgs {
   std::optional<std::filesystem::path> openPath;      // positional trace to open at start
   std::optional<std::filesystem::path> configPath;    // --config <settings.json>
   std::optional<std::filesystem::path> selftestPath;  // --selftest <trace>
+  std::optional<std::filesystem::path> benchPath;     // --bench <trace> (WP-64)
+  int benchFrames = 300;                              // --bench-frames <n>: frames per phase
   bool help = false;
   std::string error;  // non-empty when the arguments are invalid
 };

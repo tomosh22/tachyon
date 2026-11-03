@@ -45,7 +45,7 @@ class IRenderer {
 };
 
 // Thread-safe: factories.
-std::unique_ptr<IRenderer> makeNullRenderer();
+std::unique_ptr<IRenderer> makeNullRenderer(float width = 1280.0f, float height = 720.0f);
 std::unique_ptr<IRenderer> makeSdlGlRenderer();
 
 }  // namespace tachyon::viewer
