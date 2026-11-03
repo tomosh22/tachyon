@@ -12,8 +12,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <shellapi.h>
 #include <windows.h>
+// clang-format off
+#include <shellapi.h>
+// clang-format on
 #else
 #include <fcntl.h>
 #include <spawn.h>

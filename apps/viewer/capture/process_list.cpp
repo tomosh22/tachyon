@@ -15,8 +15,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <tlhelp32.h>
 #include <windows.h>
+// clang-format off
+#include <tlhelp32.h>
+// clang-format on
 #else
 #include <pwd.h>
 #include <sys/types.h>
