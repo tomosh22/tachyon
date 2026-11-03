@@ -435,8 +435,16 @@ int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream&
 
   // The agent finishing by itself (the launched or attached target exited) arrives as capture_done. Flushes
   // of a flight recorder (circular capture) are reported as they happen.
+  // With --fetch the flushed traces are remembered and fetched once the capture is over (the transfer must
+  // not hold up --duration).
+  std::vector<std::string> flushedPaths;
   const auto finalOrReport = [&](const Event& e) {
-    if (std::holds_alternative<FlushedEvent>(e)) printEvent(e, p.json, out);
+    if (const auto* f = std::get_if<FlushedEvent>(&e)) {
+      printEvent(e, p.json, out);
+      if (p.fetchAfter && !f->path.empty() &&
+          std::find(flushedPaths.begin(), flushedPaths.end(), f->path) == flushedPaths.end())
+        flushedPaths.push_back(f->path);
+    }
     return isFinal(e);
   };
   auto event = client.waitForEvent(finalOrReport, firstWaitMs);
@@ -467,6 +475,12 @@ int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream&
   }
   int code = finish(*event, p.json, out, err);
   if (p.fetchAfter) {
+    // Flushed traces first (they were announced first), then the final trace. A failed one does not stop
+    // the others; the exit code reports the first failure.
+    for (const std::string& flushed : flushedPaths) {
+      const int fetchCode = fetchAndReport(client, flushed, localNameFor(flushed, p.fetchDir), p, out, err);
+      if (fetchCode != kExitOk && code == kExitOk) code = fetchCode;
+    }
     if (const auto* done = std::get_if<CaptureDoneEvent>(&*event);
         done != nullptr && !done->summary.path.empty()) {
       const int fetchCode = fetchAndReport(client, done->summary.path,
