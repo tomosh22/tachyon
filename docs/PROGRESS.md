@@ -30,7 +30,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-33b | Subtree path filter; bottomUp/topDown frameless consistency | C | merged (verifier PASS) | wp/33b-subtree-path | 2026-11-03 |
-| WP-41b | Elevated agent (pkexec/sudo) usable by the invoking user | A | in progress (with WP-61) | wp/61-remote-capture | 2026-11-03 |
+| WP-41b | Elevated agent (pkexec/sudo) usable by the invoking user | A | merged (with WP-61) | wp/61-remote-capture | 2026-11-03 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | merged (partial: target carried to WP-64) | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | merged (verifier PASS) | wp/41-session-explorer | 2026-11-03 |
@@ -50,7 +50,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | merged | wp/54-inst-viewer | 2026-11-02 |
 | WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
 | WP-60 | Flight recorder mode | A | merged (verifier: one test bug, fixed by the orchestrator) | wp/60-flight-recorder | 2026-11-03 |
-| WP-61 | Remote capture | A | in progress | wp/61-remote-capture | 2026-11-03 |
+| WP-61 | Remote capture | A | merged | wp/61-remote-capture | 2026-11-03 |
 | WP-62 | CI report tool | E | merged (WP-62b follow-up) | wp/62-ci-report | 2026-11-02 |
 | WP-63 | Exporters | E | merged | wp/63-exporters | 2026-11-03 |
 | WP-64 | Large-trace performance pass | C | in progress | wp/64-perf-pass | 2026-11-03 |
@@ -234,6 +234,10 @@ Verifier PASS. Call Graph "Filter to subtree" now filters by the key path, so a 
 
 Verifier: design and implementation pass; one blocking test bug (range-for over a temporary `Result` in the privileged test, an ASan stack-use-after-scope) fixed by the orchestrator, plus Windows device names in flush names. Acceptance on Linux (CI privileged step and locally, release and ASan): 7 flushes in 20 s, every one holds the 57 ms hitch frame and the `testbed.hitch` marker within its last 10 s, scopes balanced, full-span flushes have target samples over 9.98–9.99 s of the 10 s window (about 34k samples). Windows CI: hitch-triggered flushes under real ETW pass. Specs updated (control-protocol, capture-backend, trace-format) and engine-integration 5.9 rewritten (RequestFlush returns at once now). Follow-ups: StringDef prefix cap (8 MiB) has no test or user-visible warning, and a prefix near the cap makes segments rotate on every frame; a failed segment open leaves the ring spool permanently in error; perf segments with `lastTs == 0` are never released by flushes, and one huge `seconds` raises H for the rest of the capture (both bounded by circularMb); a coalesced trigger during a manual flush before any trigger returns an empty path; fiber threads are not balanced at window edges; the viewer cannot tell whether a capture started elsewhere is circular; ETW flush gap (restart per flush).
 
+## WP-61 + WP-41b notes
+
+Verifier FAIL, fixed by the orchestrator, then merged. (1) The handshake timeout was per read, so a client dribbling bytes without a newline held the 16 unauthenticated slots forever (remote DoS of the listener): `FramedConnection::readLine` now bounds the whole line (regression test TcpAuth.DribblingBytesDoesNotExtendTheHandshake; the reviewer's reproduction now drops all 16 at 5 s). (2) `applySocketOwner` used `chown` by path in a directory the target user owns (symlink swap → root chowns an arbitrary file): it now `lstat`s, requires a socket owned by the agent and uses `lchown`. Held under attack: no data or events before auth, connection caps, rate limit, fetch confined to produced files (`..`, absolute, symlinks, NUL, swapped-in symlink all refused), remote `start` output confined to `--remote-out-dir`, remote launch and `inst_hello` refused, token never logged or saved. Measured: fetching 72 MiB grows RSS by 3.0 MiB. Protocol in docs/specs/control-protocol.md. Needs Windows verification: Winsock path beyond CI loopback tests; token file permissions are not checked on Windows. Not exercised anywhere: IPv6.
+
 ## Queued follow-ups
 
 - Shared symbol-setup helper: libs/report/analyze.cpp and apps/cli/export_command.cpp duplicate the locator, override, provider and resolve setup.
@@ -266,6 +270,7 @@ Verifier: design and implementation pass; one blocking test bug (range-for over 
 - WP-21b: MERGED (verifier PASS). Cancel or destroy with 4 stalled transfers now takes 18–130 ms (was 16 s); curl idle CPU is 0.15%; pins are balanced. Low follow-ups: catch thread creation failure in the WinHTTP CancelWatcher; pins taken via setLocate(makeDefaultLocate(...)) are never unpinned; the remembered-model overload of resolveAllAsync needs the model to outlive waitAll. Original item: make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.
 - WP-64 (from WP-36b): 64-row band+strip frame on `large` is 5.3–6.6 ms on the dev VM (target 4 ms). Remaining hot spots: zooms just under 4× a level width (~3.6 buckets per column), the direct strip at 2048–4095 ticks per pixel (mispredict-bound), and band/strip alternation per row. Options: a fused band+strip per-row API (viewer call-site change) or an extra intermediate level (more memory). CI does not build `large`, so the large frame is only measured locally.
 - `SymbolService::resolveAllAsync` should take `const TraceModel&` (the viewer const_casts today).
+- WP-61: the channel is unencrypted (no TLS dependency approved): trusted network or `ssh -L`. Rate limit keys on peer IP (a NAT shares a bucket; a port scan from the same IP locks it out for 60 s). Token file: `stat` then open by path, and ownership is not checked (only the mode). Remote output: `exists()` follows a dangling symlink planted in `--remote-out-dir` by a local user (open with O_NOFOLLOW|O_EXCL). Fetch: check-then-open window against local writers in the output dir; `sha256:true` rehashes the whole file per request. `connectTcp` shares one deadline across resolved addresses. `capture --fetch` fetches only the final trace (the viewer also fetches flushes). A root agent outside pkexec/sudo needs `--socket-owner`. Symbols for a remote trace do not resolve via `.gnu_debuglink` names (image not local). `lstat`+`lchown` still has a hardlink window where `fs.protected_hardlinks=0`.
 
 ## Windows / privileged verification queue
 
