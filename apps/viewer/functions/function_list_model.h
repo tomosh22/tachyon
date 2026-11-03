@@ -10,7 +10,8 @@
 //
 // Percentages. Inclusive % and exclusive % are relative to the total weight of the selected samples, which is
 // the sum of all exclusive ticks (every sample has exactly one leaf function, so exclusive ticks partition
-// the total; samples of an empty stack are not in any function row and therefore not in the total either).
+// the total). Samples of an empty stack are the row kRootKey, shown as "<no stack>" (WP-33b), so the total
+// equals the Call Graph root and a function's % here equals its % of root there.
 //
 // Module grouping. A group holds the rows of one module (by module name) that pass the text filter. Its
 // exclusive sum is exact (exclusive time is attributed to exactly one function). Its inclusive figure is the
@@ -52,7 +53,9 @@ struct QuerySpec {
 };
 
 // Thread-safe: pure function. Bus filter -> analysis::Filter. With `restrictToSubtree` the bus filter's
-// subtreeRoot (set by the Call Graph) is kept, otherwise it is cleared. Time range and threads always follow
+// subtree restriction (subtreePath, set by the Call Graph, and subtreeRoot) is kept, otherwise it is cleared.
+// The path only matches under the frame options it was taken with (ViewFilter::subtreeOptions): the panels
+// apply them with common::applySubtreeOptions. Time range and threads always follow
 // the bus. ViewFilter::function is not mapped (see common::toQueryFilter).
 analysis::Filter makeFilter(const std::optional<ViewFilter>& busFilter, bool restrictToSubtree);
 

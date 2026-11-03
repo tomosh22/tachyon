@@ -33,9 +33,9 @@ inline int64_t signedNanos(uint64_t ts, uint64_t origin, uint64_t hz) {
 // and that the thread states are built.
 inline Result<std::vector<ThreadIdx>> selectThreads(const model::TraceModel& m,
                                                     const analysis::Filter& filter) {
-  if (filter.subtreeRoot || filter.function)
+  if (filter.subtreeRoot || filter.subtreePath || filter.function)
     return makeError(ErrorCode::Unsupported,
-                     "the exporters do not support Filter::subtreeRoot / Filter::function");
+                     "the exporters do not support Filter::subtreeRoot / subtreePath / function");
   if (m.header.clock_frequency_hz == 0)
     return makeError(ErrorCode::InvalidArgument, "trace clock frequency is 0");
   if (m.statesByThread.size() != m.threads.size() || m.samplesByThread.size() != m.threads.size())

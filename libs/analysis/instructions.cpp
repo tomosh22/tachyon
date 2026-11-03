@@ -38,7 +38,9 @@ Result<std::shared_ptr<const std::vector<InstructionAgg>>> instructionsForFuncti
           if (stackPass.aborted()) return cancelledError();
           meter.add(stackPass.lastCost());
           if (!kept) continue;
-          const std::optional<FunctionHit> hit = matcher.match(nw.node, nw.kernelLeaf);
+          const std::optional<FunctionHit> hit =
+              stackPass.hasPath() ? matcher.matchWithin(nw.node, nw.kernelLeaf, stackPass.cutNode())
+                                  : matcher.match(nw.node, nw.kernelLeaf);
           if (!hit) continue;
           byRva[matcher.addressOf(*hit)] += nw.ticks;
         }

@@ -357,6 +357,7 @@ TEST(StatsWidget, FunctionStatisticsEqualFunctionStatsAndFollowTheTimeFilter) {
   vf.t0 = t0;
   vf.t1 = mid;
   vf.subtreeRoot = CallstackIdx(1);
+  vf.subtreePath = std::vector<FunctionKey>{key};  // WP-33b: ignored like the subtree root
   h.bus().setTimeFilter(vf);
   h.settle();
   analysis::Filter f;

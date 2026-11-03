@@ -1,12 +1,12 @@
 // WP-43: the Call Graph panel driven headless (Null renderer, real ImGui frames, injected input) on the tiny
 // and medium fixtures: results arrive, selection <-> bus, context menu actions, filter changes, symbol
-// generation changes, option toggles, the subtree resolver and a 100 000 deep tree.
+// generation changes, option toggles, subtree paths and a 100 000 deep tree.
+#include "analysis/attribution.h"
 #include "analysis/query.h"
 #include "analysis/query_executor.h"
 #include "viewer/analysis_context.h"
 #include "viewer/app.h"
 #include "viewer/callgraph/callgraph_panel.h"
-#include "viewer/callgraph/subtree_resolver.h"
 
 #include <gtest/gtest.h>
 #include <imgui.h>
@@ -14,6 +14,7 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <thread>
 
 using namespace tachyon;
@@ -323,27 +324,34 @@ TEST(CallGraphWidget, FilterToSubtreeRequeriesAndClears) {
 
   ASSERT_TRUE(h.panel->filterToSubtree(ctx, *h.panel->targetOfRow(row)));
   ASSERT_TRUE(h.bus().state().timeFilter);
-  ASSERT_TRUE(h.bus().state().timeFilter->subtreeRoot);
-  EXPECT_TRUE(h.bus().state().timeFilter->subtreeRoot->valid());
-  // The new tree is rooted at the function and carries exactly that subtree's samples.
+  EXPECT_FALSE(h.bus().state().timeFilter->subtreeRoot);  // WP-33b: a key path, not one callstack node
+  ASSERT_TRUE(h.bus().state().timeFilter->subtreePath);
+  EXPECT_EQ(*h.bus().state().timeFilter->subtreePath, h.panel->targetOfRow(row)->path);
+  ASSERT_TRUE(h.bus().state().timeFilter->subtreeOptions);
+  EXPECT_EQ(h.bus().state().timeFilter->subtreeLabel, "game.exe!Engine::update");
+  // The new tree is rooted at the function and carries exactly the inclusive time and samples the node had in
+  // the unfiltered tree, although Engine::update is reached through several callstack nodes (call sites).
   h.settle();
   EXPECT_GT(h.panel->issuedQueries(), queries);
   const NodeAgg& root = *h.panel->tree();
   EXPECT_EQ(h.panel->nameOf(root.key).function, "Engine::update");
-  // One callstack node stands for the tree node (nodes merge by function; here Engine::update is reached
-  // through two different call sites), so the filtered tree is part of it.
   EXPECT_GT(root.inclusiveTicks, 0u);
-  EXPECT_LE(root.inclusiveTicks, updateTicks);
-  EXPECT_LE(root.sampleCount, updateSamples);
+  EXPECT_EQ(root.inclusiveTicks, updateTicks);
+  EXPECT_EQ(root.sampleCount, updateSamples);
 
-  // Filtering again from inside the subtree builds on the current root.
+  // Filtering again from inside the subtree extends the path.
   const size_t physics = h.rowNamed("Engine::physics");
   if (physics != SIZE_MAX) {
-    const auto before = h.bus().state().timeFilter->subtreeRoot;
+    const NodeAgg* physicsNode = h.panel->rows()[physics].node;
+    const uint64_t physicsTicks = physicsNode->inclusiveTicks;
+    const auto before = *h.bus().state().timeFilter->subtreePath;
     ASSERT_TRUE(h.panel->filterToSubtree(ctx, *h.panel->targetOfRow(physics)));
-    EXPECT_NE(h.bus().state().timeFilter->subtreeRoot, before);
+    const auto after = *h.bus().state().timeFilter->subtreePath;
+    EXPECT_GT(after.size(), before.size());
+    EXPECT_TRUE(std::equal(before.begin(), before.end(), after.begin()));
     h.settle();
     EXPECT_EQ(h.panel->nameOf(h.panel->tree()->key).function, "Engine::physics");
+    EXPECT_EQ(h.panel->tree()->inclusiveTicks, physicsTicks);
   }
 
   h.panel->clearSubtreeFilter(ctx);
@@ -369,12 +377,14 @@ TEST(CallGraphWidget, FilterToSubtreeKeepsTheTimeRangeOfTheBusFilter) {
   const ViewFilter f = *h.bus().state().timeFilter;
   EXPECT_EQ(f.t0, range.t0);
   EXPECT_EQ(f.t1, range.t1);
-  ASSERT_TRUE(f.subtreeRoot);
+  ASSERT_TRUE(f.subtreePath);
   h.settle();
   // Clearing the subtree keeps the range filter.
   h.panel->clearSubtreeFilter(ctx);
   ASSERT_TRUE(h.bus().state().timeFilter);
   EXPECT_FALSE(h.bus().state().timeFilter->subtreeRoot);
+  EXPECT_FALSE(h.bus().state().timeFilter->subtreePath);
+  EXPECT_FALSE(h.bus().state().timeFilter->subtreeOptions);
   EXPECT_EQ(h.bus().state().timeFilter->t1, range.t1);
 }
 
@@ -624,7 +634,7 @@ TEST(CallGraphWidget, AHundredThousandDeepTreeIsDrawnWithoutRecursion) {
   h.panel->injectTree(nullptr, nullptr, 1e7);  // destroys the deep tree
 }
 
-// ---- the subtree resolver ---------------------------------------------------------------------------------
+// ---- subtree paths (WP-33b) -------------------------------------------------------------------------------
 
 namespace {
 
@@ -648,9 +658,26 @@ std::vector<PathNode> collect(const NodeAgg& root, size_t limit) {
   return all;
 }
 
+// Every collected node of the unfiltered tree comes back whole from the path filter.
+void expectPathsKeepTheWholeNode(const analysis::QueryContext& qc, const NodeAgg& tree, size_t limit,
+                                 const std::string& what) {
+  for (const PathNode& n : collect(tree, limit)) {
+    if (n.path.empty()) continue;
+    analysis::Filter f;
+    f.subtreePath = n.path;
+    const auto sub = analysis::topDownTree(qc, f);
+    ASSERT_TRUE(sub.ok()) << what;
+    EXPECT_EQ(sub->key, n.node->key) << what;
+    EXPECT_EQ(sub->inclusiveTicks, n.node->inclusiveTicks) << what << " depth " << n.path.size();
+    EXPECT_EQ(sub->exclusiveTicks, n.node->exclusiveTicks) << what;
+    EXPECT_EQ(sub->sampleCount, n.node->sampleCount) << what;
+    EXPECT_EQ(sub->children.size(), n.node->children.size()) << what;
+  }
+}
+
 }  // namespace
 
-TEST(CallGraphWidget, EveryNodeOfTinyResolvesToACallstackNodeOfTheSameFunction) {
+TEST(CallGraphWidget, EveryNodeOfTinyIsKeptWholeByItsPathInAllModes) {
   Harness h;
   h.open("tiny.tachyon");
   const AnalysisContext& analysis = h.app.document()->analysis();
@@ -664,26 +691,13 @@ TEST(CallGraphWidget, EveryNodeOfTinyResolvesToACallstackNodeOfTheSameFunction) 
       ASSERT_TRUE(snapshot);
       const auto tree = analysis::topDownTreeShared(snapshot->context(), analysis::Filter{});
       ASSERT_TRUE(tree.ok());
-      const auto children = analysis.childIndex();
-      for (const PathNode& n : collect(**tree, 1000)) {
-        if (n.path.empty()) continue;
-        const auto at = callgraph::resolveNodePath(snapshot->context(), *children, CallstackIdx(), n.path);
-        ASSERT_TRUE(at) << "inline=" << inl << " kernel=" << static_cast<int>(kernel)
-                        << " depth=" << n.path.size();
-        analysis::Filter f;
-        f.subtreeRoot = *at;
-        const auto sub = analysis::topDownTree(snapshot->context(), f);
-        ASSERT_TRUE(sub.ok());
-        EXPECT_EQ(sub->key, n.node->key);
-        EXPECT_LE(sub->inclusiveTicks,
-                  n.node->inclusiveTicks);  // one callstack node of possibly several merged
-        EXPECT_GT(sub->sampleCount, 0u);
-      }
+      expectPathsKeepTheWholeNode(snapshot->context(), **tree, 1000,
+                                  "inline=" + std::to_string(inl) + " kernel=" + std::to_string(int(kernel)));
     }
   }
 }
 
-TEST(CallGraphWidget, NodesOfMediumResolveToASubtreeThatIsPartOfTheNode) {
+TEST(CallGraphWidget, NodesOfMediumAreKeptWholeByTheirPath) {
   Harness h;
   h.open("medium.tachyon");
   const AnalysisContext& analysis = h.app.document()->analysis();
@@ -692,24 +706,98 @@ TEST(CallGraphWidget, NodesOfMediumResolveToASubtreeThatIsPartOfTheNode) {
   ASSERT_TRUE(snapshot);
   const auto tree = analysis::topDownTreeShared(snapshot->context(), analysis::Filter{});
   ASSERT_TRUE(tree.ok());
-  const auto children = analysis.childIndex();
-  size_t checked = 0;
-  for (const PathNode& n : collect(**tree, 400)) {
-    if (n.path.empty()) continue;
-    const auto at = callgraph::resolveNodePath(snapshot->context(), *children, CallstackIdx(), n.path);
-    ASSERT_TRUE(at) << "depth " << n.path.size();
-    analysis::Filter f;
-    f.subtreeRoot = *at;
-    const auto sub = analysis::topDownTree(snapshot->context(), f);
-    ASSERT_TRUE(sub.ok());
-    EXPECT_EQ(sub->key, n.node->key);
-    EXPECT_LE(sub->inclusiveTicks, n.node->inclusiveTicks);  // one model node of possibly several merged ones
-    EXPECT_GT(sub->sampleCount, 0u);
-    ++checked;
+  expectPathsKeepTheWholeNode(snapshot->context(), **tree, 400, "medium");
+}
+
+// Problem 1 end to end: "Filter to subtree" on a function path that several callstack nodes lead to
+// (different call sites) shows the selected node with exactly the inclusive ticks it had in the unfiltered
+// tree.
+TEST(CallGraphWidget, FilterToSubtreeKeepsAFunctionReachedViaSeveralCallstackNodes) {
+  Harness h;
+  h.open("medium.tachyon");
+  const model::TraceModel& m = h.model();
+  const auto snapshot = h.app.document()->analysis().snapshot(
+      analysis::AggregationOptions{}, h.app.symbolGeneration(), &h.app.queryExecutor());
+  ASSERT_TRUE(snapshot);
+  const analysis::QueryContext& qc = snapshot->context();
+
+  // The flattened key path of every callstack node up to depth 6, and how many nodes lead to each path.
+  std::map<std::vector<FunctionKey>, size_t> nodesOfPath;
+  std::vector<uint32_t> depth(m.nodes.size(), 0);
+  for (uint32_t id = 1; id < m.nodes.size(); ++id) {
+    depth[id] = depth[m.nodes[id].parent.get()] + 1;
+    if (depth[id] > 6) continue;
+    std::vector<FunctionKey> keys;
+    for (size_t p = depth[id]; p-- > 0;) keys.push_back(analysis::frameKeyAt(qc, CallstackIdx(id), p, false));
+    ++nodesOfPath[keys];
   }
-  EXPECT_GT(checked, 20u);
-  // A path that does not exist.
-  std::vector<FunctionKey> bogus{FunctionKey{ModuleIdx(0), 0xdeadbeef}};
-  EXPECT_FALSE(callgraph::resolveNodePath(snapshot->context(), *children, CallstackIdx(), bogus));
-  EXPECT_EQ(callgraph::resolveNodePath(snapshot->context(), *children, CallstackIdx(5), {}), CallstackIdx(5));
+  const auto tree = analysis::topDownTreeShared(qc, analysis::Filter{});
+  ASSERT_TRUE(tree.ok());
+  std::vector<FunctionKey> pickPath;
+  const NodeAgg* pick = nullptr;
+  for (const PathNode& n : collect(**tree, 4000)) {
+    if (n.path.size() < 2 || n.path.size() > 6) continue;
+    const auto it = nodesOfPath.find(n.path);
+    if (it == nodesOfPath.end() || it->second < 2) continue;
+    // A node that one callstack node cannot represent: the old subtreeRoot filter loses time here.
+    if (!pick || n.node->inclusiveTicks > pick->inclusiveTicks) {
+      pick = n.node;
+      pickPath = n.path;
+    }
+  }
+  ASSERT_NE(pick, nullptr) << "the fixture needs a function path reached via at least two callstack nodes";
+
+  h.panel->setInlineExpansion(false);
+  h.panel->setKernelFrames(analysis::KernelFrames::Show);
+  h.settle();
+  const auto shown = cg::findByPath(*h.panel->tree(), pickPath);
+  ASSERT_TRUE(shown);
+  const uint64_t ticks = shown->node->inclusiveTicks;
+  const uint32_t samples = shown->node->sampleCount;
+  EXPECT_EQ(ticks, pick->inclusiveTicks);
+
+  const PanelContext ctx = h.context();
+  CallGraphPanel::ActionTarget target;
+  target.path = pickPath;
+  target.key = pickPath.back();
+  target.fullName = h.panel->nameOf(target.key).full;
+  target.isRoot = false;
+  ASSERT_TRUE(h.panel->filterToSubtree(ctx, target));
+  h.settle();
+  EXPECT_EQ(h.panel->tree()->key, pickPath.back());
+  EXPECT_EQ(h.panel->tree()->inclusiveTicks, ticks);
+  EXPECT_EQ(h.panel->tree()->sampleCount, samples);
+}
+
+TEST(CallGraphWidget, TogglingFrameOptionsDropsASubtreePathTakenUnderOtherOptions) {
+  Harness h;
+  h.open("tiny.tachyon");
+  const PanelContext ctx = h.context();
+  const size_t row = h.rowNamed("Engine::update");
+  ASSERT_NE(row, SIZE_MAX);
+  ASSERT_TRUE(h.panel->filterToSubtree(ctx, *h.panel->targetOfRow(row)));
+  h.settle();
+  ASSERT_TRUE(h.bus().state().timeFilter);
+  h.panel->setInlineExpansion(true);
+  h.frames(2);
+  EXPECT_FALSE(h.bus().state().timeFilter);  // the path is gone (whole range, nothing else restricted)
+  EXPECT_NE(h.panel->message().find("Subtree filter cleared"), std::string::npos);
+}
+
+TEST(CallGraphWidget, SelectedRowBeyondTheRowCapIsReported) {
+  Harness h;
+  h.open("tiny.tachyon");
+  const auto snapshot = h.app.document()->analysis().snapshot(
+      analysis::AggregationOptions{}, h.app.symbolGeneration(), &h.app.queryExecutor());
+  ASSERT_TRUE(snapshot);
+  constexpr size_t kDepth = cg::kMaxVisibleRows + 50;
+  h.panel->injectTree(std::make_shared<const NodeAgg>(deepChain(kDepth)), snapshot, 1e7);
+  EXPECT_TRUE(h.panel->rowCapReached());
+  EXPECT_FALSE(h.panel->selectionBeyondRowCap());
+  h.bus().setSelectedFunction(FunctionKey{ModuleIdx(0), kDepth});  // below the cap
+  h.frames(3);
+  EXPECT_TRUE(h.panel->selectedId());
+  EXPECT_TRUE(h.panel->selectionBeyondRowCap());  // the pie area shows a message instead of nothing
+  h.panel->injectTree(nullptr, nullptr, 1e7);
+  EXPECT_FALSE(h.panel->selectionBeyondRowCap());
 }

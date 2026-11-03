@@ -7,7 +7,7 @@ tachyon_add_test(viewer_tests
           timeline_math_test.cpp timeline_rows_test.cpp timeline_colors_test.cpp timeline_widget_test.cpp
           timeline_data_test.cpp interaction_model_test.cpp interaction_arrow_test.cpp
           interaction_runner_test.cpp interaction_widget_test.cpp
-          callgraph_model_test.cpp callgraph_widget_test.cpp
+          callgraph_model_test.cpp callgraph_widget_test.cpp functions_nostack_test.cpp
           functions_model_test.cpp functions_widget_test.cpp
           stats_fuzzy_test.cpp stats_model_test.cpp stats_widget_test.cpp
           status_banner_test.cpp status_bar_test.cpp status_symbols_test.cpp status_toast_test.cpp

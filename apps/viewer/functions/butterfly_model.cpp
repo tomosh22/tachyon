@@ -38,6 +38,7 @@ ButterflyView buildButterflyView(const analysis::Butterfly& butterfly, const Nam
   ButterflyView v;
   const uint64_t base = butterfly.self.inclusiveTicks;
   v.self = makeLine(butterfly.self, base, namer);
+  if (butterfly.self.key == analysis::kRootKey) v.self.name.function = v.self.name.full = "<no stack>";
   v.callers = makeLines(butterfly.callers, base, namer);
   v.callees = makeLines(butterfly.callees, base, namer);
   return v;

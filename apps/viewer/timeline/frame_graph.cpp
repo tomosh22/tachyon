@@ -281,7 +281,7 @@ void FrameGraphView::jumpToSlowest(const PanelContext& context) {
       doc.analysis().snapshot(options, context.symbolGeneration, context.queryExecutor);
   if (!snapshot) return;
   analysis::Filter filter = common::toQueryFilter(context.selection->state().timeFilter);
-  filter.subtreeRoot.reset();  // the Call Graph's subtree does not choose which frame is the slowest
+  common::clearSubtree(filter);  // the Call Graph's subtree does not choose which frame is the slowest
   analysis::FrameOptions fo;
   fo.series = m_data->series[m_data->selected];
   fo.topFunctions = 0;

@@ -3,6 +3,7 @@
 #include "disasm/disassembler.h"
 #include "symbols/symbol_service.h"
 #include "viewer/common/function_names.h"
+#include "viewer/common/query_filter.h"
 #include "viewer/paths.h"
 
 #include <algorithm>
@@ -466,7 +467,7 @@ Result<std::shared_ptr<const SourceView>> buildSourceView(const analysis::QueryC
   const model::Module& module = model.modules[key.module.get()];
 
   analysis::Filter filter = in.filter;
-  filter.subtreeRoot.reset();
+  common::clearSubtree(filter);
   filter.function.reset();
 
   symbols::ISymbolProvider* prov = svc.provider(key.module);

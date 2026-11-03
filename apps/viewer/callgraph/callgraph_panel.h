@@ -3,7 +3,7 @@
 // children, expand hot path / expand all / collapse all, and a context menu (filter to subtree, show in
 // Function List, show source, copy name).
 //
-// Data flow. The panel follows the SelectionBus time filter (time range, threads, subtree root). Whenever the
+// Data flow. The panel follows the SelectionBus time filter (time range, threads, subtree path). Whenever the
 // effective query (filter, inline / kernel options, document and symbol generation) changes it asks
 // Document::analysis() for the matching QueryContext and submits topDownTreeShared() to the app's
 // QueryExecutor (Foreground). Each request supersedes the previous one (callgraph::LatestQuery: cancel plus
@@ -84,10 +84,12 @@ class CallGraphPanel final : public IPanel {
   void selectRow(const PanelContext& context, size_t row);
   // The target of a row (path, key, full name); nullopt for an invalid row.
   std::optional<ActionTarget> targetOfRow(size_t row) const;
-  // Sets the bus filter's subtree root to the callstack node behind `target`. False (with message()) when it
-  // cannot be resolved or the target is the root.
+  // Sets the bus filter's subtree path to the keys leading from the top-down root to `target` (appended to
+  // the path of the subtree filter already in force), together with the frame options of the shown tree. A
+  // function reached through several callstack nodes keeps all of its time. False when the target is the
+  // root.
   bool filterToSubtree(const PanelContext& context, const ActionTarget& target);
-  // Removes the subtree restriction from the bus filter.
+  // Removes the subtree restriction (root node and path) from the bus filter.
   void clearSubtreeFilter(const PanelContext& context);
   // Select the function on the bus and ask for the "Function List" panel.
   void showInFunctionList(const PanelContext& context, const ActionTarget& target);
@@ -116,6 +118,9 @@ class CallGraphPanel final : public IPanel {
   analysis::KernelFrames kernelFrames() const { return m_kernel; }
   const std::string& message() const { return m_message; }
   bool rowCapReached() const { return m_truncated; }
+  // True when the selected node exists in the tree but its row lies beyond the row cap (the pie shows a
+  // message).
+  bool selectionBeyondRowCap() const { return m_selectionBeyondCap; }
   // Number of panel focus requests (PanelRequest for this panel).
   uint64_t focusRequests() const { return m_focusRequests; }
   // Name parts of a key as the table shows them.
@@ -148,6 +153,7 @@ class CallGraphPanel final : public IPanel {
   void rebuildRows();
   void rebuildPie();
   void resolveExternalSelection();
+  void dropStaleSubtreePath(const PanelContext& context);
   void resetDocumentState();
   void selectLocated(const callgraph::Located& at);
 
@@ -191,8 +197,7 @@ class CallGraphPanel final : public IPanel {
 
   std::optional<ActionTarget> m_menuTarget;
   bool m_openMenu = false;
-  std::string m_subtreeLabel;
-  CallstackIdx m_subtreeLabelNode;
+  bool m_selectionBeyondCap = false;
 
   std::vector<DrawnRow> m_drawnRows;
   bool m_focusPending = false;

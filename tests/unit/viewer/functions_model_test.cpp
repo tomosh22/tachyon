@@ -275,6 +275,8 @@ TEST(FunctionsFilter, SubtreeToggleMapsTheBusFilter) {
   bus.t1 = 900;
   bus.threads = std::vector<ThreadIdx>{ThreadIdx(2), ThreadIdx(5)};
   bus.subtreeRoot = CallstackIdx(77);
+  bus.subtreePath = std::vector<FunctionKey>{key(0, 0x10), key(0, 0x20)};
+  bus.subtreeOptions = SubtreeFrameOptions{true, analysis::KernelFrames::Group, false, false};
 
   analysis::Filter on = fl::makeFilter(bus, true);
   EXPECT_EQ(on.t0, 100u);
@@ -283,6 +285,8 @@ TEST(FunctionsFilter, SubtreeToggleMapsTheBusFilter) {
   EXPECT_EQ(on.threads->size(), 2u);
   ASSERT_TRUE(on.subtreeRoot);
   EXPECT_EQ(on.subtreeRoot->get(), 77u);
+  ASSERT_TRUE(on.subtreePath);
+  EXPECT_EQ(on.subtreePath->size(), 2u);
   EXPECT_FALSE(on.function);
 
   analysis::Filter off = fl::makeFilter(bus, false);
@@ -290,6 +294,7 @@ TEST(FunctionsFilter, SubtreeToggleMapsTheBusFilter) {
   EXPECT_EQ(off.t1, 900u);
   EXPECT_EQ(off.threads, on.threads);
   EXPECT_FALSE(off.subtreeRoot);  // cleared: the whole call graph
+  EXPECT_FALSE(off.subtreePath);
   EXPECT_NE(on, off);
 
   // No bus filter: the whole trace either way.
@@ -297,6 +302,7 @@ TEST(FunctionsFilter, SubtreeToggleMapsTheBusFilter) {
   EXPECT_EQ(fl::makeFilter(std::nullopt, false), analysis::Filter{});
   // A bus filter without a subtree maps the same with both toggle positions.
   bus.subtreeRoot.reset();
+  bus.subtreePath.reset();
   EXPECT_EQ(fl::makeFilter(bus, true), fl::makeFilter(bus, false));
 }
 

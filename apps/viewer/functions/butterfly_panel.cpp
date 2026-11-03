@@ -69,8 +69,12 @@ ButterflyPanel::QuerySpec ButterflyPanel::currentSpec(const PanelContext& contex
   if (spec.key && *spec.key == analysis::kRootKey) spec.key.reset();
   spec.base.filter = fl::makeFilter(state.timeFilter, m_restrictSubtree);
   const common::EffectiveScopeOptions scope = common::effectiveScopeOptions(context);
+  bool inlineFrames = m_inline, blend = scope.blendScopes, fiber = scope.groupByFiber;
+  analysis::KernelFrames kernel = m_kernel;
+  // A subtree path only matches under the frame options it was taken with (WP-33b).
+  if (m_restrictSubtree) common::applySubtreeOptions(state.timeFilter, inlineFrames, kernel, blend, fiber);
   const analysis::AggregationOptions options =
-      fl::effectiveOptions(m_inline, m_kernel, spec.key, scope.blendScopes, scope.groupByFiber);
+      fl::effectiveOptions(inlineFrames, kernel, spec.key, blend, fiber);
   spec.base.expandInline = options.expandInline;
   spec.base.kernelFrames = options.kernelFrames;
   spec.base.blendScopes = options.blendScopes;

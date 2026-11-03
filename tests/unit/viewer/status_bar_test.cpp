@@ -35,6 +35,20 @@ TEST(StatusBarFormat, FilterSummary) {
   m.threads.push_back(t);
   s.selectedThread = ThreadIdx(0);
   EXPECT_EQ(describeFilter(s, m), "time 0.250-1.500 s, 2 threads, thread render");
+
+  // WP-33b: a subtree path shows its label, or its length without one; the legacy root node keeps its text.
+  s.selectedThread = ThreadIdx();
+  f.subtreePath = std::vector<symbols::FunctionKey>{symbols::FunctionKey{ModuleIdx(0), 1},
+                                                    symbols::FunctionKey{ModuleIdx(0), 2}};
+  s.timeFilter = f;
+  EXPECT_EQ(describeFilter(s, m), "time 0.250-1.500 s, 2 threads, subtree path of 2 frames");
+  f.subtreeLabel = "game.exe!Engine::update";
+  s.timeFilter = f;
+  EXPECT_EQ(describeFilter(s, m), "time 0.250-1.500 s, 2 threads, subtree game.exe!Engine::update");
+  f.subtreePath.reset();
+  f.subtreeRoot = CallstackIdx(7);
+  s.timeFilter = f;
+  EXPECT_EQ(describeFilter(s, m), "time 0.250-1.500 s, 2 threads, subtree #7");
 }
 
 TEST(StatusBar, SymbolCountsGrowMonotonicallyWhileResolving) {

@@ -71,6 +71,23 @@ class StackFlattener {
   }
   bool blending() const { return m_blend != nullptr; }
 
+  // WP-33b (Filter::subtreePath): with a path, flatten() keeps only stacks whose flattened sequence (after
+  // the subtreeRoot cut, inline/kernel/scope handling) starts with these keys, and removes all but the last
+  // one, so the returned sequence begins at the selected function exactly as with a subtree cut. nullptr
+  // clears. The keys are interned into the flattener's table. Call before the first flatten().
+  void setPath(const std::vector<FunctionKey>* path) {
+    m_path.clear();
+    m_hasPath = path != nullptr && !path->empty();
+    if (m_hasPath)
+      for (const FunctionKey& k : *path) m_path.push_back(m_table.intern(k));
+  }
+  bool hasPath() const { return m_hasPath; }
+  // After a successful flatten() with a path: the callstack node of the physical frame that holds the last
+  // path key (the frame the cut leaves at the top of the stack), 0 for a key that sits on no frame (a scope
+  // above an empty stack, or the kernel fallback key of an emptied stack). Frames of the stack at or below
+  // that node are the ones "inside" the path, like frames at or below a subtreeRoot node.
+  uint32_t pathCutNode() const { return m_cutNode; }
+
   // `scopeStack`: the ScopeStackNode open at the sample (0 = none; ignored without setBlend). The scopes are
   // spliced before the subtree cut is applied to the result: a scope placed above a frame that the cut
   // removes (slot <= the cut depth, with a cut at depth > 0) is dropped; others keep their place.
@@ -78,6 +95,8 @@ class StackFlattener {
                uint32_t required = kUnset, uint32_t scopeStack = 0) {
     out.clear();
     m_chain.clear();
+    m_outChain.clear();
+    m_cutNode = 0;
     const size_t limit = m_model.nodes.size();
     size_t n = node.valid() ? node.get() : 0;
     while (n != 0 && n < limit && m_chain.size() <= limit) {
@@ -126,10 +145,21 @@ class StackFlattener {
       if (dFirst > 0)
         while (sp < m_slots.size() && m_slots[sp] <= dFirst) ++sp;  // above frames the subtree cut removed
     }
+    // Chain index of the physical frame each emitted key belongs to (scopes: the frame they sit above); only
+    // tracked for a path filter.
+    size_t lastCi = first > 0 ? first - 1 : kNoChain;
+    bool pathMismatch = false;  // the sequence already differs from the path: the stack is rejected early
     auto emitScopes = [&](size_t slot) {
-      while (sp < m_slots.size() && m_slots[sp] == slot) out.push_back(scopeKeyId(m_open[sp++]));
+      while (sp < m_slots.size() && m_slots[sp] == slot) {
+        out.push_back(scopeKeyId(m_open[sp++]));
+        if (m_hasPath) {
+          m_outChain.push_back(lastCi);
+          if (!pathPrefixHolds(out)) pathMismatch = true;
+        }
+      }
     };
     emitScopes(0);
+    if (pathMismatch) return false;
     for (size_t i = first; i-- > 0;) {
       // A single very deep stack costs O(depth) with a symbol lookup per new frame: stay cancellable.
       if ((first - i) % 2048 == 0 && m_cancel.requested()) {
@@ -138,14 +168,33 @@ class StackFlattener {
       }
       const Entry& e = entryFor(m_model.nodes[m_chain[i]].frame, i != 0 && i != exactAt);
       const size_t above = total - i;  // slot directly above this frame (depth + 1)
+      lastCi = i;
       for (uint32_t k = 0; k < e.count; ++k) {
         const uint32_t id = m_flat[e.offset + k];
-        if (!(group && id == m_kernelId && !out.empty() && out.back() == m_kernelId)) out.push_back(id);
+        if (!(group && id == m_kernelId && !out.empty() && out.back() == m_kernelId)) {
+          out.push_back(id);
+          if (m_hasPath) {
+            m_outChain.push_back(i);
+            if (!pathPrefixHolds(out)) pathMismatch = true;
+          }
+        }
         if (k == 0) emitScopes(above);  // between the function key and its inline keys
       }
       if (e.count == 0) emitScopes(above);
+      if (pathMismatch) return false;
     }
-    if (out.empty() && m_ctx.options().kernelFrames == KernelFrames::Hide) out.push_back(m_kernelId);
+    if (out.empty() && m_ctx.options().kernelFrames == KernelFrames::Hide) {
+      out.push_back(m_kernelId);
+      if (m_hasPath) m_outChain.push_back(kNoChain);
+    }
+    // Subtree path (Filter::subtreePath): the sequence must start with the path; cut it down to its last key.
+    if (m_hasPath) {
+      if (out.size() < m_path.size() || !std::equal(m_path.begin(), m_path.end(), out.begin())) return false;
+      const size_t drop = m_path.size() - 1;
+      const size_t ci = m_outChain[drop];
+      m_cutNode = ci < m_chain.size() ? m_chain[ci] : 0;
+      out.erase(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(drop));
+    }
     // Function filter (Filter::function): only stacks that contain the function, as seen after the cut.
     if (required != kUnset && std::find(out.begin(), out.end(), required) == out.end()) return false;
     return true;
@@ -156,6 +205,11 @@ class StackFlattener {
     uint32_t offset = kUnset;
     uint32_t count = 0;
   };
+
+  // True unless the last key of `out` lies within the path's length and differs from the path's key there.
+  bool pathPrefixHolds(const std::vector<uint32_t>& out) const {
+    return out.size() > m_path.size() || out.back() == m_path[out.size() - 1];
+  }
 
   bool isKernel(const model::Frame& f) const { return isKernelFrame(m_model, f); }
 
@@ -246,9 +300,15 @@ class StackFlattener {
     return e;
   }
 
+  static constexpr size_t kNoChain = ~size_t{0};
+
   const QueryContext& m_ctx;
   const model::TraceModel& m_model;
   KeyTable& m_table;
+  std::vector<uint32_t> m_path;  // Filter::subtreePath as key ids
+  bool m_hasPath = false;
+  uint32_t m_cutNode = 0;
+  std::vector<size_t> m_outChain;
   Cancel m_cancel;
   bool m_aborted = false;
   std::vector<Entry> m_entries[2];  // [0] exact address, [1] return address (caller variant)
@@ -266,6 +326,7 @@ struct ResolvedFilter {
   std::vector<ThreadIdx> threads;  // sorted, unique
   CallstackIdx subtree;            // invalid = none
   std::optional<FunctionKey> function;
+  std::optional<std::vector<FunctionKey>> path;  // Filter::subtreePath (never empty when set)
   Filter canonical;      // normalised form of the request: equal requests give equal canonical filters
   uint32_t options = 0;  // optionBits() of the context: part of every cache key
 };
@@ -296,6 +357,10 @@ inline Result<ResolvedFilter> resolveFilterBasic(const QueryContext& ctx, const 
       return makeError(ErrorCode::InvalidArgument, "Filter::subtreeRoot is out of range");
     if (f.subtreeRoot->valid() && f.subtreeRoot->get() != 0) r.subtree = *f.subtreeRoot;
   }
+  if (f.subtreePath) {
+    if (f.subtreePath->empty()) return makeError(ErrorCode::InvalidArgument, "Filter::subtreePath is empty");
+    r.path = *f.subtreePath;
+  }
   if (f.function) {
     r.function = ctx.functions().key(*f.function);
     if (!r.function)
@@ -306,6 +371,7 @@ inline Result<ResolvedFilter> resolveFilterBasic(const QueryContext& ctx, const 
   r.canonical.t1 = r.t1;
   if (!allThreads) r.canonical.threads = r.threads;
   if (r.subtree.valid()) r.canonical.subtreeRoot = r.subtree;
+  r.canonical.subtreePath = r.path;
   r.canonical.function = f.function;
   return r;
 }

@@ -429,11 +429,11 @@ TEST(FunctionListWidget, SubtreeToggleFollowsTheCallGraphFilter) {
   ASSERT_TRUE(h.graph->filterToSubtree(ctx, *h.graph->targetOfRow(row)));
   h.settle();
   ASSERT_TRUE(h.bus().state().timeFilter);
-  ASSERT_TRUE(h.bus().state().timeFilter->subtreeRoot);
+  ASSERT_TRUE(h.bus().state().timeFilter->subtreePath);
   const analysis::Filter restricted = fl::makeFilter(h.bus().state().timeFilter, true);
   EXPECT_TRUE(h.list->restrictToSubtree());
   EXPECT_EQ(h.list->shownSpec().filter, restricted);
-  EXPECT_TRUE(h.list->shownSpec().filter.subtreeRoot);
+  EXPECT_TRUE(h.list->shownSpec().filter.subtreePath);
   {
     const auto ref_ctx = h.refContext();
     const auto ref = analysis::bottomUpFunctions(*ref_ctx, restricted);
@@ -447,8 +447,8 @@ TEST(FunctionListWidget, SubtreeToggleFollowsTheCallGraphFilter) {
   h.list->setRestrictToSubtree(false);
   h.settle();
   EXPECT_GT(h.list->issuedQueries(), queries);
-  EXPECT_TRUE(h.bus().state().timeFilter->subtreeRoot);
-  EXPECT_FALSE(h.list->shownSpec().filter.subtreeRoot);
+  EXPECT_TRUE(h.bus().state().timeFilter->subtreePath);
+  EXPECT_FALSE(h.list->shownSpec().filter.subtreePath);
   EXPECT_EQ(h.list->table()->entries.size(), wholeRows);
   {
     const auto ref_ctx = h.refContext();
@@ -459,8 +459,38 @@ TEST(FunctionListWidget, SubtreeToggleFollowsTheCallGraphFilter) {
   // On again: back to the restricted result.
   h.list->setRestrictToSubtree(true);
   h.settle();
-  EXPECT_TRUE(h.list->shownSpec().filter.subtreeRoot);
+  EXPECT_TRUE(h.list->shownSpec().filter.subtreePath);
   EXPECT_LT(h.list->table()->entries.size(), wholeRows);
+}
+
+// WP-33b: a subtree path only matches under the frame options it was taken with, so the list follows them
+// while it is restricted to the subtree, whatever its own toggles say; its total is the Call Graph's root.
+TEST(FunctionListWidget, SubtreePathFollowsTheFrameOptionsOfTheCallGraph) {
+  Harness h;
+  h.open("tiny.tachyon");
+  const PanelContext ctx = h.context();
+  ASSERT_FALSE(h.list->inlineExpansion());
+  h.graph->setInlineExpansion(true);
+  h.settle();
+  size_t row = SIZE_MAX;
+  for (size_t i = 0; i < h.graph->rows().size(); ++i)
+    if (h.graph->nameOf(h.graph->rows()[i].node->key).function == "Engine::update") row = i;
+  ASSERT_NE(row, SIZE_MAX);
+  const uint64_t updateTicks = h.graph->rows()[row].node->inclusiveTicks;
+  ASSERT_TRUE(h.graph->filterToSubtree(ctx, *h.graph->targetOfRow(row)));
+  h.settle();
+  ASSERT_TRUE(h.bus().state().timeFilter->subtreePath);
+  EXPECT_TRUE(h.list->shownSpec().expandInline);  // forced by the path, although the list's toggle is off
+  EXPECT_FALSE(h.list->inlineExpansion());
+  ASSERT_TRUE(h.list->table());
+  EXPECT_FALSE(h.list->table()->entries.empty());
+  EXPECT_EQ(h.list->table()->totalTicks, updateTicks);
+  EXPECT_EQ(h.list->table()->totalTicks, h.graph->tree()->inclusiveTicks);
+  // Without the restriction the list uses its own options again.
+  h.list->setRestrictToSubtree(false);
+  h.settle();
+  EXPECT_FALSE(h.list->shownSpec().expandInline);
+  EXPECT_FALSE(h.list->shownSpec().filter.subtreePath);
 }
 
 TEST(FunctionListWidget, OnlyTheNewestOfQuicklySucceedingFiltersIsShown) {

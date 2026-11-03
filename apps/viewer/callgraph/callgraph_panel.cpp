@@ -1,9 +1,9 @@
 #include "viewer/callgraph/callgraph_panel.h"
 
 #include "viewer/builtin_panels.h"
-#include "viewer/callgraph/subtree_resolver.h"
 #include "viewer/common/function_names.h"
 #include "viewer/common/imgui_util.h"
+#include "viewer/common/query_filter.h"
 #include "viewer/common/scope_view_options.h"
 #include "viewer/document.h"
 
@@ -31,7 +31,8 @@ bool isPseudoKey(const FunctionKey& k) {
   return k == analysis::kRootKey || k == analysis::kKernelKey;
 }
 
-ImU32 sliceColor(size_t i, bool other) {
+ImU32 sliceColor(size_t i, bool other, bool self = false) {
+  if (self) return IM_COL32(230, 200, 90, 255);
   if (other) return IM_COL32(128, 128, 128, 255);
   return ImColor::HSV(static_cast<float>(i % 10) / 10.0f, 0.55f, 0.85f);
 }
@@ -69,8 +70,7 @@ void CallGraphPanel::resetDocumentState() {
   m_firstTree = true;
   m_truncated = false;
   m_message.clear();
-  m_subtreeLabel.clear();
-  m_subtreeLabelNode = CallstackIdx();
+  m_selectionBeyondCap = false;
   m_drawnRows.clear();
   m_haveDocument = false;
 }
@@ -100,6 +100,21 @@ void CallGraphPanel::onSelectionChanged(const PanelContext& context, const Selec
   if (field == SelectionField::TimeFilter || field == SelectionField::All ||
       field == SelectionField::ViewOptions)
     context.requestRedraw();
+}
+
+void CallGraphPanel::dropStaleSubtreePath(const PanelContext& context) {
+  if (!context.selection) return;
+  const std::optional<ViewFilter>& tf = context.selection->state().timeFilter;
+  if (!tf || !tf->subtreePath || !tf->subtreeOptions) return;
+  // A path's keys depend on the frame options (inline keys, kernel grouping, scope keys). If this panel's
+  // options moved away from the ones the path was taken under, it would match nothing: drop it.
+  const common::EffectiveScopeOptions scope = common::effectiveScopeOptions(context);
+  const SubtreeFrameOptions& o = *tf->subtreeOptions;
+  if (o.expandInline == m_inline && o.kernelFrames == m_kernel && o.blendScopes == scope.blendScopes &&
+      o.groupByFiber == scope.groupByFiber)
+    return;
+  clearSubtreeFilter(context);
+  m_message = "Subtree filter cleared: the frame options changed.";
 }
 
 CallGraphPanel::QuerySpec CallGraphPanel::currentSpec(const PanelContext& context) const {
@@ -158,10 +173,12 @@ void CallGraphPanel::update(const PanelContext& context) {
     m_documentGeneration = context.documentGeneration;
   }
   if (!context.queryExecutor || !context.selection) return;
+  dropStaleSubtreePath(context);
 
   if (auto result = m_query.poll()) {
     if (result->ok()) {
       const bool reset = m_firstTree || m_shown.filter.subtreeRoot != m_requested.filter.subtreeRoot ||
+                         m_shown.filter.subtreePath != m_requested.filter.subtreePath ||
                          m_shown.expandInline != m_requested.expandInline ||
                          m_shown.kernelFrames != m_requested.kernelFrames ||
                          m_shown.blendScopes != m_requested.blendScopes ||
@@ -234,12 +251,14 @@ void CallGraphPanel::injectTree(std::shared_ptr<const NodeAgg> tree,
 }
 
 void CallGraphPanel::rebuildRows() {
+  m_selectionBeyondCap = false;
   if (!m_tree) {
     m_rows.clear();
     m_truncated = false;
     return;
   }
   m_truncated = cg::flattenVisible(*m_tree, m_expanded, cg::kMaxVisibleRows, m_rows);
+  m_selectionBeyondCap = m_truncated && m_selectedId && rowOfId(*m_selectedId) == SIZE_MAX;
 }
 
 void CallGraphPanel::rebuildPie() {
@@ -348,6 +367,7 @@ std::optional<CallGraphPanel::ActionTarget> CallGraphPanel::targetOfRow(size_t r
 void CallGraphPanel::selectRow(const PanelContext& context, size_t row) {
   if (row >= m_rows.size()) return;
   m_selectedId = m_rows[row].id;
+  m_selectionBeyondCap = false;
   m_selectedPath = cg::pathOfRow(m_rows, row);
   const FunctionKey key = m_rows[row].node->key;
   const bool root = m_rows[row].parentRow == UINT32_MAX;
@@ -361,16 +381,9 @@ void CallGraphPanel::selectRow(const PanelContext& context, size_t row) {
 }
 
 bool CallGraphPanel::filterToSubtree(const PanelContext& context, const ActionTarget& target) {
-  if (target.isRoot || !context.document || !context.selection || !m_shownSnapshot) return false;
-  const std::optional<ViewFilter> current = context.selection->state().timeFilter;
-  const CallstackIdx start = current && current->subtreeRoot ? *current->subtreeRoot : CallstackIdx();
-  const std::shared_ptr<const NodeChildIndex> children = context.document->analysis().childIndex();
-  const std::optional<CallstackIdx> node =
-      cg::resolveNodePath(m_shownSnapshot->context(), *children, start, target.path);
-  if (!node) {
-    m_message = "Cannot map this call graph node back to a callstack node (symbols changed?).";
+  if (target.isRoot || target.path.empty() || !context.document || !context.selection || !m_tree)
     return false;
-  }
+  const std::optional<ViewFilter> current = context.selection->state().timeFilter;
   ViewFilter filter;
   if (current) {
     filter = *current;
@@ -379,9 +392,21 @@ bool CallGraphPanel::filterToSubtree(const PanelContext& context, const ActionTa
     filter.t0 = m.header.start_ts;
     filter.t1 = std::max(m.header.end_ts, m.header.start_ts) + 1;  // half-open: keeps a sample at end_ts
   }
-  filter.subtreeRoot = *node;
-  m_subtreeLabel = target.fullName;
-  m_subtreeLabelNode = *node;
+  // target.path is relative to the root of the tree on screen. That root is the function the current subtree
+  // filter ends in (its key is the last key of the current path); without a path restriction it is the
+  // synthetic root, which is not part of the path. A tree cut by a legacy subtreeRoot filter starts with that
+  // function: the path then begins with it.
+  std::vector<symbols::FunctionKey> path;
+  if (m_shown.filter.subtreePath) {
+    path = *m_shown.filter.subtreePath;
+  } else if (m_tree->key != analysis::kRootKey) {
+    path.push_back(m_tree->key);
+  }
+  path.insert(path.end(), target.path.begin(), target.path.end());
+  filter.subtreePath = std::move(path);
+  filter.subtreeOptions = SubtreeFrameOptions{m_shown.expandInline, m_shown.kernelFrames, m_shown.blendScopes,
+                                              m_shown.groupByFiber};
+  filter.subtreeLabel = target.fullName;
   m_message.clear();
   context.selection->setTimeFilter(filter);
   return true;
@@ -390,9 +415,9 @@ bool CallGraphPanel::filterToSubtree(const PanelContext& context, const ActionTa
 void CallGraphPanel::clearSubtreeFilter(const PanelContext& context) {
   if (!context.selection || !context.document) return;
   const std::optional<ViewFilter>& current = context.selection->state().timeFilter;
-  if (!current || !current->subtreeRoot) return;
+  if (!common::hasSubtreeRestriction(current)) return;
   ViewFilter filter = *current;
-  filter.subtreeRoot.reset();
+  common::clearSubtree(filter);  // both the root node and the path
   const model::TraceModel& m = context.document->model();
   const bool wholeRange = filter.t0 <= m.header.start_ts && filter.t1 > m.header.end_ts;
   if (wholeRange && !filter.threads && !filter.function) {
@@ -400,8 +425,6 @@ void CallGraphPanel::clearSubtreeFilter(const PanelContext& context) {
   } else {
     context.selection->setTimeFilter(filter);
   }
-  m_subtreeLabel.clear();
-  m_subtreeLabelNode = CallstackIdx();
 }
 
 void CallGraphPanel::showInFunctionList(const PanelContext& context, const ActionTarget& target) {
@@ -513,12 +536,10 @@ void CallGraphPanel::drawToolbar(const PanelContext& context) {
                 m_tree->sampleCount, m_rows.size(), m_truncated ? " (row cap reached)" : "");
   }
   const SelectionState& state = context.selection->state();
-  if (state.timeFilter && state.timeFilter->subtreeRoot) {
+  if (common::hasSubtreeRestriction(state.timeFilter)) {
     ImGui::SameLine();
-    const std::string label = !m_subtreeLabel.empty() && m_subtreeLabelNode == *state.timeFilter->subtreeRoot
-                                  ? m_subtreeLabel
-                                  : "node #" + std::to_string(state.timeFilter->subtreeRoot->get());
-    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "  Subtree: %s", label.c_str());
+    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "  Subtree: %s",
+                       common::subtreeText(*state.timeFilter).c_str());
     ImGui::SameLine();
     if (ImGui::SmallButton("x##clearsubtree")) clearSubtreeFilter(context);
   }
@@ -663,6 +684,14 @@ void CallGraphPanel::drawPie(const PanelContext&) {
     ImGui::EndChild();
     return;
   }
+  if (m_selectionBeyondCap) {
+    ImGui::TextWrapped(
+        "The selected node is below the %zu-row display cap, so its row is not shown. Collapse nodes "
+        "above it (or filter to a subtree) to see it.",
+        cg::kMaxVisibleRows);
+    ImGui::EndChild();
+    return;
+  }
   if (m_pie.empty()) {
     ImGui::TextDisabled("%s", m_tree ? "The selected node has no children with time." : "");
     ImGui::EndChild();
@@ -674,7 +703,7 @@ void CallGraphPanel::drawPie(const PanelContext&) {
   constexpr float kHalfPi = 1.5707963f;
   for (size_t i = 0; i < m_pie.size(); ++i) {
     const cg::PieSlice& s = m_pie[i];
-    const ImU32 col = sliceColor(i, s.node == nullptr);
+    const ImU32 col = sliceColor(i, s.node == nullptr && !s.self, s.self);
     if (s.fraction >= 0.9999) {
       dl->AddCircleFilled(centre, radius, col, 48);
       continue;
@@ -694,15 +723,17 @@ void CallGraphPanel::drawPie(const PanelContext&) {
   // Legend.
   ImGui::SetCursorScreenPos(ImVec2(centre.x + radius + em, origin.y));
   ImGui::BeginGroup();
-  ImGui::Text("Children of %s", m_pieTitle.c_str());
+  ImGui::Text("Time in %s", m_pieTitle.c_str());
   for (size_t i = 0; i < m_pie.size(); ++i) {
     const cg::PieSlice& s = m_pie[i];
     const ImVec2 p = ImGui::GetCursorScreenPos();
-    dl->AddRectFilled(p, ImVec2(p.x + em * 0.8f, p.y + em * 0.8f), sliceColor(i, s.node == nullptr));
+    dl->AddRectFilled(p, ImVec2(p.x + em * 0.8f, p.y + em * 0.8f),
+                      sliceColor(i, s.node == nullptr && !s.self, s.self));
     ImGui::Dummy(ImVec2(em, em * 0.8f));
     ImGui::SameLine();
-    const std::string label =
-        s.node ? nameOf(s.node->key).function : "other (" + std::to_string(s.otherCount) + ")";
+    const std::string label = s.self   ? "self"
+                              : s.node ? nameOf(s.node->key).function
+                                       : "other (" + std::to_string(s.otherCount) + ")";
     ImGui::Text("%5.1f%%  %s", s.fraction * 100.0, label.c_str());
   }
   ImGui::EndGroup();

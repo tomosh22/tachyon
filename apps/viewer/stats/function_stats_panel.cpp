@@ -120,7 +120,7 @@ FunctionStatsPanel::StatsSpec FunctionStatsPanel::statsSpecFor(const PanelContex
   spec.key = entry.key;
   spec.filter =
       common::toQueryFilter(context.selection ? context.selection->state().timeFilter : std::nullopt);
-  spec.filter.subtreeRoot.reset();  // the Call Graph subtree does not restrict function statistics
+  common::clearSubtree(spec.filter);  // the Call Graph subtree does not restrict function statistics
   const common::EffectiveScopeOptions scope = common::effectiveScopeOptions(context);
   spec.options = functions::effectiveOptions(false, analysis::KernelFrames::Show, entry.key,
                                              scope.blendScopes, scope.groupByFiber);

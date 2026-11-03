@@ -14,12 +14,28 @@
 
 namespace tachyon::viewer {
 
-// Placeholder for the canonical Filter from docs/specs/analysis-query.md (3.7). WP-33 provides the real type;
-// the shape here is identical so the swap is a typedef change.
+// The frame options (AggregationOptions subset) under which a subtree path's keys were taken: inline keys
+// only exist with inline expansion, kernel keys depend on the kernel handling and scope keys on blending. A
+// panel that applies the path must query with these options, else the path matches nothing.
+struct SubtreeFrameOptions {
+  bool expandInline = false;
+  analysis::KernelFrames kernelFrames = analysis::KernelFrames::Show;
+  bool blendScopes = false;
+  bool groupByFiber = false;
+
+  bool operator==(const SubtreeFrameOptions&) const = default;
+};
+
+// Placeholder for the canonical Filter from docs/specs/analysis-query.md (3.7); the shape is identical.
 struct ViewFilter {
   uint64_t t0 = 0, t1 = 0;
   std::optional<std::vector<ThreadIdx>> threads;
   std::optional<CallstackIdx> subtreeRoot;
+  // WP-33b: the Call Graph's "Filter to subtree": the FunctionKeys from the top-down root's child down to the
+  // selected row (analysis::Filter::subtreePath), valid under `subtreeOptions`. Never empty when set.
+  std::optional<std::vector<symbols::FunctionKey>> subtreePath;
+  std::optional<SubtreeFrameOptions> subtreeOptions;
+  std::string subtreeLabel;  // display name (module!function) of the path's last function, for status texts
   std::optional<FunctionIdx> function;
 
   bool operator==(const ViewFilter&) const = default;

@@ -299,12 +299,47 @@ TEST(CallGraphModel, PieSlicesWithFewChildrenHaveNoOtherAndZeroTimeGivesNone) {
   EXPECT_EQ(pieSlices(ten).size(), 10u);
 }
 
+TEST(CallGraphModel, PieHasASelfSliceForTheExclusiveTimeOfTheNode) {
+  NodeAgg n = node(0, 100, 40, 5);  // 40 ticks of its own
+  n.children.push_back(node(1, 36, 36, 3));
+  n.children.push_back(node(2, 24, 24, 2));
+  const std::vector<PieSlice> slices = pieSlices(n);
+  ASSERT_EQ(slices.size(), 3u);
+  EXPECT_TRUE(slices[0].self);
+  EXPECT_EQ(slices[0].node, nullptr);
+  EXPECT_EQ(slices[0].ticks, 40u);
+  EXPECT_NEAR(slices[0].fraction, 0.40, 1e-12);
+  EXPECT_EQ(slices[1].node->key, fk(1));
+  EXPECT_FALSE(slices[1].self);
+  EXPECT_NEAR(slices[1].fraction, 0.36, 1e-12);
+  double sum = 0;
+  for (const PieSlice& s : slices) sum += s.fraction;
+  EXPECT_NEAR(sum, 1.0, 1e-9);
+  EXPECT_FLOAT_EQ(slices[0].angle0, 0.0f);
+  EXPECT_NEAR(slices.back().angle1, 6.2831853f, 1e-4f);
+  for (size_t i = 1; i < slices.size(); ++i) EXPECT_FLOAT_EQ(slices[i].angle0, slices[i - 1].angle1);
+
+  // With more than ten children the "other" slice keeps counting only the folded children.
+  NodeAgg many = node(0, 1000, 100, 1);
+  for (uint64_t i = 1; i <= 12; ++i) many.children.push_back(node(i, i * 10, i * 10, 1));  // 10..120
+  const std::vector<PieSlice> big = pieSlices(many);
+  ASSERT_EQ(big.size(), 12u);  // self + 10 children + other
+  EXPECT_TRUE(big[0].self);
+  EXPECT_EQ(big[11].otherCount, 2u);
+  EXPECT_EQ(big[11].ticks, 10u + 20u);
+  // No exclusive time: no self slice.
+  NodeAgg none = node(0, 60, 0, 1);
+  none.children.push_back(node(1, 60, 60, 1));
+  EXPECT_FALSE(pieSlices(none)[0].self);
+}
+
 TEST(CallGraphModel, FilterMapping) {
   const analysis::Filter whole = toQueryFilter(std::nullopt);
   EXPECT_EQ(whole.t0, 0u);
   EXPECT_EQ(whole.t1, UINT64_MAX);
   EXPECT_FALSE(whole.threads);
   EXPECT_FALSE(whole.subtreeRoot);
+  EXPECT_FALSE(whole.subtreePath);
   EXPECT_FALSE(whole.function);
 
   ViewFilter v;
@@ -312,6 +347,7 @@ TEST(CallGraphModel, FilterMapping) {
   v.t1 = 900;
   v.threads = std::vector<ThreadIdx>{ThreadIdx(2), ThreadIdx(5)};
   v.subtreeRoot = CallstackIdx(42);
+  v.subtreePath = std::vector<FunctionKey>{fk(1), fk(2)};
   v.function = FunctionIdx(3);  // a bus-level handle is not a handle of the query context: not mapped
   const analysis::Filter f = toQueryFilter(v);
   EXPECT_EQ(f.t0, 100u);
@@ -319,6 +355,8 @@ TEST(CallGraphModel, FilterMapping) {
   ASSERT_TRUE(f.threads);
   EXPECT_EQ(f.threads->size(), 2u);
   EXPECT_EQ(f.subtreeRoot, CallstackIdx(42));
+  ASSERT_TRUE(f.subtreePath);
+  EXPECT_EQ(*f.subtreePath, (std::vector<FunctionKey>{fk(1), fk(2)}));
   EXPECT_FALSE(f.function);
 }
 

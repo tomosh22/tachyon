@@ -13,6 +13,13 @@ uint64_t hashFilter(const Filter& f) {
     if (!f.threads->empty()) h = core::hashBytes(f.threads->data(), f.threads->size() * sizeof(ThreadIdx), h);
   }
   h = core::hashU64(h ^ (f.subtreeRoot ? (0x100000000ull | f.subtreeRoot->get()) : 0x3ull));
+  h = core::hashU64(h ^ (f.subtreePath ? (0x200000000ull | f.subtreePath->size()) : 0x5ull));
+  if (f.subtreePath) {
+    for (const FunctionKey& k : *f.subtreePath) {
+      h = core::hashU64(h ^ k.module.get());
+      h = core::hashU64(h ^ k.value);
+    }
+  }
   h = core::hashU64(h ^ (f.function ? (0x100000000ull | f.function->get()) : 0x4ull));
   return h;
 }
