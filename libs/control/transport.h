@@ -22,8 +22,8 @@ class IConnection {
 
   // Thread-safe with respect to writeLine/close, but only one thread may read at a time. Reads one
   // '\n'-terminated line (terminator and an optional preceding '\r' are stripped). Returns true on a line,
-  // false on orderly EOF/close. timeoutMs < 0 waits forever, otherwise it bounds the whole line; on timeout fails with ErrorCode::Timeout and
-  // keeps any partial data buffered.
+  // false on orderly EOF/close. timeoutMs < 0 waits forever, otherwise it bounds the whole line; on timeout
+  // fails with ErrorCode::Timeout and keeps any partial data buffered.
   virtual Result<bool> readLine(std::string& line, int timeoutMs = -1) = 0;
 
   // Thread-safe (serialised internally). Appends the '\n' terminator.
