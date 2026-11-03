@@ -11,6 +11,12 @@
 #include <fstream>
 #include <thread>
 
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace tachyon::symbols {
 namespace {
 
@@ -61,10 +67,19 @@ class CancelTest : public ::testing::Test {
     setenv("NO_PROXY", "127.0.0.1,localhost", 1);
     setenv("no_proxy", "127.0.0.1,localhost", 1);
 #endif
+    // ctest runs every test in its own process, concurrently: the directory must be private to this process
+    // (the process id), not just to this fixture object (a counter and the fixture's address are the same in
+    // every process of a run with address randomisation off, and equal often enough with it on).
     static std::atomic<int> counter{0};
-    m_root = fs::temp_directory_path() / ("tachyon-cancel-test-" + std::to_string(counter++) + "-" +
-                                          std::to_string(reinterpret_cast<uintptr_t>(this)));
-    fs::remove_all(m_root);
+#ifdef _WIN32
+    const unsigned long pid = static_cast<unsigned long>(_getpid());
+#else
+    const unsigned long pid = static_cast<unsigned long>(getpid());
+#endif
+    m_root = fs::temp_directory_path() /
+             ("tachyon-cancel-test-" + std::to_string(pid) + "-" + std::to_string(counter++));
+    std::error_code ec;
+    fs::remove_all(m_root, ec);  // left over from a crashed run with the same pid
     m_serverRoot = m_root / "server";
     m_cache = m_root / "cache";
     fs::create_directories(m_serverRoot);

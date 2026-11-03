@@ -16,12 +16,14 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <set>
+#include <sstream>
 #include <thread>
 
 namespace tachyon::capture {
@@ -54,6 +56,7 @@ struct Analysis {
   std::map<std::string, uint64_t> inclusiveSamples;  // function name -> samples with it anywhere in the stack
   uint64_t targetSamples = 0;
   uint64_t firstTargetTs = 0;
+  uint64_t lastTargetTs = 0;
   uint64_t firstMainTs = 0;         // earliest sample with `main` in its stack
   bool firstSampleHasMain = false;  // does the earliest target sample's stack contain main?
   std::string firstSampleLeaf;
@@ -81,7 +84,7 @@ Analysis analyse(const fs::path& trace, uint32_t pid) {
   // Which nodes are leaves of a stack: a node is a leaf position if it is the sample's callstack value; the
   // caller rule applies to every other node (return addresses).
   const auto name = [&](StringIdx s) { return std::string(svc.symbolStrings().get(s)); };
-  uint64_t firstTs = ~0ull;
+  uint64_t firstTs = ~0ull, lastTs = 0;
   for (size_t t = 0; t < a.model.threads.size(); ++t) {
     if (a.model.threads[t].pid != pid) continue;
     const auto& cols = a.model.samplesByThread[t];
@@ -114,6 +117,7 @@ Analysis analyse(const fs::path& trace, uint32_t pid) {
       }
       ++a.leafSamples[leafName];
       if (hasMain) a.firstMainTs = a.firstMainTs == 0 ? cols.ts[i] : std::min(a.firstMainTs, cols.ts[i]);
+      lastTs = std::max<uint64_t>(lastTs, cols.ts[i]);
       if (cols.ts[i] < firstTs) {
         firstTs = cols.ts[i];
         a.firstSampleHasMain = hasMain;
@@ -123,6 +127,7 @@ Analysis analyse(const fs::path& trace, uint32_t pid) {
     }
   }
   a.firstTargetTs = firstTs == ~0ull ? 0 : firstTs;
+  a.lastTargetTs = lastTs;
   a.startTs = a.model.header.start_ts;
   for (size_t t = 0; t < a.model.threads.size(); ++t) {
     if (a.model.threads[t].pid != pid) continue;
@@ -148,6 +153,74 @@ Analysis analyse(const fs::path& trace, uint32_t pid) {
                             (started).error().code == ErrorCode::Unsupported))                   \
       GTEST_SKIP() << "perf_event_open is not available here: " << (started).error().toString(); \
   } while (0)
+
+// Cpu seconds (user + system, all threads) the process `pid` has consumed so far; negative when unreadable.
+double processCpuSeconds(uint32_t pid) {
+  std::ifstream in("/proc/" + std::to_string(pid) + "/stat");
+  std::string line;
+  if (!std::getline(in, line)) return -1;
+  const size_t close = line.rfind(')');  // the command name may contain spaces and parentheses
+  if (close == std::string::npos) return -1;
+  std::istringstream rest(line.substr(close + 2));  // starts at field 3 (state)
+  std::string field;
+  unsigned long long utime = 0, stime = 0;
+  for (int f = 3; f <= 15 && (rest >> field); ++f) {
+    if (f == 14) utime = std::strtoull(field.c_str(), nullptr, 10);
+    if (f == 15) stime = std::strtoull(field.c_str(), nullptr, 10);
+  }
+  return static_cast<double>(utime + stime) / static_cast<double>(sysconf(_SC_CLK_TCK));
+}
+
+// Polls the cpu consumption of a process in the background, so that the total is known after the process has
+// exited (/proc/<pid> is gone by then).
+class CpuMeter {
+ public:
+  // `fromZero`: count the whole life of the process (a launched target), otherwise only what it consumes from
+  // now on (an attached one).
+  CpuMeter(uint32_t pid, bool fromZero) : m_pid(pid) {
+    const double now = processCpuSeconds(pid);
+    m_base = fromZero || now < 0 ? 0 : now;
+    m_last = now < 0 ? 0 : now;
+    m_thread = std::thread([this] {
+      while (!m_stop.load()) {
+        const double c = processCpuSeconds(m_pid);
+        if (c > m_last.load()) m_last = c;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    });
+  }
+  ~CpuMeter() { used(); }
+  CpuMeter(const CpuMeter&) = delete;
+  CpuMeter& operator=(const CpuMeter&) = delete;
+
+  // Cpu seconds consumed since the meter started (since the process started when `fromZero`). Stops the
+  // meter.
+  double used() {
+    m_stop = true;
+    if (m_thread.joinable()) m_thread.join();
+    return m_last.load() - m_base;
+  }
+
+ private:
+  uint32_t m_pid;
+  double m_base = 0;
+  std::atomic<double> m_last{0};
+  std::atomic<bool> m_stop{false};
+  std::thread m_thread;
+};
+
+// Data pages per perf ring in these tests (8 MiB with 4 KiB pages; the default is 1 MiB). The backend's drain
+// thread empties the rings every few milliseconds, but when the machine is busy (ctest -j, other builds) it
+// can go without the cpu for much longer than that, and a ring that fills up meanwhile loses records
+// (PERF_RECORD_LOST): the samples of the trace are then fewer than the target's cpu time says, and
+// `eventsLost` is not 0. Rings that hold seconds of samples make these checks independent of the scheduler.
+constexpr uint32_t kTestRingPages = 2048;
+
+LinuxPerfBackendConfig testConfig() {
+  LinuxPerfBackendConfig config;
+  config.ringPages = kTestRingPages;
+  return config;
+}
 
 class PerfCapture : public ::testing::Test {
  protected:
@@ -189,6 +262,17 @@ class PerfCapture : public ::testing::Test {
     return out;
   }
 
+  // The sampler fires `hz` times per second of cpu time the target consumes, not per second of wall time, so
+  // on a machine shared with other work (ctest -j, other builds) a target that got a fraction of a cpu yields
+  // a proportionally smaller trace. The sample count is therefore judged against the cpu time the target
+  // really got (a fixed count would only hold on an idle machine); `minRatio` allows for samples a busy
+  // runner loses.
+  static void expectSamplesForCpu(uint64_t samples, double hz, double cpuSeconds, double minRatio) {
+    ASSERT_GT(cpuSeconds, 0.05) << "the target got no cpu at all";
+    EXPECT_GT(static_cast<double>(samples), minRatio * hz * cpuSeconds)
+        << samples << " samples for " << cpuSeconds << " cpu seconds at " << hz << " Hz";
+  }
+
   void expectSpinOrdering(const Analysis& a, uint64_t minHot) {
     const uint64_t hotA = a.leafSamples.count("hot_a") ? a.leafSamples.at("hot_a") : 0;
     const uint64_t hotB = a.leafSamples.count("hot_b") ? a.leafSamples.at("hot_b") : 0;
@@ -203,14 +287,44 @@ class PerfCapture : public ::testing::Test {
   TempDir m_dir;
 };
 
+// Records the target's cpu consumption against the wall clock, so that the cpu time of any window can be read
+// back afterwards.
+class CpuTimeline {
+ public:
+  void sample(uint32_t pid) {
+    m_points.emplace_back(std::chrono::steady_clock::now(), processCpuSeconds(pid));
+  }
+  // Cpu seconds consumed in the `seconds` before `end` (linear interpolation between the samples).
+  double cpuInWindow(std::chrono::steady_clock::time_point end, double seconds) const {
+    return at(end) - at(end - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                  std::chrono::duration<double>(seconds)));
+  }
+
+ private:
+  double at(std::chrono::steady_clock::time_point t) const {
+    if (m_points.empty()) return 0;
+    if (t <= m_points.front().first) return m_points.front().second;
+    for (size_t i = 1; i < m_points.size(); ++i) {
+      if (t > m_points[i].first) continue;
+      const double span = std::chrono::duration<double>(m_points[i].first - m_points[i - 1].first).count();
+      const double part = std::chrono::duration<double>(t - m_points[i - 1].first).count();
+      return m_points[i - 1].second +
+             (span > 0 ? (m_points[i].second - m_points[i - 1].second) * (part / span) : 0);
+    }
+    return m_points.back().second;
+  }
+  std::vector<std::pair<std::chrono::steady_clock::time_point, double>> m_points;
+};
+
 TEST_F(PerfCapture, SpinScenarioSystemWideLaunch) {
   REQUIRE_SYSTEM_WIDE_PERF();
-  LinuxPerfBackend backend;
+  LinuxPerfBackend backend(testConfig());
   CaptureOptions o = testbedOptions(3.0);
   auto started = backend.start(o);
   ASSERT_TRUE(started.ok()) << started.error().toString();
   const uint32_t pid = backend.rootPid();
   ASSERT_GT(pid, 0u);
+  CpuMeter cpu(pid, /*fromZero=*/true);
   auto result = finish(backend, 30.0);
   ASSERT_TRUE(result.ok()) << result.error().toString();
   const LinuxPerfDiagnostics diag = backend.diagnostics();
@@ -220,9 +334,9 @@ TEST_F(PerfCapture, SpinScenarioSystemWideLaunch) {
 
   Analysis a = analyse(o.outPath, pid);
   ASSERT_GT(a.targetSamples, 0u);
-  // 8 kHz for ~3 s on the one busy thread: thousands of samples (CPU-clock sampling on a busy shared runner
-  // can lose some; the bound is generous).
-  EXPECT_GT(a.targetSamples, 3000u) << "samples of the target";
+  // 8 kHz on the one busy thread: thousands of samples (CPU-clock sampling on a busy shared runner can lose
+  // some; the bound is generous).
+  expectSamplesForCpu(a.targetSamples, 8000, cpu.used(), 0.125);
   expectSpinOrdering(a, 500);
   // The three hot functions and their callers appear in the stacks.
   EXPECT_GT(a.inclusiveSamples["hot_a"], 0u);
@@ -257,18 +371,20 @@ TEST_F(PerfCapture, SpinScenarioSystemWideLaunch) {
 TEST_F(PerfCapture, SpinScenarioPerThreadLaunch) {
   LinuxPerfBackendConfig cfg;
   cfg.forcePerThread = true;
+  cfg.ringPages = kTestRingPages;
   LinuxPerfBackend backend(cfg);
   CaptureOptions o = testbedOptions(2.0);
   auto started = backend.start(o);
   SKIP_IF_PERF_REFUSED(started);
   ASSERT_TRUE(started.ok()) << started.error().toString();
   const uint32_t pid = backend.rootPid();
+  CpuMeter cpu(pid, /*fromZero=*/true);
   auto result = finish(backend, 30.0);
   ASSERT_TRUE(result.ok()) << result.error().toString();
   EXPECT_EQ(backend.diagnostics().plan, "per-thread");
   EXPECT_EQ(result->eventsLost, 0u);
   Analysis a = analyse(o.outPath, pid);
-  EXPECT_GT(a.targetSamples, 1000u);
+  expectSamplesForCpu(a.targetSamples, 8000, cpu.used(), 0.0625);
   expectSpinOrdering(a, 200);
   ASSERT_GT(a.firstMainTs, 0u);
   EXPECT_LT(a.firstTargetTs, a.firstMainTs) << "enable_on_exec starts the event at the exec, before main()";
@@ -285,12 +401,13 @@ TEST_F(PerfCapture, AttachToARunningProcess) {
   std::this_thread::sleep_for(std::chrono::milliseconds(700));  // let it get into the spin loop
   ASSERT_FALSE(spawned->exited());
 
-  LinuxPerfBackend backend;
+  LinuxPerfBackend backend(testConfig());
   CaptureOptions o;
   o.mode = CaptureMode::Attach;
   o.pid = spawned->pid();
   o.outPath = m_dir.path() / "attach.tachyon";
   o.samplingHz = 8000;
+  CpuMeter cpu(spawned->pid(), /*fromZero=*/false);
   auto started = backend.start(o);
   ASSERT_TRUE(started.ok()) << started.error().toString();
   std::this_thread::sleep_for(std::chrono::milliseconds(1500));
@@ -298,7 +415,7 @@ TEST_F(PerfCapture, AttachToARunningProcess) {
   ASSERT_TRUE(result.ok()) << result.error().toString();
   EXPECT_EQ(result->eventsLost, 0u);
   Analysis a = analyse(o.outPath, spawned->pid());
-  EXPECT_GT(a.targetSamples, 1000u);
+  expectSamplesForCpu(a.targetSamples, 8000, cpu.used(), 0.0833);
   expectSpinOrdering(a, 100);
   spawned->terminate();
 }
@@ -317,12 +434,14 @@ TEST_F(PerfCapture, PerThreadAttachCoversEveryThreadOfAMultiThreadedTarget) {
 
   LinuxPerfBackendConfig cfg;
   cfg.forcePerThread = true;
+  cfg.ringPages = kTestRingPages;
   LinuxPerfBackend backend(cfg);
   CaptureOptions o;
   o.mode = CaptureMode::Attach;
   o.pid = spawned->pid();
   o.outPath = m_dir.path() / "jobs.tachyon";
   o.samplingHz = 4000;
+  CpuMeter cpu(spawned->pid(), /*fromZero=*/false);
   auto started = backend.start(o);
   SKIP_IF_PERF_REFUSED(started);
   ASSERT_TRUE(started.ok()) << started.error().toString();
@@ -342,7 +461,7 @@ TEST_F(PerfCapture, PerThreadAttachCoversEveryThreadOfAMultiThreadedTarget) {
     total += n;
   }
   EXPECT_GE(threadsWithSamples, 4u) << "samples from several worker threads, not only the main thread";
-  EXPECT_GT(total, 1000u);
+  expectSamplesForCpu(total, 4000, cpu.used(), 0.125);
   spawned->terminate();
 }
 
@@ -355,7 +474,7 @@ TEST_F(PerfCapture, SystemModeSeesTheWholeMachine) {
   ASSERT_TRUE(spawned.ok());
   ASSERT_TRUE(spawned->release().ok());
 
-  LinuxPerfBackend backend;
+  LinuxPerfBackend backend(testConfig());
   CaptureOptions o;
   o.mode = CaptureMode::System;
   o.outPath = m_dir.path() / "system.tachyon";
@@ -376,19 +495,43 @@ TEST_F(PerfCapture, SystemModeSeesTheWholeMachine) {
 
 TEST_F(PerfCapture, CircularCaptureFlushesTheLastSeconds) {
   REQUIRE_SYSTEM_WIDE_PERF();
-  LinuxPerfBackend backend;
+  LinuxPerfBackend backend(testConfig());
   CaptureOptions o = testbedOptions(4.0);
   o.circularMb = 64;
   ASSERT_TRUE(backend.start(o).ok());
   const uint32_t pid = backend.rootPid();
-  std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+  // The target is a spinning thread, and the sampler fires 8000 times per second of cpu time it consumes, not
+  // per second of wall time: on a machine shared with other work (ctest -j, other builds) the target gets a
+  // fraction of a cpu and the last wall-clock second holds proportionally fewer samples. So the cpu time the
+  // target really got is tracked while waiting, and the sample count is judged against that.
+  CpuTimeline cpu;
+  const auto waitUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(1800);
+  while (std::chrono::steady_clock::now() < waitUntil) {
+    cpu.sample(pid);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  cpu.sample(pid);
+  const auto flushCalled = std::chrono::steady_clock::now();
   auto flushed = backend.flush("hitch-live", 1);
   ASSERT_TRUE(flushed.ok()) << flushed.error().toString();
   EXPECT_EQ(backend.state(), CaptureState::Capturing);
   Analysis a = analyse(flushed->tracePath, pid);
-  EXPECT_GT(a.targetSamples, 2000u) << "about one second of 8 kHz samples";
+  const double cpuSeconds = cpu.cpuInWindow(flushCalled, 1.0);
+  const double expected = 8000.0 * cpuSeconds;
+  std::printf(
+      "[perf] circular flush: %llu target samples, target cpu in the window %.3f s (expect ~%.0f), span %.3f "
+      "s\n",
+      static_cast<unsigned long long>(a.targetSamples), cpuSeconds, expected,
+      static_cast<double>(a.lastTargetTs - a.firstTargetTs) / 1e9);
+  ASSERT_GT(cpuSeconds, 0.05) << "the target got no cpu at all in the last second";
+  EXPECT_GT(static_cast<double>(a.targetSamples), 0.5 * expected)
+      << "about one second of 8 kHz samples per cpu second the target consumed";
   EXPECT_LT(a.targetSamples, 12000u) << "no more than ~1.3 s worth";
-  expectSpinOrdering(a, 100);
+  // The flush keeps the last second of the capture and nothing older: the samples span at most that window
+  // (plus the flush's own latency), and the capture is 1.8 s old, so an unwindowed dump would span more.
+  EXPECT_LT(static_cast<double>(a.lastTargetTs - a.firstTargetTs) / 1e9, 1.3);
+  EXPECT_GT(static_cast<double>(a.lastTargetTs - a.firstTargetTs) / 1e9, 0.5);
+  expectSpinOrdering(a, std::min<uint64_t>(100, static_cast<uint64_t>(0.05 * expected)));
   auto result = finish(backend, 30.0);
   ASSERT_TRUE(result.ok()) << result.error().toString();
 }
