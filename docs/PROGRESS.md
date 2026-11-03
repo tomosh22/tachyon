@@ -48,7 +48,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-53 | Scope pairing, blending, fibers | C | merged (WP-53b follow-up) | wp/53-scope-blending | 2026-10-25 |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | merged | wp/54-inst-viewer | 2026-11-02 |
 | WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
-| WP-60 | Flight recorder mode | — | not started | wp/60-flight-recorder | |
+| WP-60 | Flight recorder mode | A | in progress | wp/60-flight-recorder | 2026-11-03 |
 | WP-61 | Remote capture | — | not started | wp/61-remote | |
 | WP-62 | CI report tool | E | merged (WP-62b follow-up) | wp/62-ci-report | 2026-11-02 |
 | WP-63 | Exporters | E | merged | wp/63-exporters | 2026-11-03 |
