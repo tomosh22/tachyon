@@ -1577,6 +1577,18 @@ Result<void> TimelineLod::sampleStrip(const SampleStripQuery& q, SampleStripResu
       const uint32_t leaf = c < nodes ? c : 0;
       if (b <= colEnd) {
         tally.add(leaf, b - a);
+      } else if (sw.active && a < colEnd && b <= colEnd + sw.cur.width() + 1) {
+        // The common crossing: the sample starts in the current column and ends in the next one (columns are
+        // at least as wide as a sample here). Split it by hand instead of through the generic splitter.
+        tally.add(leaf, colEnd - a);
+        flush(sw.cur);
+        sw.advance();
+        if (b <= sw.colEnd) {
+          tally.add(leaf, b - colEnd);
+        } else {  // the next column is narrower than the rest of the sample: the generic splitter
+          splitInto(sw, colEnd, b, [&](uint32_t, uint64_t ticks) { tally.add(leaf, ticks); }, flush);
+        }
+        colEnd = sw.colEnd;
       } else {
         slow(a, b, leaf);
         colEnd = sw.colEnd;

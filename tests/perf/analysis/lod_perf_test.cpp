@@ -36,6 +36,25 @@ constexpr double kLargeBuildBudgetS = 15.0;
 constexpr uint32_t kPixels = 1920;
 constexpr uint32_t kMaxFlameDepth = 33;  // depths 1..32
 
+// Local knobs (not used by CI): TACHYON_PERF_QUICK skips the informational extras of the large test,
+// TACHYON_LOD_STEP overrides LodOptions::levelStep in the micro test.
+std::string envValue(const char* name) {
+#ifdef _WIN32
+  char* buffer = nullptr;
+  size_t size = 0;
+  std::string value;
+  if (_dupenv_s(&buffer, &size, name) == 0 && buffer != nullptr) value = buffer;
+  std::free(buffer);
+  return value;
+#else
+  const char* v = std::getenv(name);
+  return v ? std::string(v) : std::string();
+#endif
+}
+bool quickMode() {
+  return !envValue("TACHYON_PERF_QUICK").empty();
+}
+
 double seconds(Clock::time_point a, Clock::time_point b) {
   return std::chrono::duration<double>(b - a).count();
 }
@@ -262,9 +281,10 @@ TEST(LodPerf, MediumBuildAndFrame) {
   EXPECT_LT(bestBuild, buildBudget * 2);
 }
 
-// Informational (a second on `medium`): the fused rowColumns against two separate calls at pixel spans that
-// are multiples of the base width (K buckets per column) and in the fine-strip and direct regimes; 16 rows
-// replicated to 64 by cycling through the threads, alternating the two patterns on the same buffers.
+// Informational (a second on `medium`): where the time of a 16-row frame goes at pixel spans that are
+// multiples of the base width (K buckets per column) and in the fine-strip and direct regimes: the band
+// alone, the strip alone, the fused rowColumns and the pre-WP-64 call pattern (two calls). Thread CPU ms,
+// best of 15.
 TEST(LodPerf, FusedVersusSeparateMicro) {
   auto loaded =
       model::TraceModel::load(std::filesystem::path(TACHYON_GENERATED_FIXTURE_DIR) / "medium.tachyon");
@@ -272,8 +292,8 @@ TEST(LodPerf, FusedVersusSeparateMicro) {
   model::TraceModel& m = *loaded;
   ASSERT_TRUE(buildThreadStates(m).ok());
   LodOptions microOptions;
-  if (const char* step = std::getenv("TACHYON_LOD_STEP"))
-    microOptions.levelStep = static_cast<uint32_t>(std::atoi(step));
+  if (const std::string step = envValue("TACHYON_LOD_STEP"); !step.empty())
+    microOptions.levelStep = static_cast<uint32_t>(std::atoi(step.c_str()));
   auto lod = buildLod(m, microOptions);
   ASSERT_TRUE(lod.ok());
   std::printf("[lod perf] micro: levelStep %u, LOD memory %.2f B/sample\n", microOptions.levelStep,
@@ -282,47 +302,21 @@ TEST(LodPerf, FusedVersusSeparateMicro) {
   const uint64_t base = lod->levels().front().bucketWidth;
   Buffers buf;
   uint64_t sink = 0;
-  std::printf("[lod perf] micro (medium, 64 rows by cycling 16 threads, %u px, best of 15, thread CPU ms):\n",
-              kPixels);
-  for (double f : {0.37, 0.6, 1.0, 1.3, 2.0, 2.6, 3.6, 3.99}) {
+  const size_t rows = m.threads.size();
+  std::printf("[lod perf] micro (medium, %zu rows, %u px, best of 15, thread CPU ms):\n", rows, kPixels);
+  for (double f : {0.15, 0.25, 0.37, 0.5, 0.6, 1.0, 1.5, 2.0, 3.0, 3.99}) {
     const uint64_t w = static_cast<uint64_t>(static_cast<double>(base) * f * kPixels);
     if (w >= total) continue;
     const uint64_t t0 = s + total / 3, t1 = t0 + w;
-    double bestSep = 1e30, bestFused = 1e30;
-    for (int rep = 0; rep < 15; ++rep) {
-      for (unsigned parts : {kSeparate, kBandStrip}) {
-        const double start = threadCpuMs();
-        for (size_t r = 0; r < 64; ++r) {
-          const ThreadIdx th(static_cast<uint32_t>(r % m.threads.size()));
-          if (parts == kBandStrip) {
-            RowQuery rq;
-            rq.thread = th;
-            rq.t0 = t0;
-            rq.t1 = t1;
-            rq.pixelWidth = kPixels;
-            (void)lod->rowColumns(rq, buf.band, buf.strip);
-          } else {
-            StateBandQuery bq;
-            bq.thread = th;
-            bq.t0 = t0;
-            bq.t1 = t1;
-            bq.pixelWidth = kPixels;
-            (void)lod->stateBands(bq, buf.band);
-            SampleStripQuery sq;
-            sq.thread = th;
-            sq.t0 = t0;
-            sq.t1 = t1;
-            sq.pixelWidth = kPixels;
-            (void)lod->sampleStrip(sq, buf.strip);
-          }
-          sink += buf.strip.columns[kPixels / 2].stack.get();
-        }
-        const double ms = threadCpuMs() - start;
-        (parts == kBandStrip ? bestFused : bestSep) = std::min(parts == kBandStrip ? bestFused : bestSep, ms);
-      }
-    }
-    std::printf("[lod perf]   pixel = %.2f x base: separate %.3f ms, fused %.3f ms (%.2fx)\n", f, bestSep,
-                bestFused, bestSep / bestFused);
+    double best[4] = {1e30, 1e30, 1e30, 1e30};
+    const unsigned modes[4] = {kBand, kStrip, kBandStrip, kSeparate};
+    for (int rep = 0; rep < 15; ++rep)
+      for (int k = 0; k < 4; ++k)
+        best[k] = std::min(best[k], frameMs(*lod, rows, 0, t0, t1, buf, sink, modes[k]));
+    std::printf(
+        "[lod perf]   pixel = %.2f x base (%llu ticks): band %.3f, strip %.3f, fused %.3f, two calls %.3f "
+        "ms\n",
+        f, static_cast<unsigned long long>((t1 - t0) / kPixels), best[0], best[1], best[2], best[3]);
   }
   if (sink == 42) std::printf(" ");
 }
@@ -344,7 +338,7 @@ TEST(LodPerf, LargeBuildAndFrame) {
   std::printf("[lod perf] large: build budget %.1f s, assert %.1f s\n", kLargeBuildBudgetS,
               kLargeBuildBudgetS * 2);
   EXPECT_LT(buildSeconds, kLargeBuildBudgetS * 2);
-  if (!std::getenv("TACHYON_PERF_QUICK")) {  // informational, 17 s on the dev box
+  if (!quickMode()) {  // informational, 17 s on the dev box
     LodOptions one;
     one.threads = 1;
     const auto s0 = Clock::now();
@@ -369,7 +363,7 @@ TEST(LodPerf, LargeBuildAndFrame) {
     std::printf("[lod perf] large: slowest zooms, fused:    %s\n", slowest(fus, 8).c_str());
   }
   const FrameReport some = worstFrame(*lod, zooms, rows, 4, 5);
-  const FrameReport all = std::getenv("TACHYON_PERF_QUICK") ? some : worstFrame(*lod, zooms, rows, rows, 5);
+  const FrameReport all = quickMode() ? some : worstFrame(*lod, zooms, rows, rows, 5);
   std::printf(
       "[lod perf] large: worst frame (best of 5 reps, thread CPU ms / wall ms) over %zu zooms, %zu rows at "
       "%u "
