@@ -314,6 +314,39 @@ TEST_F(SchedTracepointCapture, LockScenarioWaitersAreWokenByTheHolderSystemWide)
   ASSERT_FALSE(l.model.threads.empty());
   const auto locks = lockThreads(l);
   ASSERT_EQ(locks.size(), 2u) << "the two tb-lock threads are in the trace";
+  for (const auto& [tid, thread] : locks) {
+    uint64_t outs = 0, ins = 0, readies = 0, waking = 0, running = 0, wait = 0, ready = 0, unknown = 0,
+             unknownNs = 0;
+    std::map<uint32_t, uint64_t> cpus;
+    for (const auto& c : l.model.contextSwitches) {
+      if (c.old_tid == tid) {
+        ++outs;
+        ++cpus[c.cpu];
+      }
+      if (c.new_tid == tid) ++ins;
+    }
+    for (const auto& r : l.model.readyEvents) {
+      if (r.readied_tid == tid) ++readies;
+      if (r.readying_tid == tid) ++waking;
+    }
+    for (const auto& iv : l.model.statesByThread[thread]) {
+      switch (iv.state) {
+        case ThreadState::Running: ++running; break;
+        case ThreadState::Waiting: ++wait; break;
+        case ThreadState::Ready: ++ready; break;
+        default:
+          ++unknown;
+          unknownNs += iv.end - iv.start;
+          break;
+      }
+    }
+    std::printf(
+        "[sched] tid %u: switch-outs %llu (cpus %zu), switch-ins %llu, ready recs as woken %llu / as waker "
+        "%llu; intervals running %llu waiting %llu ready %llu unknown %llu (%.1f ms)\n",
+        tid, (unsigned long long)outs, cpus.size(), (unsigned long long)ins, (unsigned long long)readies,
+        (unsigned long long)waking, (unsigned long long)running, (unsigned long long)wait,
+        (unsigned long long)ready, (unsigned long long)unknown, static_cast<double>(unknownNs) / 1e6);
+  }
 
   const std::string exe = TACHYON_TESTBED_EXE;
   uint64_t waits = 0, wokenByHolder = 0, wokenByOther = 0, withUnlockPathStack = 0, withWaitStack = 0,
