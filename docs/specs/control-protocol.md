@@ -51,3 +51,12 @@ Headers: `libs/control/protocol.h` (`tachyon::control`), now orchestrator-owned.
 - `{"cmd":"fetch","path","offset","length"[,"sha256":true]}` → `{"ok":true,"data":<base64>,"offset","size","eof"[,"sha256"]}`; chunks at most 512 KiB raw (`kMaxFetchChunkBytes`); `sha256` (hex, whole file) on the final chunk or on request; an offset past the end → ok, empty data, `eof:false`. Only files this agent produced (captures and flushes) are served; anything else, `..`/symlink escapes and missing files → ENOTFOUND with one message; a NUL in the path → EINTERNAL. Clients write `<name>.part`, resume from its size and verify SHA-256 (a mismatching resume restarts once; a mismatching fresh transfer is an error).
 - `{"cmd":"processes"[,"offset":N]}` → `{"ok":true,"processes":[{"pid","name","user","cmdline"}],"offset","total"}`, sorted by pid, cmdline capped at 256 chars; clients page until `offset + count == total`.
 - `Cmd` appends `Auth`, `Fetch`, `Processes` after `InstHello`.
+
+## Clarifications added with WP-66 (2026-11-03, binding)
+
+- Remote `start` and every `flush` output name is reserved with `O_CREAT|O_EXCL|O_NOFOLLOW` (Windows `CREATE_NEW`); an existing name, including a dangling symlink, gets `-N`. A reservation is removed on failure only if it is still the same file. After the backend returns, the file's identity (st_dev/st_ino) must equal the reservation's, else the capture/flush fails ("replaced") and nothing is served.
+- The agent refuses `--listen` when `--remote-out-dir` is writable by group or others without the sticky bit, or owned by another user (the trace writer opens its output by name).
+- Token file: opened once with `O_NOFOLLOW`; mode (no group/other access) and owner (the agent's euid or root) are checked on the descriptor. Windows: no mode/owner check.
+- `fetch` opens the file first (no symlinks) and requires the descriptor's identity to equal the one recorded when the agent produced it. The whole-file SHA-256 is cached per (path, size, mtime).
+- `connectTcp` gives each resolved address an equal share of the remaining deadline; time left by a fast failure carries over.
+- `tachyon-cli capture --fetch` also fetches the traces announced by `flushed` events, after the capture ends.
