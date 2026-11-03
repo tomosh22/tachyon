@@ -21,7 +21,7 @@
 //
 // Storage (decision 1 of the WP-36 brief)
 //   Levels are stored only from a base level upwards, as dense arrays per level (struct-of-arrays), with
-//   `levelStep` (default 2) level numbers between stored levels, up to the level with a single bucket. The
+//   `levelStep` (default 1, was 2 before WP-64) level numbers between stored levels, up to the level with a single bucket. The
 //   base level is the finest L with <= maxBaseBuckets buckets per thread whose bucket is also at least
 //   minSamplesPerBaseBucket sample intervals wide (bounds LOD bytes per sample). Per bucket and level:
 //     band   4 B  running / ready / waiting fraction of the bucket in 1/255 (unknown = the remainder) and the
@@ -29,7 +29,7 @@
 //     strip  6 B  most frequent leaf callstack (by overlapped ticks, ties to the smaller id), its share of
 //                 the sampled ticks (1/255) and the sampled fraction of the bucket (1/255);
 //     flame  6 B  deepest common prefix node (LCA of all leaves of the bucket) and the deepest leaf depth.
-//   i.e. 16 B per bucket, about 21 B per base bucket with levelStep 2. Dominant stacks are exact as long as
+//   i.e. 16 B per bucket, about 21 B per base bucket with levelStep 2 and 29 B with levelStep 1. Dominant stacks are exact as long as
 //   a bucket has <= maxStacksPerBucket distinct leaves (otherwise the lightest are dropped while merging
 //   levels), LCA and depth are always exact.
 //
@@ -98,7 +98,7 @@ struct LodOptions {
   // Test hook: if >= 0 the base level L is exactly this (bucket width 64 << L) instead of the rule above.
   int forceBaseLevel = -1;
   // Stored levels are base, base + step, base + 2*step, ... (1..4).
-  uint32_t levelStep = 2;
+  uint32_t levelStep = 1;  // WP-64: was 2; one level per octave bounds a column to <= 2 bucket starts (frame budget)
   // Distinct leaf stacks kept per bucket while merging levels (exact below this).
   uint32_t maxStacksPerBucket = 32;
   // Store the fine strip level (see the header comment): the sample strip of pixel spans between half the
@@ -165,6 +165,14 @@ struct SampleStripResult {
   bool pending = false;
   uint8_t level = kDirectLevel;
   std::vector<StripColumn> columns;
+};
+
+// ---- fused band + strip of one row ----
+struct RowQuery {
+  ThreadIdx thread;
+  uint64_t t0 = 0, t1 = 0;
+  uint32_t pixelWidth = 0;
+  QueryMode mode = QueryMode::Auto;
 };
 
 // ---- flame chart ----
@@ -244,6 +252,12 @@ class TimelineLod {
   Result<void> stateBands(const StateBandQuery& query, StateBandResult& out) const;
   Result<void> sampleStrip(const SampleStripQuery& query, SampleStripResult& out) const;
   Result<void> timeline(const TimelineQuery& query, TimelineResult& out) const;
+
+  // WP-64. State band and sample strip of one row in a single call. The results are those of stateBands()
+  // and sampleStrip() for the same window (equal up to float rounding of the fractions), but when the zoom
+  // is answered from a stored level (the common case) both come from one fused, branch-light pass over the
+  // buckets, which is what the 64-row frame budget needs. Thread-safe; same errors.
+  Result<void> rowColumns(const RowQuery& query, StateBandResult& band, SampleStripResult& strip) const;
 
  private:
   struct Impl;

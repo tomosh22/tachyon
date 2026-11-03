@@ -4,6 +4,7 @@
 #include <cstring>
 #include <limits>
 #include <thread>
+#include <type_traits>
 
 namespace tachyon::analysis {
 namespace {
@@ -224,13 +225,12 @@ class ColumnCursor {
   uint64_t width() const { return m_end - m_begin; }
 
  private:
+  // Branch-free: whether the column is one tick wider is data dependent and would mispredict.
   void computeEnd() {
-    m_end = m_begin + m_q;
-    m_remEnd = m_remBegin + m_r;
-    if (m_remEnd >= m_p) {
-      m_remEnd -= m_p;
-      ++m_end;
-    }
+    const uint32_t rem = m_remBegin + m_r;
+    const uint32_t carry = rem >= m_p ? 1u : 0u;
+    m_remEnd = rem - (m_p & (0u - carry));
+    m_end = m_begin + m_q + carry;
   }
   uint32_t m_p;
   uint64_t m_w, m_q;
@@ -1472,8 +1472,11 @@ Result<void> TimelineLod::sampleStrip(const SampleStripQuery& q, SampleStripResu
     if (tally.cover > 0) {
       StripColumn& col = cols[c.column()];
       col.stack = CallstackIdx(tally.bestLeaf);
-      col.share = static_cast<float>(static_cast<double>(tally.bestTicks) / static_cast<double>(tally.cover));
-      col.coverage = static_cast<float>(static_cast<double>(tally.cover) / static_cast<double>(c.width()));
+      // Float divisions (the tick counts are far below 2^24 per column in practice, and the result is a float
+      // anyway); double divisions cost ~4x as much per column.
+      const float invCover = 1.0f / toFloat(tally.cover);
+      col.share = toFloat(tally.bestTicks) * invCover;
+      col.coverage = toFloat(tally.cover) / toFloat(c.width());
     }
     tally.reset();
   };
@@ -1516,6 +1519,210 @@ Result<void> TimelineLod::sampleStrip(const SampleStripQuery& q, SampleStripResu
   }
   if (sw.active) flush(sw.cur);
   return {};
+}
+
+// ---- fused band + strip (WP-64) ----
+namespace {
+
+// Sums the buckets that start in each pixel column in a fixed-trip masked loop of K slots (the level is the
+// coarsest one whose width is <= the pixel span, so a column holds at most 4 bucket starts). There is no
+// data-dependent branch, whatever the phase of the zoom against the bucket grid, and the band and strip share
+// the column walk. Equivalent to the per-bucket loops of stateBands() and sampleStrip(): buckets weigh
+// their effective width, which is w for all but the last bucket of the level; a column holding that one (if
+// it is clipped by the trace end) takes `slow`.
+template <uint32_t K, class Slow>
+void fusedLevelPass(const BandCell* band, const uint32_t* dominant, const StripCell* strip, uint64_t start,
+                    uint64_t end, uint64_t bucketCount, uint32_t shift, uint64_t t0, uint64_t t1,
+                    uint32_t pixels, BandColumn* bandCols, StripColumn* stripCols, Slow&& slow) {
+  const uint64_t w = 1ull << shift;
+  const uint64_t lo = std::max(t0, start), hi = std::min(t1, end);
+  const uint64_t first = (lo - start + w - 1) >> shift;
+  const uint64_t last = std::min<uint64_t>(bucketCount, (hi - start + w - 1) >> shift);
+  const bool partialTail = bucketCount > 0 && start + bucketCount * w > end;
+
+  Sweep sw(t0, t1, pixels);
+  uint32_t c = 0;
+  uint64_t i = first;
+  if (first < last) {
+    sw.seek(start + first * w);
+    c = sw.cur.column();
+  }
+  for (uint32_t k = 0; k < c; ++k) {
+    bandCols[k] = BandColumn{};
+    stripCols[k] = StripColumn{};
+  }
+  const float invW = 1.0f / 255.0f;
+  const float invN[5] = {0.0f, 1.0f, 0.5f, 1.0f / 3.0f, 0.25f};
+  const uint64_t trace0 = start;
+  while (i < last) {
+    const uint64_t colEnd = sw.colEnd;
+    const uint64_t bj = std::min<uint64_t>(last, (colEnd - trace0 + w - 1) >> shift);
+    const uint32_t n = static_cast<uint32_t>(bj > i ? bj - i : 0);
+    if (n == 0) {
+      bandCols[c] = BandColumn{};
+      stripCols[c] = StripColumn{};
+    } else if (partialTail && bj == bucketCount) {
+      slow(i, n, sw.cur, bandCols[c], stripCols[c]);
+    } else {
+      uint32_t even = 0, odd = 0;  // 16-bit lanes: running | waiting, ready | (unused)
+      uint32_t cells[K];
+      uint32_t doms[K], ests[K], covs[K];
+      uint32_t coverSum = 0;
+      for (uint32_t j = 0; j < K; ++j) {
+        const uint64_t idx = i + std::min<uint64_t>(j, n - 1);
+        const uint32_t mask = j < n ? 0xFFFFFFFFu : 0u;
+        uint32_t cell;
+        std::memcpy(&cell, &band[idx], sizeof cell);
+        cells[j] = cell & mask;
+        even += (cell & 0x00FF00FFu) & mask;
+        odd += ((cell >> 8) & 0x00FF00FFu) & mask;
+        const uint32_t dom = dominant[idx];
+        const StripCell sc = strip[idx];
+        const uint32_t vmask = (j < n && dom != kInvalid) ? 0xFFFFFFFFu : 0u;
+        const uint32_t cov = sc.coverage & vmask;
+        doms[j] = dom;
+        covs[j] = vmask;
+        ests[j] = cov * sc.share;
+        coverSum += cov;
+      }
+      const uint32_t running = even & 0xFFFFu, waiting = even >> 16, ready = odd & 0xFFFFu;
+      const uint64_t a = t0 + sw.cur.begin(), b = colEnd;
+      float scale = invN[n] * invW;
+      if (a < start || b > end) scale *= toFloat(std::min(b, end) - std::max(a, start)) / toFloat(b - a);
+      uint8_t category = kNoWaitCategory;
+      if (waiting != 0) {  // rare: the wait category with the most waiting ticks (lowest id on ties)
+        uint32_t lanes[kCatCount] = {};
+        for (uint32_t j = 0; j < K; ++j) {
+          const uint32_t cat = cells[j] >> 24;
+          if (cat < kCatCount) lanes[cat] += (cells[j] >> 16) & 0xFFu;
+        }
+        uint32_t bestLane = 0;
+        for (uint32_t k = 0; k < kCatCount; ++k) {
+          if (lanes[k] > bestLane) {
+            bestLane = lanes[k];
+            category = static_cast<uint8_t>(k);
+          }
+        }
+      }
+      bandCols[c] = makeBand(static_cast<float>(running) * scale, static_cast<float>(ready) * scale,
+                             static_cast<float>(waiting) * scale, category);
+      StripColumn column;
+      if (coverSum > 0) {
+        // The distinct dominant with the largest summed estimate; ties go to the smaller callstack id.
+        uint64_t bestKey = 0;
+        for (uint32_t x = 0; x < K; ++x) {
+          uint32_t e = 0;
+          for (uint32_t y = 0; y < K; ++y) e += doms[y] == doms[x] ? (ests[y] & covs[y]) : 0u;
+          const uint64_t key = (static_cast<uint64_t>(e) << 32) | (0xFFFFFFFFu - doms[x]);
+          bestKey = (covs[x] != 0 && key > bestKey) ? key : bestKey;
+        }
+        column.stack = CallstackIdx(0xFFFFFFFFu - static_cast<uint32_t>(bestKey));
+        column.share = std::min(1.0f, static_cast<float>(bestKey >> 32) / (255.0f * static_cast<float>(coverSum)));
+        column.coverage = std::min(1.0f, static_cast<float>(coverSum) * toFloat(w) /
+                                             (255.0f * toFloat(sw.cur.width())));
+      }
+      stripCols[c] = column;
+    }
+    i = std::max<uint64_t>(i, bj);
+    ++c;
+    if (i < last) sw.advance();
+  }
+  for (; c < pixels; ++c) {
+    bandCols[c] = BandColumn{};
+    stripCols[c] = StripColumn{};
+  }
+}
+
+}  // namespace
+
+Result<void> TimelineLod::rowColumns(const RowQuery& q, StateBandResult& band,
+                                     SampleStripResult& strip) const {
+  if (!m_impl) return makeError(ErrorCode::InvalidArgument, "TimelineLod is not prepared");
+  if (auto v = validateQuery(*this, q.thread, q.t0, q.t1, q.pixelWidth); !v.ok()) return v;
+  const Impl& im = *m_impl;
+  const size_t t = q.thread.get();
+  const int lv = q.mode == QueryMode::Direct ? -1 : im.selectLevel(q.t1 - q.t0, q.pixelWidth);
+  if (lv >= 0 && im.isReady(t)) {
+    const LodLevelInfo& li = im.geo.levels[static_cast<size_t>(lv)];
+    const uint32_t shift = 6 + li.level;
+    // A column of c ticks holds at most ceil(c / w) bucket starts; c <= pixel span + 1.
+    const uint64_t k = ((q.t1 - q.t0) / q.pixelWidth + 1 + li.bucketWidth - 1) >> shift;
+    if (k <= 4) {
+      band.pending = false;
+      band.level = static_cast<uint8_t>(li.level);
+      strip.pending = false;
+      strip.level = static_cast<uint8_t>(li.level);
+      band.columns.resize(q.pixelWidth);
+      strip.columns.resize(q.pixelWidth);
+      const LevelArrays& arr = im.threads[t].levels[static_cast<size_t>(lv)];
+      // The column holding the last bucket when the trace end clips it: buckets weigh their effective width.
+      auto slow = [&](uint64_t i, uint32_t n, const ColumnCursor& cur, BandColumn& bandOut,
+                      StripColumn& stripOut) {
+        const uint64_t start = im.geo.start, end = im.geo.end, w = li.bucketWidth;
+        uint64_t running = 0, ready = 0, waiting = 0, weight = 0;
+        uint64_t cat[kCatCount + 1] = {};
+        StripAcc acc;
+        for (uint32_t j = 0; j < n; ++j) {
+          const uint64_t idx = i + j;
+          const uint64_t ew = std::min(w, end - (start + idx * w));
+          const BandCell cell = arr.band[idx];
+          running += cell.running * ew;
+          ready += cell.ready * ew;
+          const uint64_t wt = cell.waiting * ew;
+          waiting += wt;
+          cat[cell.category < kCatCount ? cell.category : kCatCount] += wt;
+          weight += ew;
+          if (arr.dominant[idx] != kInvalid) {
+            const uint64_t cover = ew * arr.strip[idx].coverage;
+            acc.add(arr.dominant[idx], cover * arr.strip[idx].share);
+            acc.cover += cover;
+          }
+        }
+        const uint64_t a = q.t0 + cur.begin(), b = q.t0 + cur.end();
+        float scale = 1.0f / (255.0f * toFloat(weight));
+        if (a < start || b > end) scale *= toFloat(std::min(b, end) - std::max(a, start)) / toFloat(b - a);
+        bandOut = makeBand(toFloat(running) * scale, toFloat(ready) * scale, toFloat(waiting) * scale,
+                           waiting ? argmaxCategory(cat) : kNoWaitCategory);
+        stripOut = StripColumn{};
+        if (acc.n > 0 && acc.cover > 0) {
+          uint32_t best = 0;
+          for (uint32_t k = 1; k < acc.n; ++k)
+            if (acc.est[k] > acc.est[best] || (acc.est[k] == acc.est[best] && acc.cs[k] < acc.cs[best]))
+              best = k;
+          stripOut.stack = CallstackIdx(acc.cs[best]);
+          stripOut.share = std::min(1.0f, toFloat(acc.est[best]) / (255.0f * toFloat(acc.cover)));
+          stripOut.coverage = std::min(1.0f, toFloat(acc.cover) / (255.0f * toFloat(cur.width())));
+        }
+      };
+      auto run = [&](auto kTag) {
+        fusedLevelPass<decltype(kTag)::value>(arr.band.data(), arr.dominant.data(), arr.strip.data(),
+                                              im.geo.start, im.geo.end, li.bucketCount, shift, q.t0, q.t1,
+                                              q.pixelWidth, band.columns.data(), strip.columns.data(), slow);
+      };
+      switch (k) {
+        case 0:
+        case 1: run(std::integral_constant<uint32_t, 1>{}); break;
+        case 2: run(std::integral_constant<uint32_t, 2>{}); break;
+        case 3: run(std::integral_constant<uint32_t, 3>{}); break;
+        default: run(std::integral_constant<uint32_t, 4>{}); break;
+      }
+      return {};
+    }
+  }
+  StateBandQuery bq;
+  bq.thread = q.thread;
+  bq.t0 = q.t0;
+  bq.t1 = q.t1;
+  bq.pixelWidth = q.pixelWidth;
+  bq.mode = q.mode;
+  if (auto r = stateBands(bq, band); !r.ok()) return r;
+  SampleStripQuery sq;
+  sq.thread = q.thread;
+  sq.t0 = q.t0;
+  sq.t1 = q.t1;
+  sq.pixelWidth = q.pixelWidth;
+  sq.mode = q.mode;
+  return sampleStrip(sq, strip);
 }
 
 Result<void> TimelineLod::timeline(const TimelineQuery& q, TimelineResult& out) const {

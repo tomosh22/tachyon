@@ -390,19 +390,17 @@ void TimelineWidget::refreshRow(const PanelContext& context, const RowLayout& ro
     cache.flame.spans.clear();
     return;
   }
-  analysis::StateBandQuery bq;
-  bq.thread = row.thread;
-  bq.t0 = window.t0;
-  bq.t1 = window.t1;
-  bq.pixelWidth = columns;
-  if (!lod->stateBands(bq, cache.band).ok()) cache.band.columns.clear();
+  // One fused call for the band and the strip of the row (WP-64).
+  analysis::RowQuery rq;
+  rq.thread = row.thread;
+  rq.t0 = window.t0;
+  rq.t1 = window.t1;
+  rq.pixelWidth = columns;
+  if (!lod->rowColumns(rq, cache.band, cache.strip).ok()) {
+    cache.band.columns.clear();
+    cache.strip.columns.clear();
+  }
   ++m_stats.bandQueries;
-  analysis::SampleStripQuery sq;
-  sq.thread = row.thread;
-  sq.t0 = window.t0;
-  sq.t1 = window.t1;
-  sq.pixelWidth = columns;
-  if (!lod->sampleStrip(sq, cache.strip).ok()) cache.strip.columns.clear();
   ++m_stats.stripQueries;
   cache.pending = cache.band.pending || cache.strip.pending;
   if (depths > 0) {
