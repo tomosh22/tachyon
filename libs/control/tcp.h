@@ -5,6 +5,7 @@
 
 #include "control/transport.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -32,7 +33,13 @@ std::string formatTcpEndpoint(const TcpEndpoint& endpoint);
 // when the port is taken.
 Result<std::unique_ptr<IListener>> listenTcp(const TcpEndpoint& endpoint);
 
-// Thread-safe. Connects within `timeoutMs`, trying every resolved address. TCP_NODELAY is set.
+// Thread-safe: pure function. How long connectTcp waits for one address: an equal share of what is left of
+// the deadline for the addresses not yet tried (the last one gets all of it), so a first address that hangs
+// leaves time for the others, and time saved by quick failures carries over. 0 when nothing is left.
+int connectShareMs(int remainingMs, size_t addressesLeft);
+
+// Thread-safe. Connects within `timeoutMs`, trying every resolved address; each gets a share of the deadline
+// (connectShareMs). TCP_NODELAY is set.
 Result<std::unique_ptr<IConnection>> connectTcp(const TcpEndpoint& endpoint, int timeoutMs = 5000);
 
 // Thread-safe: pure function. True when the literal is a loopback address (127.0.0.0/8, ::1).

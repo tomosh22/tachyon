@@ -406,6 +406,9 @@ int main(int argc, char** argv) {
         "tachyon-agent listening on TCP {} (unencrypted, token authentication; remote launch {}; remote "
         "traces go to {})",
         tcpAddress, opt.allowRemoteLaunch ? "ALLOWED" : "disabled", cfg.remoteOutDir.string());
+  if (!tcpAddress.empty())
+    if (const std::string warning = agent::remoteOutDirWarning(cfg.remoteOutDir); !warning.empty())
+      TACHYON_LOG_WARN("tachyon-agent: remote output directory: {}", warning);
 
   while (!g_stopRequested.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
 

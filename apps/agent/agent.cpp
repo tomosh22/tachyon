@@ -26,6 +26,11 @@
 #include <system_error>
 #include <vector>
 
+#if !TACHYON_PLATFORM_WINDOWS
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace tachyon::agent {
 
 using capture::CaptureState;
@@ -148,7 +153,65 @@ std::string processNameFor(uint32_t pid, const std::string& launchedExeStem) {
   return pid != 0 ? "pid" + std::to_string(pid) : "process";
 }
 
+// Removes a reserved but unused output file, when it is still the file that was reserved.
+void releaseReserved(const std::filesystem::path& path, const control::FileIdentity& identity) {
+  auto now = inspectPath(path);
+  if (!now.ok() || !now->regular || now->identity != identity) return;  // not ours any more: leave it
+  std::error_code ec;
+  std::filesystem::remove(path, ec);
+}
+
+// Ok when `path` is still the file reserved as `id` (or nothing was reserved); an error when something else
+// has taken its place since (a rename or link by another local user): the backend may have written through
+// it, so nothing is merged into it or served from it.
+Result<void> checkReserved(const std::filesystem::path& path,
+                           const std::optional<control::FileIdentity>& id) {
+  if (!id) return ok();
+  auto now = inspectPath(path);
+  if (now.ok() && now->regular && now->identity == *id) return ok();
+  TACHYON_LOG_ERROR("agent: {} is not the file the agent reserved for it (replaced while it was written)",
+                    path.string());
+  return makeError(ErrorCode::IoError, "the output file " + path.filename().string() +
+                                           " was replaced by another file while it was written; refusing to "
+                                           "use it");
+}
+
+// A file reserved with createExclusive that is deleted again when the operation does not go through.
+struct OutputReservation {
+  std::filesystem::path path;
+  control::FileIdentity identity;
+  bool active = false;
+  OutputReservation() = default;
+  OutputReservation(const OutputReservation&) = delete;
+  OutputReservation& operator=(const OutputReservation&) = delete;
+  ~OutputReservation() {
+    if (active) releaseReserved(path, identity);
+  }
+};
+
 }  // namespace
+
+std::string remoteOutDirWarning(const std::filesystem::path& dir) {
+#if TACHYON_PLATFORM_WINDOWS
+  (void)dir;
+  return {};
+#else
+  struct stat st {};
+  if (::stat(dir.c_str(), &st) != 0) return {};
+  const bool othersCanWrite = (st.st_mode & (S_IWGRP | S_IWOTH)) != 0;
+  const bool sticky = (st.st_mode & S_ISVTX) != 0;
+  const bool foreignOwner = st.st_uid != ::geteuid() && st.st_uid != 0;
+  if (othersCanWrite && !sticky)
+    return dir.string() +
+           " is writable by group or others: a local user could replace the traces the agent writes there; "
+           "run: chmod go-w " +
+           dir.string();
+  if (foreignOwner)
+    return dir.string() + " is owned by uid " + std::to_string(st.st_uid) +
+           ", who could replace the traces the agent writes there; use a directory you own";
+  return {};
+#endif
+}
 
 Agent::Agent(std::unique_ptr<capture::ICaptureBackend> backend, AgentConfig config)
     : m_backend(std::move(backend)), m_config(std::move(config)) {
@@ -261,6 +324,8 @@ Response Agent::handleStart(const StartRequest& req, bool remote) {
   opts.kernelStacks = req.kernel_stacks;
   if (opts.mode == capture::CaptureMode::Launch && !m_config.agentAddress.empty())
     opts.env[std::string(capture::etw::kAgentPipeEnvVar)] = m_config.agentAddress;  // the SDK connects here
+  OutputReservation reservation;  // removes a reserved file again unless the capture starts
+  std::optional<control::FileIdentity> reservedIdentity;
   if (remote) {
     // A remote client chooses a file name, not a location.
     const auto now =
@@ -276,11 +341,24 @@ Response Agent::handleStart(const StartRequest& req, bool remote) {
     if (stem.empty()) stem = "capture-" + std::to_string(now);
     std::filesystem::path dir =
         m_config.remoteOutDir.empty() ? std::filesystem::path(".") : m_config.remoteOutDir;
-    std::error_code ec;
+    // The name is reserved with O_CREAT|O_EXCL|O_NOFOLLOW instead of being tested for existence: a link a
+    // local user planted in the directory (dangling or not) is "taken", never written through.
     std::filesystem::path candidate = dir / (stem + ".tachyon");
-    for (int n = 1; n < 10000 && std::filesystem::exists(candidate, ec); ++n)
+    Result<control::FileIdentity> reserved = createExclusive(candidate);
+    for (int n = 1; n < 10000 && !reserved.ok() && reserved.error().code == ErrorCode::Busy; ++n) {
       candidate = dir / (stem + "-" + std::to_string(n) + ".tachyon");
+      reserved = createExclusive(candidate);
+    }
+    if (!reserved.ok())
+      return makeErrorResponse(
+          std::nullopt,
+          makeError(reserved.error().code == ErrorCode::Busy ? ErrorCode::IoError : reserved.error().code,
+                    "cannot create the output file in " + dir.string() + ": " + reserved.error().message));
     opts.outPath = candidate;
+    reservation.path = candidate;
+    reservation.identity = *reserved;
+    reservation.active = true;
+    reservedIdentity = *reserved;
   } else if (req.out_path.empty()) {
     const auto now =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
@@ -337,6 +415,8 @@ Response Agent::handleStart(const StartRequest& req, bool remote) {
       m_coalesced = 0;
       m_sessionMode = opts.mode;
       m_sessionPid = opts.pid;
+      m_outIdentity = reservedIdentity;
+      m_outReservedPath = opts.outPath;
       m_sessionFollow = opts.followChildren;
       m_ingest = std::make_shared<inst::Ingest>(std::move(ingestConfig));
       m_circular = opts.circularMb > 0;
@@ -360,11 +440,13 @@ Response Agent::handleStart(const StartRequest& req, bool remote) {
   }
   if (!resuming && opts.mode == capture::CaptureMode::Launch && !opts.startImmediately &&
       m_watch != nullptr && m_watch->launchPending()) {
+    reservation.active = false;  // parked: the capture still writes there once it is triggered
     TACHYON_LOG_INFO("agent: launched {} (pid {}) parked; waiting for start", opts.exe, m_watch->rootPid());
     return makeOkResponse(std::nullopt);  // state stays `starting`
   }
   TACHYON_LOG_INFO("agent: capture started ({}) -> {}", capture::captureModeName(opts.mode),
                    opts.outPath.string());
+  reservation.active = false;  // the backend owns the file now
   setStateLocked(CaptureState::Capturing, 0.0);
   return makeOkResponse(std::nullopt);
 }
@@ -442,6 +524,25 @@ std::vector<std::string> Agent::mergeSpools(inst::Ingest& ingest, const std::vec
     } else {
       for (const inst::SpoolSegment& seg : info.segments) inputs.push_back({seg.file, seg.bytes});
     }
+    if (info.stats.prefixOverflows > 0) {
+      // Strings and thread names past the per-segment prefix cap are not repeated in later segments: the
+      // scopes that use them show up unnamed in the older part of the flight recorder.
+      TACHYON_LOG_WARN("agent: the instrumentation ring of pid {} hit the string prefix cap ({} entries)",
+                       info.pid, info.stats.prefixOverflows);
+      warnings.push_back("instrumentation ring of pid " + std::to_string(info.pid) +
+                         " hit the string table cap (8 MiB per segment); " +
+                         std::to_string(info.stats.prefixOverflows) +
+                         " string or thread-name records are not repeated in later segments, so some "
+                         "scope names may be missing");
+    }
+    if (info.stats.segmentOpenFailures > 0) {
+      TACHYON_LOG_WARN("agent: the instrumentation ring of pid {} could not create {} segment files: {}",
+                       info.pid, info.stats.segmentOpenFailures, info.stats.lastOpenError);
+      warnings.push_back("instrumentation ring of pid " + std::to_string(info.pid) + ": " +
+                         std::to_string(info.stats.segmentOpenFailures) +
+                         " segment files could not be created (" + info.stats.lastOpenError +
+                         "); the ring kept writing to the current segment and may exceed its size");
+    }
     if (info.stats.overflowed) {
       TACHYON_LOG_WARN("agent: the instrumentation spool of pid {} reached its cap; {} records dropped",
                        info.pid, info.stats.recordsDropped);
@@ -481,6 +582,17 @@ Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& war
   std::vector<inst::SpoolInfo> spools;
   if (ingest) spools = ingest->finish();
   auto result = m_backend->stop();
+  if (result.ok()) {
+    std::optional<control::FileIdentity> reserved;
+    std::filesystem::path reservedPath;
+    {
+      std::lock_guard lock(m_mutex);
+      reserved = m_outIdentity;
+      reservedPath = m_outReservedPath;
+    }
+    // The reserved file itself is checked: a backend may report another path (or none it wrote).
+    if (auto checked = checkReserved(reservedPath, reserved); !checked.ok()) result = checked.error();
+  }
   if (ingest) {
     if (result.ok()) {
       warnings = mergeSpools(*ingest, spools, *result, circular, true);
@@ -494,9 +606,9 @@ Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& war
 void Agent::conversionWorker() {
   std::vector<std::string> warnings;
   auto result = stopAndMerge(warnings);
+  if (result.ok()) noteProduced(result->tracePath);
   std::lock_guard lock(m_mutex);
   if (result.ok()) {
-    noteProduced(result->tracePath);
     TACHYON_LOG_INFO("agent: capture done: {} ({} events lost)", result->tracePath.string(),
                      result->eventsLost);
     setStateLocked(CaptureState::Done, 1.0);
@@ -517,14 +629,20 @@ void Agent::finishCaptureLocked(const Event& finalEvent) {
   emit(StateEvent{CaptureState::Idle, 0.0});
 }
 
-std::string Agent::uniqueFlushName(const std::string& requested) const {
+Result<std::string> Agent::reserveFlushName(const std::string& requested, control::FileIdentity& identity) {
   std::string stem = sanitizeFileStem(requested);
   if (stem.empty()) stem = "flush";
   const std::filesystem::path& dir = m_sessionOutDir;  // caller holds m_mutex
-  std::error_code ec;
   std::string candidate = stem;
-  for (int n = 1; n < 10000 && std::filesystem::exists(dir / (candidate + ".tachyon"), ec); ++n)
+  Result<control::FileIdentity> reserved = createExclusive(dir / (candidate + ".tachyon"));
+  for (int n = 1; n < 10000 && !reserved.ok() && reserved.error().code == ErrorCode::Busy; ++n) {
     candidate = stem + "-" + std::to_string(n);
+    reserved = createExclusive(dir / (candidate + ".tachyon"));
+  }
+  if (!reserved.ok())
+    return makeError(ErrorCode::IoError,
+                     "cannot create the flushed trace in " + dir.string() + ": " + reserved.error().message);
+  identity = *reserved;
   return candidate;
 }
 
@@ -541,7 +659,12 @@ Result<CaptureSummary> Agent::performFlush(const FlushJob& job) {
     std::this_thread::sleep_for(std::chrono::milliseconds(m_config.flushSettleMs));
   // No lock across the backend call (it may take seconds and may call the progress callback).
   auto result = m_backend->flush(job.name, job.seconds);
-  if (!result.ok()) return result.error();
+  if (!result.ok()) {
+    if (job.reserved) releaseReserved(job.dir / (job.name + ".tachyon"), *job.reserved);
+    return result.error();
+  }
+  if (auto checked = checkReserved(job.dir / (job.name + ".tachyon"), job.reserved); !checked.ok())
+    return checked.error();
   // The flushed trace covers a window of the capture: add what the instrumented processes sent so far,
   // clipped to that window. The spools keep growing for the rest of the capture.
   const std::string patch = "{\"flush_reason\":" + jsonQuote(job.reason) +
@@ -553,7 +676,7 @@ Result<CaptureSummary> Agent::performFlush(const FlushJob& job) {
     const std::vector<inst::SpoolInfo> spools = ingest->snapshot();
     flushWarnings = mergeSpools(*ingest, spools, *result, true, false, patch);
   }
-  noteProduced(result->tracePath);
+  noteProduced(result->tracePath);  // after the merge: it replaces the file, the identity is recorded now
   CaptureSummary summary = toSummary(*result, std::move(flushWarnings));
   FlushedEvent event;
   event.path = summary.path;
@@ -613,22 +736,36 @@ Response Agent::handleFlush(const FlushRequest& req) {
       m_lastTrigger = now;
       job.reason = req.reason.empty() ? req.name : req.reason;
       job.seconds = m_config.flushSeconds;
-      job.name = uniqueFlushName(processNameFor(req.pid, m_sessionExeStem) + "-" +
-                                 sanitizeFileStem(job.reason, 40) + "-" + timestampText());
+      control::FileIdentity identity;
+      auto name = reserveFlushName(processNameFor(req.pid, m_sessionExeStem) + "-" +
+                                       sanitizeFileStem(job.reason, 40) + "-" + timestampText(),
+                                   identity);
+      if (!name.ok()) {
+        m_haveTrigger = false;  // nothing started: the next trigger may try again
+        return makeErrorResponse(std::nullopt, name.error());
+      }
+      job.name = *name;
+      job.reserved = identity;
     } else {
       if (m_flushing)
         return makeErrorResponse(std::nullopt, makeError(ErrorCode::Busy, "a flush is already in progress"));
       job.reason = req.reason.empty() ? req.name : req.reason;
       job.seconds = req.seconds;
-      job.name = uniqueFlushName(req.name);
+      control::FileIdentity identity;
+      auto name = reserveFlushName(req.name, identity);
+      if (!name.ok()) return makeErrorResponse(std::nullopt, name.error());
+      job.name = *name;
+      job.reserved = identity;
     }
+    job.dir = m_sessionOutDir;
     job.coalesced = m_coalesced;
     m_flushing = true;  // stop / cancel / shutdown wait for it instead of interleaving
+    // A trigger that is coalesced while this flush runs is answered with this path, whoever asked for it.
+    m_lastFlushPath = (m_sessionOutDir / (job.name + ".tachyon")).string();
     if (req.trigger) {
       // Answer now, flush in the background: the requester is the engine's main thread.
       CaptureSummary planned;
-      planned.path = (m_sessionOutDir / (job.name + ".tachyon")).string();
-      m_lastFlushPath = planned.path;
+      planned.path = m_lastFlushPath;
       if (m_flushWorker.joinable()) m_flushWorker.join();  // the previous one is done (m_flushing was false)
       m_flushWorker = std::thread([this, job] {
         auto flushed = performFlush(job);
@@ -704,8 +841,11 @@ void Agent::noteProduced(const std::filesystem::path& path) {
   std::error_code ec;
   std::filesystem::path canonical = std::filesystem::canonical(path, ec);
   if (ec) return;  // not on disk (a backend that reports a path it did not write): nothing to serve
+  auto info = inspectPath(canonical);
+  if (!info.ok() || !info->regular) return;
   std::lock_guard lock(m_producedMutex);
-  m_produced.insert(std::move(canonical));
+  m_produced[canonical] = info->identity;
+  m_hashCache.erase(canonical);
 }
 
 Response Agent::handleFetch(const FetchRequest& req) {
@@ -721,34 +861,54 @@ Response Agent::handleFetch(const FetchRequest& req) {
   // Resolves "..", "." and every symlink: whatever the request spells, only the real file is compared.
   const std::filesystem::path canonical = std::filesystem::canonical(std::filesystem::path(req.path), ec);
   if (ec) return notFound();
+  control::FileIdentity produced;
   {
     std::lock_guard lock(m_producedMutex);
-    if (m_produced.count(canonical) == 0) return notFound();
+    const auto it = m_produced.find(canonical);
+    if (it == m_produced.end()) return notFound();
+    produced = it->second;
   }
-  if (!std::filesystem::is_regular_file(canonical, ec) || ec) return notFound();
-  const uint64_t size = std::filesystem::file_size(canonical, ec);
-  if (ec) return makeErrorResponse(std::nullopt, makeError(ErrorCode::IoError, "cannot stat the trace"));
+  // Open first (never through a link), then compare what was opened with the file that was produced: a
+  // local user swapping the file between the lookup above and the open is caught here, not trusted.
+  auto file = SafeFile::openRead(canonical);
+  if (!file.ok()) return notFound();
+  if (file->identity() != produced) {
+    TACHYON_LOG_WARN("agent: fetch of {} refused: it is not the file the agent produced", canonical.string());
+    return notFound();
+  }
+  const uint64_t size = file->size();
 
   FetchBody body;
   body.offset = req.offset;
   body.size = size;
   if (req.offset < size) {
     const uint64_t want = std::min<uint64_t>({req.length, kMaxFetchChunkBytes, size - req.offset});
-    std::ifstream in(canonical, std::ios::binary);
-    if (!in) return makeErrorResponse(std::nullopt, makeError(ErrorCode::IoError, "cannot open the trace"));
-    in.seekg(static_cast<std::streamoff>(req.offset));
     body.data.resize(static_cast<size_t>(want));
-    in.read(body.data.data(), static_cast<std::streamsize>(want));
-    body.data.resize(static_cast<size_t>(in.gcount()));
-    if (body.data.size() != want)
+    auto got = file->readAt(req.offset, body.data.data(), static_cast<size_t>(want));
+    if (!got.ok())
+      return makeErrorResponse(std::nullopt, makeError(ErrorCode::IoError, "cannot read the trace"));
+    if (*got != want)
       return makeErrorResponse(std::nullopt, makeError(ErrorCode::IoError, "short read from the trace"));
   }
   // offset beyond the end: an empty answer that tells the client the size (a stale partial download).
   body.eof = req.offset <= size && req.offset + body.data.size() == size;
   if (body.eof || req.want_sha256) {
-    auto hash = sha256OfFile(canonical);
-    if (!hash.ok()) return makeErrorResponse(std::nullopt, hash.error());
-    body.sha256 = std::move(*hash);
+    // The whole-file hash is cached per (path, size, mtime): a client asking for it with every chunk of a
+    // multi-gigabyte trace does not make the agent read the file again each time.
+    {
+      std::lock_guard lock(m_producedMutex);
+      const auto it = m_hashCache.find(canonical);
+      if (it != m_hashCache.end() && it->second.size == size && it->second.mtimeNs == file->mtimeNs())
+        body.sha256 = it->second.sha256;
+    }
+    if (body.sha256.empty()) {
+      auto hash = file->sha256();
+      if (!hash.ok()) return makeErrorResponse(std::nullopt, hash.error());
+      body.sha256 = std::move(*hash);
+      ++m_hashComputations;
+      std::lock_guard lock(m_producedMutex);
+      m_hashCache[canonical] = CachedHash{size, file->mtimeNs(), body.sha256};
+    }
   }
   return makeOkResponse(std::nullopt, std::move(body));
 }
@@ -860,9 +1020,9 @@ void Agent::shutdown() {
   if (needStop) {
     std::vector<std::string> warnings;
     auto result = stopAndMerge(warnings);
+    if (result.ok()) noteProduced(result->tracePath);
     std::lock_guard lock(m_mutex);
     if (result.ok()) {
-      noteProduced(result->tracePath);
       TACHYON_LOG_INFO("agent: shutdown stopped capture: {}", result->tracePath.string());
       setStateLocked(CaptureState::Done, 1.0);
       finishCaptureLocked(CaptureDoneEvent{toSummary(*result, std::move(warnings))});
