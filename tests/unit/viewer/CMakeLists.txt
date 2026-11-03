@@ -15,7 +15,7 @@ tachyon_add_test(viewer_tests
           inst_lanes_test.cpp inst_frames_plots_test.cpp inst_widget_test.cpp streaming_app_test.cpp memory_ceiling_test.cpp
           source_model_test.cpp source_widget_test.cpp
           capture_model_test.cpp session_explorer_catalog_test.cpp session_explorer_panel_test.cpp
-          capture_agent_session_test.cpp capture_app_test.cpp
+          capture_agent_session_test.cpp capture_app_test.cpp capture_flight_recorder_test.cpp
           ../agent/process_util.cpp
   DEPS tachyon::viewer_core tachyon::analysis tachyon::symbols tachyon::disasm tachyon::trace
        tachyon::agent_core tachyon::control tachyon::capture)

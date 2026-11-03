@@ -30,7 +30,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-33b | Subtree path filter; bottomUp/topDown frameless consistency | C | merged (verifier PASS) | wp/33b-subtree-path | 2026-11-03 |
-| WP-41b | Elevated agent (pkexec/sudo) usable by the invoking user | A | not started | wp/41b-elevated-agent | |
+| WP-41b | Elevated agent (pkexec/sudo) usable by the invoking user | A | in progress (with WP-61) | wp/61-remote-capture | 2026-11-03 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | merged (partial: target carried to WP-64) | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | merged (verifier PASS) | wp/41-session-explorer | 2026-11-03 |
@@ -49,8 +49,8 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-53 | Scope pairing, blending, fibers | C | merged (WP-53b follow-up) | wp/53-scope-blending | 2026-10-25 |
 | WP-54 | Viewer instrumentation lanes, frame graph, plots | D | merged | wp/54-inst-viewer | 2026-11-02 |
 | WP-55 | Engine integration guide and samples | E | merged (CI green; verifier accuracy findings fixed by orchestrator) | wp/55-integration-guide | 2026-10-25 |
-| WP-60 | Flight recorder mode | A | in progress | wp/60-flight-recorder | 2026-11-03 |
-| WP-61 | Remote capture | — | not started | wp/61-remote | |
+| WP-60 | Flight recorder mode | A | merged (verifier: one test bug, fixed by the orchestrator) | wp/60-flight-recorder | 2026-11-03 |
+| WP-61 | Remote capture | A | in progress | wp/61-remote-capture | 2026-11-03 |
 | WP-62 | CI report tool | E | merged (WP-62b follow-up) | wp/62-ci-report | 2026-11-02 |
 | WP-63 | Exporters | E | merged | wp/63-exporters | 2026-11-03 |
 | WP-64 | Large-trace performance pass | C | in progress | wp/64-perf-pass | 2026-11-03 |
@@ -229,6 +229,10 @@ Orchestrator review. Column-wise band pass (one write per column) and a fine str
 ## WP-33b notes
 
 Verifier PASS. Call Graph "Filter to subtree" now filters by the key path, so a function reached via several callstack nodes keeps its full time (acceptance test on medium); the main-thread subtree resolver is gone. bottomUp has a "<no stack>" row, so Function List totals equal the Call Graph root in all 6 modes. Cost of a path vs a root filter on medium (7.5 M samples): cold 0.89–1.03×, warm within 0.1 ms. Pie chart has a "self" slice; a selected row beyond the 100k-row cap is reported. Orchestrator fix: the "Subtree filter cleared" notice was wiped by the next query result (test failed 2/20); it now persists until the next filter change (40/40). Follow-ups: `NodeChildIndex`/`AnalysisContext::childIndex()` are dead code; selecting "<no stack>" in the Function List may show no butterfly (butterfly_panel.cpp resets kRootKey); lines/instructions path matching is O(depth) per node, not memoized; the SubtreePath perf test uses small subtrees.
+
+## WP-60 notes
+
+Verifier: design and implementation pass; one blocking test bug (range-for over a temporary `Result` in the privileged test, an ASan stack-use-after-scope) fixed by the orchestrator, plus Windows device names in flush names. Acceptance on Linux (CI privileged step and locally, release and ASan): 7 flushes in 20 s, every one holds the 57 ms hitch frame and the `testbed.hitch` marker within its last 10 s, scopes balanced, full-span flushes have target samples over 9.98–9.99 s of the 10 s window (about 34k samples). Windows CI: hitch-triggered flushes under real ETW pass. Specs updated (control-protocol, capture-backend, trace-format) and engine-integration 5.9 rewritten (RequestFlush returns at once now). Follow-ups: StringDef prefix cap (8 MiB) has no test or user-visible warning, and a prefix near the cap makes segments rotate on every frame; a failed segment open leaves the ring spool permanently in error; perf segments with `lastTs == 0` are never released by flushes, and one huge `seconds` raises H for the rest of the capture (both bounded by circularMb); a coalesced trigger during a manual flush before any trigger returns an empty path; fiber threads are not balanced at window edges; the viewer cannot tell whether a capture started elsewhere is circular; ETW flush gap (restart per flush).
 
 ## Queued follow-ups
 

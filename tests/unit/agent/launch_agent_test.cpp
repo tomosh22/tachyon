@@ -215,7 +215,9 @@ TEST(AgentLaunch, TargetStillRunningKeepsCapturing) {
 // next stop / cancel / shutdown would wait forever.
 TEST(AgentFlushGuard, ThrowingFlushDoesNotWedgeStop) {
   Rig rig;
-  ASSERT_TRUE(rig.call(rig.launch()).ok);
+  StartRequest start = rig.launch();
+  start.circular_mb = 64;  // a flush of a capture that is not circular never reaches the backend
+  ASSERT_TRUE(rig.call(start).ok);
   rig.backend->flushThrows = true;
   EXPECT_THROW(rig.call(FlushRequest{"hitch", 1}), std::runtime_error);
 
@@ -228,8 +230,10 @@ TEST(AgentFlushGuard, ThrowingFlushDoesNotWedgeStop) {
 
 TEST(AgentFlushGuard, ErrorReturnOfFlushAlsoClearsTheFlag) {
   Rig rig;
-  ASSERT_TRUE(rig.call(rig.launch()).ok);
-  EXPECT_FALSE(rig.call(FlushRequest{"hitch", 1}).ok);  // the fake rejects: not circular
+  StartRequest start = rig.launch();
+  start.circular_mb = 64;
+  ASSERT_TRUE(rig.call(start).ok);
+  EXPECT_FALSE(rig.call(FlushRequest{"hitch", 1}).ok);  // the fake's backend rejects
   EXPECT_FALSE(rig.call(FlushRequest{"hitch", 1}).ok);  // a second flush is not "already in progress"
   EXPECT_TRUE(rig.call(CancelRequest{}).ok);
 }

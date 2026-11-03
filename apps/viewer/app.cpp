@@ -149,6 +149,7 @@ bool App::init(std::string& error) {
     };
     m_capture = std::make_unique<CaptureController>(std::move(host), m_options.processLauncher);
     m_panels.add(makeCapturePanel(*m_capture), false);  // opened when a capture starts or from the menu
+    m_panels.add(makeFlightRecorderPanel(*m_capture), false);  // opened when a circular capture starts
     SessionExplorerHost explorer;
     explorer.settings = &m_settings;
     explorer.saveSettings = [this] {
@@ -242,6 +243,11 @@ void App::registerCommands() {
   m_commands.add({"capture.window", "Capture: Show Capture Window", "", [this] {
                     if (PanelEntry* p = m_panels.find(kCapturePanelName)) p->open = true;
                   }});
+  m_commands.add({"capture.flightrecorder", "Capture: Show Flight Recorder", "", [this] {
+                    if (PanelEntry* p = m_panels.find(kFlightRecorderPanelName)) p->open = true;
+                  }});
+  m_commands.add(
+      {"capture.flushnow", "Capture: Flush Flight Recorder Now", "", [this] { m_capture->flushNow(); }});
   m_commands.add({"capture.explorer", "Capture: Show Session Explorer", "", [this] {
                     if (PanelEntry* p = m_panels.find(kSessionExplorerPanelName)) p->open = true;
                   }});

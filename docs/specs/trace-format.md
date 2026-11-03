@@ -84,3 +84,7 @@ Header: `libs/trace/trace_format.h` (namespace `tachyon::trace`), now orchestrat
 
 ## Clarification added with WP-72 (2026-10-25, binding)
 - ELF modules: `ModuleRec.base` is the load address of the module's lowest PT_LOAD segment (not the executable segment's mmap address). RVA = address − base. The DWARF provider maps RVA → ELF vaddr as `rva + (lowest PT_LOAD p_vaddr aligned down to 4096)`. The perf backend (WP-70) must fill `base` accordingly.
+
+## Clarification added with WP-60 (2026-11-03, binding)
+
+- CaptureInfo of a flushed trace carries `flush_reason`, `flush_name`, `flush_window_s` and `flush_trigger` (true for SDK triggers).

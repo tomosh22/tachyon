@@ -123,6 +123,15 @@ void AgentSession::cancel() {
   post(std::move(c));
 }
 
+void AgentSession::flush(std::string name, uint32_t seconds, std::string reason) {
+  Command c;
+  c.kind = Command::Kind::Flush;
+  c.flush.name = std::move(name);
+  c.flush.seconds = seconds;
+  c.flush.reason = std::move(reason);
+  post(std::move(c));
+}
+
 void AgentSession::refreshStatus() {
   Command c;
   c.kind = Command::Kind::Refresh;
@@ -168,7 +177,10 @@ void AgentSession::setPhase(AgentPhase phase) {
     std::lock_guard lock(m_mutex);
     if (m_snapshot.phase != phase) {
       if (phase == AgentPhase::Capturing) m_captureStart = Clock::now();
-      if (phase == AgentPhase::Idle || phase == AgentPhase::Unknown) m_snapshot.target.clear();
+      if (phase == AgentPhase::Idle || phase == AgentPhase::Unknown) {
+        m_snapshot.target.clear();
+        m_snapshot.circularMb = 0;
+      }
       if (phase != AgentPhase::Stopping) m_snapshot.progress = 0.0;
       m_snapshot.phase = phase;
       changed = true;
@@ -228,6 +240,11 @@ void AgentSession::applyEvent(const control::Event& event) {
     AgentEvent e;
     e.kind = AgentEventKind::CaptureDone;
     e.summary = done->summary;
+    push(std::move(e));
+  } else if (const auto* flushed = std::get_if<control::FlushedEvent>(&event)) {
+    AgentEvent e;
+    e.kind = AgentEventKind::Flushed;
+    e.flushed = *flushed;
     push(std::move(e));
   } else if (const auto* error = std::get_if<control::ErrorEvent>(&event)) {
     {
@@ -385,6 +402,7 @@ void AgentSession::handleCommand(const Command& command) {
           m_expectParked =
               command.start.mode == capture::CaptureMode::Launch && !command.start.start_immediately;
           m_snapshot.target = command.label;
+          m_snapshot.circularMb = command.start.circular_mb;
         }
         doCall("start", command.start);
         break;
@@ -403,13 +421,17 @@ void AgentSession::handleCommand(const Command& command) {
       }
       case Kind::Stop: doCall("stop", control::StopRequest{}); break;
       case Kind::Cancel: doCall("cancel", control::CancelRequest{}); break;
+      case Kind::Flush: doCall("flush", command.flush); break;
       default: break;
     }
     if (m_client) pollStatus();
     if (m_client) {
       // A start that failed leaves the agent idle; do not keep claiming a target.
       std::lock_guard lock(m_mutex);
-      if (m_snapshot.phase == AgentPhase::Idle) m_snapshot.target.clear();
+      if (m_snapshot.phase == AgentPhase::Idle) {
+        m_snapshot.target.clear();
+        m_snapshot.circularMb = 0;
+      }
     }
   }
   {

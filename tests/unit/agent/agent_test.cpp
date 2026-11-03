@@ -264,7 +264,16 @@ TEST(AgentStateMachine, FlushRequiresCircularMode) {
   const auto* summary = std::get_if<CaptureSummary>(&good->body);
   ASSERT_NE(summary, nullptr);
   EXPECT_EQ(fs::path(summary->path), h.dir.path() / "hitch-frame-12345.tachyon");
-  EXPECT_EQ(readTextFile(summary->path), readTextFile(h.fixture));
+  // The flushed trace is the backend's, plus the flush_reason entry of its CaptureInfo (WP-60).
+  auto flushed = trace::TraceReader::open(summary->path);
+  auto fixture = trace::TraceReader::open(h.fixture);
+  ASSERT_TRUE(flushed.ok());
+  ASSERT_TRUE(fixture.ok());
+  EXPECT_EQ(flushed->header().start_ts, fixture->header().start_ts);
+  EXPECT_EQ(flushed->header().end_ts, fixture->header().end_ts);
+  EXPECT_EQ(flushed->readSamples().value().ts, fixture->readSamples().value().ts);
+  EXPECT_NE(flushed->readCaptureInfo().value().find("\"flush_reason\":\"hitch-frame-12345\""),
+            std::string::npos);
   EXPECT_EQ(h.agent->state(), CaptureState::Capturing);
 }
 

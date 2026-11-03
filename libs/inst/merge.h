@@ -43,6 +43,13 @@ struct MergeOptions {
   // Destination. Empty: replace the input trace in place (temporary file + atomic rename).
   std::filesystem::path outPath;
   bool clipToTraceRange = false;
+  // With clipToTraceRange (flight recorder windows): make the scopes of the window balanced. Ends whose
+  // Begin lies before the window are dropped and scopes still open at its end get a synthetic End at the
+  // window end. Threads that have fiber events inside the window are left alone (scopes may migrate).
+  bool balanceClippedScopes = false;
+  // A JSON object whose members are set at the top level of the trace's CaptureInfo (e.g. flush_reason).
+  // With a patch the trace is rewritten even when there is nothing to merge.
+  std::string captureInfoPatch;
   // Merge even when a sidecar with the same content was merged into this trace before (it would duplicate
   // every record); without it that is an error.
   bool force = false;
@@ -58,6 +65,8 @@ struct MergeReport {
   // Records written to the output by this merge (after clipping).
   uint64_t scopeEvents = 0, fiberEvents = 0, frameMarks = 0, markers = 0, plots = 0, threadNames = 0;
   uint64_t clippedRecords = 0;
+  uint64_t orphanEndsDropped = 0;  // balanceClippedScopes: Ends whose Begin lies before the window
+  uint64_t syntheticEnds = 0;      // balanceClippedScopes: Ends added for scopes open at the window end
   uint64_t existingInstrumentationRecords = 0;  // already in the input trace
   uint64_t startTs = 0, endTs = 0;              // header range of the output
   // Decode warnings plus merge-level ones (unbalanced scopes, dropped records, clipped records, ...).

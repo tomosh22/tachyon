@@ -22,8 +22,14 @@ Header: `libs/capture/capture_backend.h` (`tachyon::capture`), now orchestrator-
   - System mode uses per-CPU events and needs CAP_PERFMON/CAP_SYS_ADMIN or paranoid ≤ 0.
   - Launch and attach use the same per-CPU plan when it is allowed. Otherwise they use per-task `inherit=1` events per CPU, with all of a CPU's events sharing one ring via PERF_EVENT_IOC_SET_OUTPUT. That costs threads × cpus file descriptors.
 - `rawPath` is the spool directory `<out>.perfspool` (session.json, meta.bin, data-NNNNNN.bin).
-- A flush writes `<dir>/<name>.tachyon` without stopping the capture. With raw files kept, it also writes `<name>.perfspool`. In circular mode, consumed segments are discarded, so the next flush starts after this one.
+- A flush writes `<dir>/<name>.tachyon` without stopping the capture. With raw files kept, it also writes `<name>.perfspool`. In circular mode the retention rule of the WP-60 clarification below applies (superseding "consumed segments are discarded").
 - stop and flush are mutually exclusive: either one returns Busy while the other is running.
 - PERF_RECORD_LOST adds to events_lost. THROTTLE periods do not. They are reported as warnings and under "throttle" in CaptureInfo.
 - A launch with startImmediately=false parks the forked child before exec until the second start(). The stop-on-start pipe guarantees that events are enabled before exec (enable_on_exec).
 - Kernel frames are written as absolute frames (module kInvalidIdx, address ≥ 0xFFFF800000000000). Modules are created when a sample first lands in a mapping, and `base` follows the ELF rule in trace-format.md.
+
+## Clarifications added with WP-60 (2026-11-03, binding)
+
+- Linux perf circular retention: `flush(name, seconds)` seals the current segment and converts all sealed segments clipped to `[flushTs − seconds, flushTs]`; it then releases only sealed segments with `seconds > 0` and a known `lastTs` older than `flushTs − H`, where H is the largest `seconds` of any flush of the current capture (reset at `start()`). A `seconds == 0` flush releases nothing and does not raise H. Consecutive flushes therefore each hold the full last `seconds` of samples and context switches. The `circularMb` budget still drops the oldest segments regardless of the window. A circular flush's header time range starts at the window start.
+- ETW circular flush restarts the session, so each flushed trace's sampled data covers the ETL segment since the previous flush, capped to `seconds` (known limitation).
+- Instrumentation in circular captures uses a ring spool: rotating segment files keep the newest bytes within max(circular_mb, `--ring-min-mb` = 64) MiB per process; each segment re-emits the stream header, the StringDefs (prefix cap 8 MiB) and the latest thread names, so each decodes alone. Flushes merge a pinned snapshot of the segments, clipped to the window, with scopes balanced at the window edges (orphan Ends dropped, synthetic Ends at the window end; threads with fiber events are not balanced). Non-circular captures keep the append-only spool.

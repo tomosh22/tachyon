@@ -371,13 +371,17 @@ if (frameMs > kBudgetMs && sinceLastFlushMs >= kCooldownMs) {
 }
 ```
 
-`Tachyon_RequestFlush(reason)` is a synchronous round trip on the **calling thread** to the agent (it sends the
-control protocol `flush` command with `name = reason`, `seconds = 10`). It returns 1 if the agent answered
-`ok`, else 0, and **it can block for up to about 200 ms when no agent is reachable** (3 s if an agent accepted
-but stalled). So call it from the main thread only at a hitch, with a cooldown, never per frame. The agent
-side needs the circular capture started with `--circular-mb`; the end-to-end flight recorder (circular
-capture, dumping the window around the trigger, viewer support) is **available after WP-60**. Until then the
-call is safe and returns 0 or 1 according to what the agent supports.
+`Tachyon_RequestFlush(reason)` asks the agent for a flight-recorder flush (control protocol `flush` with
+`reason`, `trigger: true` and the caller's pid). The SDK first lets its flush thread drain the event rings for
+at most 50 ms, so the frame that triggered the call reaches the agent. The agent answers at once and writes
+`<process>-<reason>-<YYYYMMDD-HHMMSS>.tachyon` holding the last 10 s (agent option `--flush-seconds`) on a
+worker thread; triggers within 2 s of the previous one are coalesced. The call returns 1 when the agent
+accepted (or coalesced) the trigger and 0 when no agent is connected or the capture is not circular (start it
+with `--circular-mb`). With no agent reachable it can still take up to about 200 ms (the connect attempt), so
+call it at a hitch with a cooldown, never per frame. The viewer's Flight Recorder panel lists the flushed
+traces as they arrive. Limitation on Windows: each ETW flush restarts the kernel session, so a flushed trace's
+sampled data covers only the time since the previous flush (capped at the window); instrumentation always
+covers the full window.
 
 ### 5.10 Console commands (start, stop, flush)
 
@@ -560,7 +564,7 @@ Instrumentation
 - [ ] Contended locks go through `TACHYON_LOCK_SCOPE` with a static name.
 - [ ] `TACHYON_FRAME` on the main and render threads with matching frame numbers.
 - [ ] I/O and streaming scopes carry the asset path in `data`.
-- [ ] Hitch trigger calls `Tachyon_RequestFlush("hitch")` rate-limited (needs agent circular mode, WP-60).
+- [ ] Hitch trigger calls `Tachyon_RequestFlush("hitch")` rate-limited (needs a circular capture: `--circular-mb`).
 - [ ] Console commands for start/stop (via `tachyon-cli` or the control protocol) and flush.
 - [ ] All scope ids are static strings; no scopes shorter than a few microseconds; scope count per frame
       reviewed against section 8.

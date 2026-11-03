@@ -51,6 +51,15 @@ struct StartRequest {
 struct FlushRequest {
   std::string name;
   uint32_t seconds = 0;
+  // Optional (WP-60). Why the flush was requested; travels into the flushed trace's CaptureInfo
+  // ("flush_reason") and the `flushed` event. Empty: the name is used.
+  std::string reason = {};
+  // Optional (WP-60). True for the SDK's Tachyon_RequestFlush: the agent then ignores `name` and `seconds`,
+  // uses its own window (--flush-seconds), builds the name `<process>-<reason>-<YYYYMMDD-HHMMSS>` and
+  // rate-limits the trigger (see agent.h).
+  bool trigger = false;
+  // Optional (WP-60). Process id of the requester (trigger only); names the file.
+  uint32_t pid = 0;
 };
 
 struct InstHelloRequest {
@@ -120,7 +129,19 @@ struct ErrorEvent {
   std::string message;
 };
 
-using Event = std::variant<StateEvent, CaptureDoneEvent, ErrorEvent>;
+// Optional (WP-60): a flush of a circular capture produced a trace. Sent to every client, whoever asked.
+struct FlushedEvent {
+  std::string path;    // the flushed trace
+  std::string name;    // final file stem (sanitized, collision-free)
+  std::string reason;  // the trigger's reason, or the requested name
+  double duration_s = 0.0;
+  uint64_t events_lost = 0;
+  // Triggers folded into the previous flush (they arrived within the coalescing window) since the previous
+  // flushed event. Encoded only when non-zero.
+  uint32_t coalesced = 0;
+};
+
+using Event = std::variant<StateEvent, CaptureDoneEvent, ErrorEvent, FlushedEvent>;
 
 using ServerMessage = std::variant<Response, Event>;
 

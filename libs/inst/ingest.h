@@ -22,8 +22,12 @@ struct IngestConfig {
   std::filesystem::path spoolDir;
   uint64_t maxSpoolBytes = kDefaultMaxSpoolBytes;            // per process
   uint64_t maxTotalSpoolBytes = kDefaultMaxTotalSpoolBytes;  // all processes of the capture together
-  uint32_t maxProcesses = 256;                               // attach() fails with Busy beyond this
-  uint32_t maxConnectionsPerProcess = 16;                    // further connections are closed at once
+  // > 0: flight recorder. Each process spool keeps the newest `ringBytes` (a ring of segment files, see
+  // spool.h) instead of the first `maxSpoolBytes`. ringSegmentBytes: 0 = ringBytes / 8.
+  uint64_t ringBytes = 0;
+  uint64_t ringSegmentBytes = 0;
+  uint32_t maxProcesses = 256;             // attach() fails with Busy beyond this
+  uint32_t maxConnectionsPerProcess = 16;  // further connections are closed at once
   // Close connections whose peer process id (when the OS can tell) is not the pid given to attach().
   bool verifyPeerPid = true;
   // At finish(): each connection is read until it was silent for drainIdleMs or drainMaxMs elapsed.
@@ -36,6 +40,11 @@ struct SpoolInfo {
   std::filesystem::path path;
   SpoolStats stats;
   uint64_t flushedBytes = 0;  // size of the file at a frame boundary (snapshot()) or its final size
+  // All files of the spool, oldest first, with their sizes at a frame boundary (ring mode: several; the
+  // `path` / `flushedBytes` above describe the newest one). Merge all of them, in this order.
+  std::vector<SpoolSegment> segments;
+  // snapshot() only: while it is alive the listed segments are not deleted by rotation.
+  std::shared_ptr<void> lease;
 };
 
 class Ingest {

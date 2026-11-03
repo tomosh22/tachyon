@@ -5,7 +5,7 @@ threads, and prints on stdout a JSON document stating what a profiler should see
 workload itself measured with `rdtsc` (`measured`). Diagnostics go to stderr; stdout is JSON only.
 
 ```
-tachyon-testbed [--scenario <name[,name...]|all>] [--duration <seconds>] [--hitch-interval-ms <ms>] [--instrument] [--pretty] [--list]
+tachyon-testbed [--scenario <name[,name...]|all>] [--duration <seconds>] [--hitch-interval-ms <ms>] [--instrument] [--flush-on-hitch] [--pretty] [--list]
 ```
 
 Built with frame pointers (`-fno-omit-frame-pointer` / `/Oy-`), debug info, and no sibling-call optimization on the
@@ -97,7 +97,18 @@ samples only on-CPU time may legitimately differ on a loaded machine.
 
 `details` keys of note: `lock`: `holder_function`, `waiter_function`, `acquisitions`; `jobs`: `producer`
 (`name`, `tid`), `jobs_run`; `frames`: `frame_period_ms`, `hitch_interval_ms`, `frames_per_hitch`, `frames`,
-`hitches`, `max_frame_ms`; `recursion`: `depth`; `fibers`: `fiber_count`; `io`: `bytes_read`.
+`hitches`, `max_frame_ms`, `hitch_frames` (one `{frame, begin_ts, end_ts, flush}` per planted hitch frame; the
+timestamps are trace-clock ticks, `flush` is `none`, `accepted` or `refused`), `flush_requests`, `flushes_accepted`; `recursion`: `depth`; `fibers`: `fiber_count`; `io`: `bytes_read`.
+
+## Flight recorder trigger (`--flush-on-hitch`)
+
+With `--instrument --flush-on-hitch` the `frames` scenario calls `Tachyon_RequestFlush("hitch")` right after each
+planted hitch frame ended (its frame mark and the end of its `frame` scope are out). The agent must run a circular
+capture (`tachyon-cli capture --launch tachyon-testbed ... --circular-mb 256`); it answers at once and writes
+`<out dir>/tachyon-testbed-hitch-<YYYYMMDD-HHMMSS>.tachyon` in the background. The request is not part of any frame:
+the next frame starts when the call returns. The report's `details.hitch_frames` gives the hitch frame numbers
+and their timestamps so a test can look for them in the flushed trace (a frame of at least 40 ms between two
+`testbed.frame` marks).
 
 ## Layout and tests
 

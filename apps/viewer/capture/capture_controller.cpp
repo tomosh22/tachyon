@@ -202,10 +202,31 @@ void CaptureController::handleEvent(const AgentEvent& e) {
       break;
     case AgentEventKind::StateChanged:
       if ((e.phase == AgentPhase::Capturing || e.phase == AgentPhase::Armed) && m_lastPhase != e.phase &&
-          m_host.showPanel)
+          m_host.showPanel) {
         m_host.showPanel(kCapturePanelName);
+        if (e.phase == AgentPhase::Capturing && m_session.snapshot().circularMb > 0)
+          m_host.showPanel(kFlightRecorderPanelName);
+      }
       m_lastPhase = e.phase;
       break;
+    case AgentEventKind::Flushed: {
+      FlushedCapture f;
+      f.name = e.flushed.name;
+      f.reason = e.flushed.reason;
+      f.path = e.flushed.path;
+      f.durationS = e.flushed.duration_s;
+      f.eventsLost = e.flushed.events_lost;
+      f.coalesced = e.flushed.coalesced;
+      f.at = std::chrono::system_clock::now();
+      m_flushed.push_back(std::move(f));
+      constexpr size_t kMaxFlushed = 200;
+      if (m_flushed.size() > kMaxFlushed)
+        m_flushed.erase(m_flushed.begin(),
+                        m_flushed.begin() + static_cast<std::ptrdiff_t>(m_flushed.size() - kMaxFlushed));
+      toast(ToastLevel::Info, "Flight recorder: flushed " + e.flushed.name + " (" + e.flushed.reason + ")");
+      if (m_host.capturesChanged) m_host.capturesChanged();
+      break;
+    }
     case AgentEventKind::CaptureDone: onCaptureDone(e); break;
     case AgentEventKind::AgentError: toast(ToastLevel::Error, "Agent: " + e.message); break;
     case AgentEventKind::CommandFailed:
@@ -598,6 +619,8 @@ void CaptureController::drawMenu() {
     cancelCapture();
   ImGui::Separator();
   if (ImGui::MenuItem("Capture Window") && m_host.showPanel) m_host.showPanel(kCapturePanelName);
+  if (ImGui::MenuItem("Flight Recorder Window") && m_host.showPanel)
+    m_host.showPanel(kFlightRecorderPanelName);
   const bool disconnected =
       snap.connection == ConnectionState::Disconnected || snap.connection == ConnectionState::Lost;
   if (ImGui::MenuItem("Reconnect to Agent", nullptr, false, disconnected)) reconnect();
@@ -717,7 +740,143 @@ void CaptureController::drawAgentSettings() {
   if (changed && m_host.saveSettings) m_host.saveSettings();
 }
 
+// ---- flight recorder ----
+
+FlightRecorderState CaptureController::flightRecorderState() const {
+  const AgentSnapshot snap = m_session.snapshot();
+  FlightRecorderState st;
+  st.connected = snap.connection == ConnectionState::Connected;
+  st.capturing = st.connected && snap.phase == AgentPhase::Capturing;
+  st.armed = st.capturing && snap.circularMb > 0;
+  st.circularUnknown = st.capturing && snap.circularMb == 0;
+  st.ringMb = snap.circularMb;
+  st.elapsedSeconds = snap.elapsedSeconds;
+  st.target = snap.target;
+  st.phase = agentPhaseName(snap.phase);
+  return st;
+}
+
+bool CaptureController::flushNow() {
+  const FlightRecorderState st = flightRecorderState();
+  if (!st.capturing) {
+    toast(ToastLevel::Warning, "Nothing to flush: no capture is running");
+    return false;
+  }
+  if (st.circularUnknown)
+    toast(ToastLevel::Info, "Asking the agent to flush; this works only if the capture is circular");
+  const int seconds = std::clamp(m_flushSeconds, 1, 3600);
+  char stamp[32];
+  const std::time_t now = std::time(nullptr);
+  std::tm tm{};
+#if TACHYON_PLATFORM_WINDOWS
+  localtime_s(&tm, &now);
+#else
+  localtime_r(&now, &tm);
+#endif
+  std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm);
+  m_session.flush(std::string("manual-") + stamp + "-" + std::to_string(++m_flushSerial),
+                  static_cast<uint32_t>(seconds), "manual (viewer)");
+  return true;
+}
+
+void CaptureController::openFlushed(size_t index) {
+  if (index >= m_flushed.size() || !m_host.openFile) return;
+  m_host.openFile(pathFromUtf8(m_flushed[index].path));
+}
+
+void CaptureController::drawFlightRecorderContents() {
+  const FlightRecorderState st = flightRecorderState();
+  if (!st.connected) {
+    ImGui::TextDisabled("Not connected to the agent (Capture > Reconnect to Agent).");
+  } else if (st.armed) {
+    ImGui::TextColored(kGreen, "ARMED");
+    ImGui::SameLine();
+    ImGui::Text("%s | ring %u MB | recording %s", st.target.empty() ? "capture" : st.target.c_str(),
+                st.ringMb, formatElapsed(st.elapsedSeconds).c_str());
+  } else if (st.circularUnknown) {
+    ImGui::TextColored(kAmber, "Capturing (started elsewhere)");
+    ImGui::TextWrapped(
+        "This viewer did not start the capture, so it cannot tell whether it is circular. Flush now works "
+        "only for a capture started with a circular buffer.");
+  } else {
+    ImGui::TextDisabled(
+        "Not armed. Start a capture with a circular buffer (Capture > Run/Attach/System, "
+        "'Circular buffer (MB)' > 0) to record continuously and flush the last seconds.");
+  }
+  ImGui::Separator();
+  ImGui::BeginDisabled(!st.capturing);
+  ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+  ImGui::InputInt("seconds", &m_flushSeconds, 1, 10);
+  m_flushSeconds = std::clamp(m_flushSeconds, 1, 3600);
+  ImGui::SameLine();
+  if (ImGui::Button("Flush now")) flushNow();
+  ImGui::EndDisabled();
+  ImGui::Separator();
+  ImGui::Text("Flushed captures (%zu)", m_flushed.size());
+  if (m_flushed.empty()) {
+    ImGui::TextDisabled(
+        "None yet. The engine's Tachyon_RequestFlush() and 'tachyon-cli flush' show up here too.");
+    return;
+  }
+  if (!ImGui::BeginTable("##flushed", 5,
+                         ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
+                             ImGuiTableFlags_SizingStretchProp,
+                         ImVec2(0.0f, 0.0f)))
+    return;
+  ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 6.0f);
+  ImGui::TableSetupColumn("Reason", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+  ImGui::TableSetupColumn("Span", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 5.0f);
+  ImGui::TableSetupColumn("File", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+  ImGui::TableSetupColumn("##open", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 4.0f);
+  ImGui::TableSetupScrollFreeze(0, 1);
+  ImGui::TableHeadersRow();
+  for (size_t i = m_flushed.size(); i-- > 0;) {  // newest first
+    const FlushedCapture& f = m_flushed[i];
+    ImGui::TableNextRow();
+    ImGui::PushID(static_cast<int>(i));
+    ImGui::TableNextColumn();
+    const std::time_t t = std::chrono::system_clock::to_time_t(f.at);
+    std::tm tm{};
+#if TACHYON_PLATFORM_WINDOWS
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char clock[16];
+    std::strftime(clock, sizeof(clock), "%H:%M:%S", &tm);
+    ImGui::TextUnformatted(clock);
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(f.reason.c_str());
+    if (f.coalesced > 0) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("(+%u)", f.coalesced);
+    }
+    ImGui::TableNextColumn();
+    ImGui::Text("%.1f s", f.durationS);
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(pathToUtf8(pathFromUtf8(f.path).filename()).c_str());
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", f.path.c_str());
+    ImGui::TableNextColumn();
+    if (ImGui::SmallButton("Open")) openFlushed(i);
+    ImGui::PopID();
+  }
+  ImGui::EndTable();
+}
+
 namespace {
+
+class FlightRecorderPanel final : public IPanel {
+ public:
+  explicit FlightRecorderPanel(CaptureController& controller) : m_controller(controller) {}
+  const char* name() const override { return kFlightRecorderPanelName; }
+  void draw(const PanelContext&, bool* open) override {
+    if (ImGui::Begin(name(), open)) m_controller.drawFlightRecorderContents();
+    ImGui::End();
+  }
+
+ private:
+  CaptureController& m_controller;
+};
 
 class CapturePanel final : public IPanel {
  public:
@@ -736,6 +895,10 @@ class CapturePanel final : public IPanel {
 
 std::unique_ptr<IPanel> makeCapturePanel(CaptureController& controller) {
   return std::make_unique<CapturePanel>(controller);
+}
+
+std::unique_ptr<IPanel> makeFlightRecorderPanel(CaptureController& controller) {
+  return std::make_unique<FlightRecorderPanel>(controller);
 }
 
 }  // namespace tachyon::viewer
