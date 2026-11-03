@@ -29,7 +29,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-34 | Line/instruction attribution, disassembly | C | merged (WP-34b merged; WP-34c call-site field) | wp/34-lines-disasm | 2026-10-25 |
 | WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
-| WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
+| WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | in progress | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
 | WP-41 | Session explorer and capture dialogs | D | in progress | wp/41-session-explorer | 2026-11-03 |
 | WP-42 | Threads timeline | D | merged; needs GPU verification (60 fps) | wp/42-threads-timeline | 2026-10-25 |
@@ -65,6 +65,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | M0 | passed with exceptions | 2026-10-25 | CI green on Linux and Windows. etlstat numbers pending the user's Windows run (WP-01). Fixtures are generated at build time and checked against SHA256s, because LFS push is blocked. Trace round-trip/interning budget: skewed met (8.66 s), uniform 11.99 s against 10 s, memory met after compact. |
 | M1 | passed for the testbed; engine part pending WP-14 (user-assisted) | 2026-10-25 | Windows CI (elevated runner): `tachyon-cli capture --launch tachyon-testbed.exe` gives a trace with 0 lost events, loader samples before main, child following and attach; the trace opens in TraceReader. Engine capture and conversion-time budget on a real engine capture need the user (WP-14). 20 s dev-box run queued below. |
 | M2 | passed with exceptions | 2026-10-25 | Windows CI: DIA resolves testbed hot functions to file:line and the inline scenario to inline chains (every frame has a line); 1 M RVAs in about 4 s (budget 20 s); ntdll.pdb fetched from msdl.microsoft.com. No team symbol store yet (Part 7 default), so the team-store fetch is untested. An end-to-end symbolized testbed capture in the viewer on Windows is queued for the user. Known limits: hot/cold separated blocks resolve only when the parent's length covers them; an unbounded last public symbol claims trailing addresses. |
+| M7 | passed | 2026-11-03 | Linux testbed captures: spin leaf shares 38/29/19/10% vs expected 40/30/20/10% (WP-70 verifier, within ±5%); lock scenario on CI with sched tracepoints: 5,813/5,813 waits woken by the holder (WP-71); SDK scopes over the Unix socket with the perf backend on CI (WP-73). `tachyon-cli doctor` checks the host. |
 
 ## WP-03 measured numbers (GitHub ubuntu-24.04 runner)
 
