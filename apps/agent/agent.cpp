@@ -5,6 +5,16 @@
 #include "core/log.h"
 #include "core/platform.h"
 
+#if TACHYON_PLATFORM_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -106,6 +116,23 @@ std::string processNameFor(uint32_t pid, const std::string& launchedExeStem) {
     std::ifstream in("/proc/" + std::to_string(pid) + "/comm");
     std::string comm;
     if (in && std::getline(in, comm) && !comm.empty()) return comm;
+  }
+#elif TACHYON_PLATFORM_WINDOWS
+  if (pid != 0) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process != nullptr) {
+      wchar_t buffer[MAX_PATH * 4];
+      DWORD size = static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0]));
+      std::string stem;
+      if (QueryFullProcessImageNameW(process, 0, buffer, &size) != 0 && size > 0) {
+        try {
+          stem = sanitizeFileStem(std::filesystem::path(std::wstring(buffer, size)).stem().string(), 40);
+        } catch (const std::exception&) {  // a name the narrow code page cannot represent
+        }
+      }
+      CloseHandle(process);
+      if (!stem.empty()) return stem;
+    }
   }
 #endif
   return pid != 0 ? "pid" + std::to_string(pid) : "process";
