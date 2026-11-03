@@ -32,6 +32,18 @@ void WarningsBanner::update(const Document* document, uint64_t documentGeneratio
   m_dismissed = m_dismissedDocuments.count(m_key) != 0;
 }
 
+void WarningsBanner::addNotice(CaptureWarningKind kind, std::string text) {
+  for (CaptureWarning& w : m_warnings) {
+    if (w.kind == kind) {
+      w.text = std::move(text);
+      m_dismissed = false;
+      return;
+    }
+  }
+  m_warnings.push_back({kind, std::move(text)});
+  m_dismissed = false;
+}
+
 void WarningsBanner::dismiss() {
   m_dismissed = true;
   if (!m_key.empty()) m_dismissedDocuments.insert(m_key);

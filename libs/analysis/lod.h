@@ -106,6 +106,17 @@ struct LodOptions {
   // Ignored (no fine level) when forceBaseLevel is set, the base level is L0 or the model has 2^24 callstack
   // nodes.
   bool fineStrip = true;
+  // Memory ceiling for the stored levels (WP-64), 0 = none. When the levels of the chosen base level would take
+  // more, prepare() raises the base level (fewer, wider buckets; the finest zooms are then answered from the
+  // samples) until they fit or only the top level is left, and drops the fine strip level. The result is
+  // reported by degradedBaseLevels().
+  uint64_t maxBytes = 0;
+};
+
+// What trimMemory() has taken away from a built TimelineLod.
+struct LodTrim {
+  uint32_t droppedLevels = 0;  // finest stored levels freed
+  bool fineDropped = false;    // the fine strip level was freed
 };
 
 enum class QueryMode : uint8_t {
@@ -237,8 +248,20 @@ class TimelineLod {
   // Fraction of the build work finished, weighted by sample count; 1.0 when all threads are ready.
   float progress() const;
 
-  // Thread-safe. Stored levels, finest first (empty before a successful prepare()).
+  // Thread-safe. Stored levels, finest first (empty before a successful prepare()). After trimMemory() the
+  // dropped levels are still listed (level indices stay stable) but hold no data: queries skip them.
   const std::vector<LodLevelInfo>& levels() const;
+
+  // WP-64, graceful degradation. Frees at least `bytes` of level data (the fine strip level first, then the
+  // finest stored levels one by one, always keeping the coarsest), only when the build has finished (otherwise
+  // returns 0) and returns the bytes freed. Queries for the zooms of the dropped levels are then answered from
+  // the next coarser level or directly from the samples, which is exact but slower. NOT thread-safe against
+  // queries or build(): the viewer calls it on the main thread between frames, where it queries.
+  size_t trimMemory(size_t bytes);
+  // Thread-safe. What trimMemory() has freed so far.
+  LodTrim trimState() const;
+  // Thread-safe. Levels prepare() left out because of LodOptions::maxBytes (0 = none).
+  uint32_t degradedBaseLevels() const;
   // Thread-safe. Bucket of a ready thread; false if the thread is not ready or the indices are out of range.
   bool bucket(ThreadIdx thread, size_t levelIndex, uint32_t bucketIndex, LodBucket& out) const;
   // Thread-safe. Bytes held by the per-thread level arrays of ready threads.

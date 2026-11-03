@@ -1,5 +1,6 @@
 #include "viewer/analysis_context.h"
 
+#include "analysis/query_cache.h"
 #include "viewer/document.h"
 
 #include <algorithm>
@@ -31,12 +32,12 @@ std::span<const uint32_t> NodeChildIndex::children(uint32_t node) const {
 AnalysisSnapshot::AnalysisSnapshot(std::shared_ptr<const model::TraceModel> model,
                                    std::shared_ptr<symbols::SymbolService> symbols,
                                    analysis::AggregationOptions options, uint64_t symbolGeneration,
-                                   analysis::QueryExecutor* executor)
+                                   analysis::QueryExecutor* executor, size_t cacheBudgetBytes)
     : m_model(std::move(model)),
       m_symbols(std::move(symbols)),
       m_options(options),
       m_symbolGeneration(symbolGeneration),
-      m_context(*m_model, *m_symbols, options) {
+      m_context(*m_model, *m_symbols, options, analysis::QueryCacheConfig{cacheBudgetBytes}) {
   if (executor) m_context.setExecutor(executor);
 }
 
@@ -69,9 +70,22 @@ std::shared_ptr<const AnalysisSnapshot> AnalysisContext::snapshot(const analysis
         s->options().blendScopes == options.blendScopes && s->options().groupByFiber == options.groupByFiber)
       return s;
   }
-  m_snapshots.push_back(
-      std::make_shared<const AnalysisSnapshot>(model, symbols, options, symbolGeneration, executor));
+  m_snapshots.push_back(std::make_shared<const AnalysisSnapshot>(model, symbols, options, symbolGeneration,
+                                                                 executor, m_cacheBudget));
   return m_snapshots.back();
+}
+
+size_t AnalysisContext::cacheBytes() const {
+  const std::lock_guard<std::mutex> lock(m_mutex);
+  size_t bytes = 0;
+  for (const auto& s : m_snapshots) bytes += s->context().cacheStats().bytes;
+  return bytes;
+}
+
+void AnalysisContext::setCacheBudget(size_t bytes) const {
+  const std::lock_guard<std::mutex> lock(m_mutex);
+  m_cacheBudget = bytes;
+  for (const auto& s : m_snapshots) s->context().cache().setBudget(bytes);
 }
 
 std::shared_ptr<const NodeChildIndex> AnalysisContext::childIndex() const {

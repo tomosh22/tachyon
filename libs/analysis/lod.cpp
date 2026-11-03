@@ -866,6 +866,10 @@ struct TimelineLod::Impl {
   std::vector<uint64_t> work;  // build weight per thread
   uint64_t totalWork = 0;
   std::atomic<uint64_t> doneWork{0};
+  // trimMemory(): finest levels freed and whether the fine strip level is gone (read by queries).
+  std::atomic<uint32_t> firstLevel{0};
+  std::atomic<bool> fineDropped{false};
+  uint32_t degradedBase = 0;
 
   explicit Impl(size_t n) : ready(n), work(n, 0) {
     for (auto& r : ready) r.store(0, std::memory_order_relaxed);
@@ -874,7 +878,8 @@ struct TimelineLod::Impl {
   // Coarsest level whose bucket width is <= the tick span of one pixel (width * pixels <= span), or -1.
   int selectLevel(uint64_t span, uint32_t pixels) const {
     const uint64_t pixelSpan = span / pixels;
-    for (int l = static_cast<int>(geo.levels.size()) - 1; l >= 0; --l)
+    const int first = static_cast<int>(firstLevel.load(std::memory_order_relaxed));
+    for (int l = static_cast<int>(geo.levels.size()) - 1; l >= first; --l)
       if (geo.levels[static_cast<size_t>(l)].bucketWidth <= pixelSpan) return l;
     return -1;
   }
@@ -930,17 +935,39 @@ Result<TimelineLod> TimelineLod::prepare(const TraceModel& model, const LodOptio
     while (byDensity < kMaxLevelNumber && widthOf(byDensity) < need) ++byDensity;
     base = std::max(byCount, byDensity);
   }
-  for (uint32_t level = base;; level += g.step) {
-    LodLevelInfo li;
-    li.level = level;
-    li.bucketWidth = widthOf(level);
-    li.bucketCount = static_cast<uint32_t>(countAt(g.total, level));
-    g.levels.push_back(li);
-    if (li.bucketCount <= 1 || level + g.step > kMaxLevelNumber) break;
+  auto makeLevels = [&](uint32_t from) {
+    g.levels.clear();
+    for (uint32_t level = from;; level += g.step) {
+      LodLevelInfo li;
+      li.level = level;
+      li.bucketWidth = widthOf(level);
+      li.bucketCount = static_cast<uint32_t>(countAt(g.total, level));
+      g.levels.push_back(li);
+      if (li.bucketCount <= 1 || level + g.step > kMaxLevelNumber) break;
+    }
+  };
+  makeLevels(base);
+  bool degraded = false;
+  if (options.maxBytes != 0) {
+    // 16 bytes per bucket and level, per thread; the fine strip level (4 bytes per half base bucket) is
+    // sacrificed first, then the base level moves up.
+    const auto levelBytes = [&]() {
+      uint64_t buckets = 0;
+      for (const LodLevelInfo& li : g.levels) buckets += li.bucketCount;
+      return buckets * 16ull * model.threads.size();
+    };
+    const uint32_t wanted = base;
+    while (levelBytes() > options.maxBytes && g.levels.size() > 1) {
+      base += 1;
+      makeLevels(base);
+    }
+    degraded = base != wanted;
+    impl->degradedBase = base - wanted;
   }
 
   // Fine strip level: half the base bucket, for pixel spans between half the base width and the base width.
-  if (options.fineStrip && options.forceBaseLevel < 0 && base >= 1 && model.nodes.size() < kFineMaxNodes) {
+  if (!degraded && options.fineStrip && options.forceBaseLevel < 0 && base >= 1 &&
+      model.nodes.size() < kFineMaxNodes) {
     g.fineLevel = base - 1;
     g.fineWidth = widthOf(g.fineLevel);
     g.fineCount = static_cast<uint32_t>(countAt(g.total, g.fineLevel));
@@ -1037,8 +1064,51 @@ const std::vector<LodLevelInfo>& TimelineLod::levels() const {
   return m_impl ? m_impl->geo.levels : kEmpty;
 }
 
+size_t TimelineLod::trimMemory(size_t bytes) {
+  if (!m_impl || readyThreadCount() != m_impl->threads.size()) return 0;
+  Impl& im = *m_impl;
+  size_t freed = 0;
+  auto release = [&](auto& vec) {
+    freed += vec.capacity() * sizeof(typename std::decay_t<decltype(vec)>::value_type);
+    std::decay_t<decltype(vec)>().swap(vec);
+  };
+  if (!im.fineDropped.load(std::memory_order_relaxed) && im.geo.fineCount > 0) {
+    im.fineDropped.store(true, std::memory_order_relaxed);
+    for (ThreadLod& t : im.threads) release(t.fine);
+  }
+  while (freed < bytes) {
+    const uint32_t first = im.firstLevel.load(std::memory_order_relaxed);
+    if (first + 1 >= im.geo.levels.size()) break;  // the coarsest level stays
+    for (ThreadLod& t : im.threads) {
+      if (first >= t.levels.size()) continue;
+      LevelArrays& a = t.levels[first];
+      release(a.band);
+      release(a.dominant);
+      release(a.strip);
+      release(a.lca);
+      release(a.maxDepth);
+    }
+    im.firstLevel.store(first + 1, std::memory_order_relaxed);
+  }
+  return freed;
+}
+
+LodTrim TimelineLod::trimState() const {
+  LodTrim t;
+  if (m_impl) {
+    t.droppedLevels = m_impl->firstLevel.load(std::memory_order_relaxed);
+    t.fineDropped = m_impl->fineDropped.load(std::memory_order_relaxed);
+  }
+  return t;
+}
+
+uint32_t TimelineLod::degradedBaseLevels() const {
+  return m_impl ? m_impl->degradedBase : 0;
+}
+
 bool TimelineLod::bucket(ThreadIdx thread, size_t levelIndex, uint32_t bucketIndex, LodBucket& out) const {
   if (!threadReady(thread) || levelIndex >= m_impl->geo.levels.size() ||
+      levelIndex < m_impl->firstLevel.load(std::memory_order_relaxed) ||
       bucketIndex >= m_impl->geo.levels[levelIndex].bucketCount)
     return false;
   const LevelArrays& a = m_impl->threads[thread.get()].levels[levelIndex];
@@ -1447,7 +1517,8 @@ Result<void> TimelineLod::sampleStrip(const SampleStripQuery& q, SampleStripResu
 
   // Fine strip level: pixel spans between half the base width and the base width (an approximation like every
   // level; the exact direct path below serves narrower pixels and threads that are not built yet).
-  if (q.mode == QueryMode::Auto && im.geo.fineCount > 0 && (q.t1 - q.t0) / q.pixelWidth >= im.geo.fineWidth &&
+  if (q.mode == QueryMode::Auto && im.geo.fineCount > 0 && !im.fineDropped.load(std::memory_order_relaxed) &&
+      (q.t1 - q.t0) / q.pixelWidth >= im.geo.fineWidth &&
       im.isReady(t)) {
     out.level = static_cast<uint8_t>(im.geo.fineLevel);
     const uint32_t* fine = im.threads[t].fine.data();

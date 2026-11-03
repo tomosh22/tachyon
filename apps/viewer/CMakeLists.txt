@@ -7,6 +7,7 @@ endif()
 tachyon_require_imgui()
 
 add_library(tachyon_viewer_core STATIC
+  memory_governor.cpp
   analysis_context.cpp
   app.cpp
   builtin_panels.cpp

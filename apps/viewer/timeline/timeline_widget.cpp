@@ -1,5 +1,7 @@
 #include "viewer/timeline/timeline_widget.h"
 
+#include "viewer/memory_governor.h"
+
 #include "analysis/thread_states.h"
 #include "analysis/wait_reasons.h"
 #include "viewer/common/rect_batch.h"
@@ -156,6 +158,31 @@ void TimelineWidget::setHidden(ThreadIdx thread, bool hidden) {
   }
 }
 
+size_t TimelineWidget::lodBytes() const {
+  const analysis::TimelineLod* lod = m_doc && m_doc->shared ? m_doc->shared->lodIfPrepared() : nullptr;
+  return lod ? lod->memoryBytes() : 0;
+}
+
+size_t TimelineWidget::trimLod(size_t bytes) {
+  if (!m_doc || !m_doc->shared || !m_doc->shared->lodOwner) return 0;
+  if (m_doc->shared->lodIfPrepared() == nullptr) return 0;
+  const size_t freed = m_doc->shared->lodOwner->trimMemory(bytes);
+  if (freed > 0) {
+    for (RowCache& r : m_doc->rows) r.valid = false;  // the zooms of the dropped levels are answered anew
+  }
+  return freed;
+}
+
+analysis::LodTrim TimelineWidget::lodTrim() const {
+  const analysis::TimelineLod* lod = m_doc && m_doc->shared ? m_doc->shared->lodIfPrepared() : nullptr;
+  return lod ? lod->trimState() : analysis::LodTrim{};
+}
+
+uint32_t TimelineWidget::lodDegradedBaseLevels() const {
+  const analysis::TimelineLod* lod = m_doc && m_doc->shared ? m_doc->shared->lodIfPrepared() : nullptr;
+  return lod ? lod->degradedBaseLevels() : 0;
+}
+
 bool TimelineWidget::lodFinished() const {
   if (!m_doc || !m_doc->shared) return false;
   const analysis::TimelineLod* lod = m_doc->shared->lodIfPrepared();
@@ -282,7 +309,19 @@ void TimelineWidget::startDocument(const PanelContext& context) {
 void TimelineWidget::startBuild(const PanelContext& context) {
   DocState& d = *m_doc;
   d.buildStarted = true;
-  const analysis::LodOptions options;
+  analysis::LodOptions options;
+  // WP-64: what the memory ceiling leaves for the index after the model (at least a few levels' worth).
+  const uint64_t ceiling =
+      m_options.memoryCeilingBytes != 0
+          ? m_options.memoryCeilingBytes
+          : (context.memoryCeilingBytes != 0
+                 ? context.memoryCeilingBytes
+                 : memoryCeilingBytes(context.settings ? context.settings->memoryCeilingPercent : 0,
+                                      physicalMemoryBytes()));
+  if (ceiling != 0) {
+    const uint64_t model = d.model->residentBytes();
+    options.maxBytes = std::max<uint64_t>(ceiling > model ? ceiling - model : 0, uint64_t{32} << 20);
+  }
   if (m_options.buildInline || !context.jobs) {
     buildLodShared(*d.shared, options, nullptr, {});
     d.shared->finished.store(true, std::memory_order_release);

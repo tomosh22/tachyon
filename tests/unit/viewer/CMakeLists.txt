@@ -12,7 +12,7 @@ tachyon_add_test(viewer_tests
           stats_fuzzy_test.cpp stats_model_test.cpp stats_widget_test.cpp
           status_banner_test.cpp status_bar_test.cpp status_symbols_test.cpp status_toast_test.cpp
           status_shortcuts_test.cpp status_followups_test.cpp
-          inst_lanes_test.cpp inst_frames_plots_test.cpp inst_widget_test.cpp streaming_app_test.cpp
+          inst_lanes_test.cpp inst_frames_plots_test.cpp inst_widget_test.cpp streaming_app_test.cpp memory_ceiling_test.cpp
           source_model_test.cpp source_widget_test.cpp
           capture_model_test.cpp session_explorer_catalog_test.cpp session_explorer_panel_test.cpp
           capture_agent_session_test.cpp capture_app_test.cpp

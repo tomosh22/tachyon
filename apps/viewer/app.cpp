@@ -14,6 +14,7 @@
 #include "viewer/status/symbol_paths.h"
 #include "viewer/status/symbols_panel.h"
 #include "viewer/theme.h"
+#include "viewer/timeline/timeline_panel.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -195,6 +196,7 @@ PanelContext App::panelContext() const {
   c.documentGeneration = m_documentGeneration;
   c.symbols = m_document ? m_document->symbols().get() : nullptr;
   c.symbolGeneration = m_symbolGeneration;
+  c.memoryCeilingBytes = memoryCeiling();
   c.redrawFn = [](void* app) { static_cast<App*>(app)->requestRedraw(); };
   c.redrawUser = const_cast<App*>(this);
   return c;
@@ -333,6 +335,50 @@ void App::startSymbolResolution(Document& document) {
     mailbox->dirty.store(true);
     if (mailbox->wake) mailbox->wake();
   });
+}
+
+// ---- WP-64: memory ceiling ----
+uint64_t App::memoryCeiling() const {
+  if (m_options.memoryCeilingBytes != 0) return m_options.memoryCeilingBytes;
+  return memoryCeilingBytes(m_settings.memoryCeilingPercent, physicalMemoryBytes());
+}
+
+void App::setMemoryCeilingPercent(uint32_t percent) {
+  m_settings.memoryCeilingPercent =
+      percent == 0 ? 0u : std::clamp<uint32_t>(percent, Settings::kMinMemoryCeilingPercent, 100u);
+  if (m_options.persist) saveSettings();
+  checkMemory();
+}
+
+void App::checkMemory() {
+  m_lastMemoryCheck = Clock::now();
+  if (!m_document) return;
+  if (m_memoryGeneration != m_documentGeneration) {  // a new document: new numbers, nothing degraded yet
+    m_memoryGeneration = m_documentGeneration;
+    m_memoryModelBytes = m_document->model().residentBytes();
+    m_memory.reset();
+  }
+  timeline::TimelineWidget* widget = nullptr;
+  if (PanelEntry* entry = m_panels.find(ThreadsTimelinePanel::kName)) {
+    if (auto* panel = dynamic_cast<ThreadsTimelinePanel*>(entry->panel.get())) widget = &panel->widget();
+  }
+  const Document& document = *m_document;
+  MemorySources sources;
+  sources.modelBytes = [this] { return m_memoryModelBytes; };
+  sources.lodBytes = [widget] { return widget ? static_cast<uint64_t>(widget->lodBytes()) : uint64_t{0}; };
+  sources.cacheBytes = [&document] { return static_cast<uint64_t>(document.analysis().cacheBytes()); };
+  sources.trimLod = [widget](uint64_t bytes) {
+    return widget ? static_cast<uint64_t>(widget->trimLod(static_cast<size_t>(bytes))) : uint64_t{0};
+  };
+  sources.limitCaches = [&document](uint64_t budget) {
+    document.analysis().setCacheBudget(static_cast<size_t>(budget));
+  };
+  if (m_memory.update(sources, memoryCeiling())) {
+    const MemoryStatus& status = m_memory.status();
+    TACHYON_LOG_WARN("memory: {}", status.message);
+    toast(ToastLevel::Warning, status.message);
+    m_banner.addNotice(CaptureWarningKind::MemoryDegraded, status.message);
+  }
 }
 
 void App::toast(ToastLevel level, std::string text) {
@@ -504,6 +550,9 @@ bool App::frame(int waitMs) {
   pumpStream();
   pumpSymbolEvents();
   m_capture->pump();
+  if (m_document && (m_options.memoryCheckMs <= 0 || m_memoryGeneration != m_documentGeneration ||
+                     Clock::now() - m_lastMemoryCheck >= std::chrono::milliseconds(m_options.memoryCheckMs)))
+    checkMemory();
 
   applyPendingStyle();
   m_renderer->beginFrame();
@@ -648,6 +697,22 @@ void App::drawMenuBar() {
     if (ImGui::BeginMenu("Theme")) {
       if (ImGui::MenuItem("Dark", nullptr, m_settings.theme == ThemeKind::Dark)) setTheme(ThemeKind::Dark);
       if (ImGui::MenuItem("Light", nullptr, m_settings.theme == ThemeKind::Light)) setTheme(ThemeKind::Light);
+      ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Memory limit")) {
+      // WP-64: above the limit the viewer frees timeline detail levels and stops caching analysis results.
+      const uint64_t physical = physicalMemoryBytes();
+      struct Choice {
+        uint32_t percent;
+        const char* name;
+      };
+      for (const Choice c : {Choice{50, "50%"}, Choice{60, "60%"}, Choice{75, "75% (default)"},
+                             Choice{90, "90%"}, Choice{0, "No limit"}}) {
+        std::string label = c.name;
+        if (c.percent != 0 && physical != 0) label += "  (" + formatBytes(memoryCeilingBytes(c.percent, physical)) + ")";
+        if (ImGui::MenuItem(label.c_str(), nullptr, m_settings.memoryCeilingPercent == c.percent))
+          setMemoryCeilingPercent(c.percent);
+      }
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("UI Scale")) {

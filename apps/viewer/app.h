@@ -5,6 +5,7 @@
 #include "viewer/document.h"
 #include "viewer/file_browser.h"
 #include "viewer/job_queue.h"
+#include "viewer/memory_governor.h"
 #include "viewer/panel.h"
 #include "viewer/renderer.h"
 #include "viewer/selection_bus.h"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
@@ -76,6 +78,10 @@ struct AppOptions {
   // WP-64 (tests): called on the loading thread after each preview was published, before the next stage
   // starts; a test blocks here to look at the preview.
   std::function<void()> streamGate;
+  // WP-64: memory ceiling. 0 = Settings::memoryCeilingPercent of the physical RAM; tests pass a byte count.
+  uint64_t memoryCeilingBytes = 0;
+  // How often the ceiling is checked (the first check of a document is immediate); 0 = every frame.
+  int memoryCheckMs = 1000;
 };
 
 class App {
@@ -142,6 +148,21 @@ class App {
   ShortcutRegistry& shortcuts() { return m_shortcuts; }
   ShortcutSheet& shortcutSheet() { return m_shortcutSheet; }
   PathPicker& symbolPathPicker() { return m_pathPicker; }
+  // ---- WP-64: memory ceiling ----
+  // Main-thread only. What the last check of the memory ceiling found and degraded (Normal when nothing).
+  const MemoryStatus& memoryStatus() const { return m_memory.status(); }
+  // Main-thread only. The ceiling in bytes now (0 = none).
+  uint64_t memoryCeiling() const;
+  // Main-thread only. Sets Settings::memoryCeilingPercent (0 = none), saves it and checks at once.
+  void setMemoryCeilingPercent(uint32_t percent);
+  // Main-thread only. Runs the check now (frame() runs it every options.memoryCheckMs).
+  void checkMemory();
+  // Main-thread only (tests). Replaces AppOptions::memoryCeilingBytes; checks at once.
+  void setMemoryCeilingOverride(uint64_t bytes) {
+    m_options.memoryCeilingBytes = bytes;
+    checkMemory();
+  }
+
   // Main-thread only. Adds `path` (a directory or a symbol file) to Settings::symbolSearchPaths (persisted
   // unless persist is off), then re-runs the symbol resolution of the open document. Returns false and sets
   // `error` (also toasted) if the path is unusable. Cost: resolution runs again for ALL modules.
@@ -189,6 +210,10 @@ class App {
   uint64_t m_symbolGeneration = 0;
   std::shared_ptr<SymbolMailbox> m_symbolMailbox;
 
+  MemoryGovernor m_memory;
+  uint64_t m_memoryModelBytes = 0;       // TraceModel::residentBytes() of the document of m_memoryGeneration
+  uint64_t m_memoryGeneration = ~0ull;
+  std::chrono::steady_clock::time_point m_lastMemoryCheck{};
   JobQueue::JobId m_openJob = 0;
   uint64_t m_streamCounter = 0;  // WP-64: numbers the opens; documents of one open share the id
   uint64_t m_openStream = 0;     // the stream of m_openJob
