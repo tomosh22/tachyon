@@ -56,11 +56,18 @@ struct ScopeTrack {
   // then read the instance.
   std::vector<uint32_t> fill;
   std::vector<uint8_t> flags;
+  // OR of `flags` over blocks of kFlagBlock intervals, so that the flags of a merged run are found without
+  // visiting every interval (WP-64). Empty in tracks built by hand.
+  std::vector<uint8_t> flagBlocks;
+  static constexpr size_t kFlagBlock = 64;
 
   // Thread-safe (const access).
   size_t size() const { return begin.size(); }
   uint32_t fillOf(size_t i) const;
   uint8_t flagsOf(size_t i) const;
+  // Thread-safe (const access). OR of flagsOf() over [first, first + count): what a merged item of `count`
+  // sub-pixel intervals stands for (a lock wait or unterminated scope anywhere in the run marks it).
+  uint8_t flagsOver(size_t first, size_t count) const;
 };
 
 struct ScopeLane {
@@ -217,7 +224,9 @@ class ScopeLanesView {
   // Lines a row of `thread` needs: 0 when the thread has no scopes (or the set is ready and empty for it),
   // 1 while the set is pending (the pending look).
   uint32_t linesFor(ThreadIdx thread, bool expanded) const;
-  // True when the (ready) set has scopes for `thread`, or the set is not ready yet.
+  // True when the (ready) set has scopes for `thread`; while the set is not ready, when the trace has scope
+  // or fiber events on `thread` (WP-64: rows of threads without any do not reserve a line for the pending
+  // look).
   bool mayHaveScopes(ThreadIdx thread) const;
 
   // Main-thread only. Draws the lines of one row. `rowTop` is the screen y of the row top; the lane block
@@ -252,6 +261,9 @@ class ScopeLanesView {
   uint32_t m_labelBudget = 0;
   bool m_record = false;
   std::vector<LaneItem> m_decorated;
+  // Threads with scope or fiber events, computed once per document (one pass over the events).
+  std::vector<uint8_t> m_candidates;
+  uint64_t m_candidatesDocument = ~0ull;
 };
 
 }  // namespace tachyon::viewer::timeline

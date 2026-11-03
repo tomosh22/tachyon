@@ -53,7 +53,8 @@ class AnalysisSnapshot {
   // Thread-safe (constructor). Requires model->statesByThread to be built.
   AnalysisSnapshot(std::shared_ptr<const model::TraceModel> model,
                    std::shared_ptr<symbols::SymbolService> symbols, analysis::AggregationOptions options,
-                   uint64_t symbolGeneration, analysis::QueryExecutor* executor);
+                   uint64_t symbolGeneration, analysis::QueryExecutor* executor,
+                   size_t cacheBudgetBytes = analysis::QueryCacheConfig{}.budgetBytes);
   // Thread-safe.
   const analysis::QueryContext& context() const { return m_context; }
   const model::TraceModel& model() const { return *m_model; }
@@ -99,6 +100,12 @@ class AnalysisContext {
     return future;
   }
 
+  // WP-64 (memory ceiling). Thread-safe. Bytes held by the query caches of the snapshots currently held.
+  size_t cacheBytes() const;
+  // Thread-safe. Sets the byte budget of the query cache of every snapshot held and of the ones created later
+  // (the caches evict down to it at once; 0 = nothing is cached any more).
+  void setCacheBudget(size_t bytes) const;
+
   // Thread-safe. The child index of the model, built on first use (O(nodes)).
   std::shared_ptr<const NodeChildIndex> childIndex() const;
   // Thread-safe. Number of snapshots currently held (tests).
@@ -111,6 +118,7 @@ class AnalysisContext {
   mutable std::mutex m_mutex;
   mutable std::vector<std::shared_ptr<const AnalysisSnapshot>> m_snapshots;
   mutable std::shared_ptr<const NodeChildIndex> m_childIndex;
+  mutable size_t m_cacheBudget = analysis::QueryCacheConfig{}.budgetBytes;
   mutable std::vector<std::pair<analysis::QueryExecutor*, analysis::TaskHandle>> m_tasks;
 };
 

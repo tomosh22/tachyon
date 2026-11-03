@@ -42,6 +42,12 @@ std::string describeDocument(const Document& document) {
   if (!duration.empty()) out += "  |  " + duration;
   out += "  |  " + std::to_string(m.threads.size()) + " threads  |  " + groupDigits(document.totalSamples()) +
          " samples";
+  if (document.isPreview()) {  // WP-64: a streaming preview
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "  |  preview: first %.0f%% of the trace, loading the rest",
+                  m.loadStatus.fraction() * 100.0);
+    out += buf;
+  }
   return out;
 }
 

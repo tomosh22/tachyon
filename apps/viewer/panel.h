@@ -43,6 +43,9 @@ struct PanelContext {
   // run on it through Document::analysis(). Null in bare test setups. Thread-safe object, but handed out for
   // the main thread's use.
   analysis::QueryExecutor* queryExecutor = nullptr;
+  // WP-64: the memory ceiling in bytes (0 = none) for panels that build big derived data (the timeline index
+  // budgets its levels with it).
+  uint64_t memoryCeilingBytes = 0;
   // Hook behind requestRedraw(); set by App.
   void (*redrawFn)(void*) = nullptr;
   void* redrawUser = nullptr;

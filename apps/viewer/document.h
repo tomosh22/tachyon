@@ -56,8 +56,17 @@ class Document {
   // Thread-safe: pure function on the model. Total samples over all threads.
   uint64_t totalSamples() const;
 
+  // WP-64 (streaming load): a preview document holds a time prefix of the file (model().loadStatus) and is
+  // replaced by the complete document of the same stream. Panels that want to keep the user's place across
+  // the swap compare streamId(): documents of one open share it (0 = not part of a stream).
+  bool isPreview() const { return !m_model->loadStatus.complete; }
+  uint64_t streamId() const { return m_streamId; }
+  // Main-thread only, before the document is shown.
+  void setStreamId(uint64_t id) { m_streamId = id; }
+
  private:
   std::filesystem::path m_path;
+  uint64_t m_streamId = 0;
   std::shared_ptr<const model::TraceModel> m_model;
   std::shared_ptr<symbols::SymbolService> m_symbols;  // declared after m_model: destroyed first
   std::shared_ptr<IQueryExecutor> m_queries;

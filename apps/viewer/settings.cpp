@@ -180,6 +180,16 @@ Settings Settings::load(const std::filesystem::path& path) {
       TACHYON_LOG_WARN("settings: 'frameBudgetMs' is not a positive number, using default");
     }
   }
+  if (const auto it = j.find("memoryCeilingPercent"); it != j.end()) {
+    if (it->is_number_integer() && it->get<int64_t>() >= 0) {
+      const int64_t v = it->get<int64_t>();
+      s.memoryCeilingPercent =
+          v == 0 ? 0u
+                 : static_cast<uint32_t>(std::clamp<int64_t>(v, Settings::kMinMemoryCeilingPercent, 100));
+    } else {
+      TACHYON_LOG_WARN("settings: 'memoryCeilingPercent' is not a non-negative integer, using default");
+    }
+  }
   if (const auto it = j.find("capture"); it != j.end()) s.capture = readCaptureSettings(*it);
   if (const auto it = j.find("sourcePathMappings"); it != j.end()) {
     if (it->is_array()) {
@@ -213,6 +223,7 @@ Result<void> Settings::save(const std::filesystem::path& path) const {
   j["recentFiles"] = recentFiles;
   j["blendScopes"] = blendScopes;
   j["frameBudgetMs"] = frameBudgetMs;
+  j["memoryCeilingPercent"] = memoryCeilingPercent;
   j["capture"] = captureSettingsToJson(capture);
 
   std::error_code ec;

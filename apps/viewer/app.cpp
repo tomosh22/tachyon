@@ -14,6 +14,7 @@
 #include "viewer/status/symbol_paths.h"
 #include "viewer/status/symbols_panel.h"
 #include "viewer/theme.h"
+#include "viewer/timeline/timeline_panel.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -196,6 +197,7 @@ PanelContext App::panelContext() const {
   c.documentGeneration = m_documentGeneration;
   c.symbols = m_document ? m_document->symbols().get() : nullptr;
   c.symbolGeneration = m_symbolGeneration;
+  c.memoryCeilingBytes = memoryCeiling();
   c.redrawFn = [](void* app) { static_cast<App*>(app)->requestRedraw(); };
   c.redrawUser = const_cast<App*>(this);
   return c;
@@ -341,6 +343,50 @@ void App::startSymbolResolution(Document& document) {
   });
 }
 
+// ---- WP-64: memory ceiling ----
+uint64_t App::memoryCeiling() const {
+  if (m_options.memoryCeilingBytes != 0) return m_options.memoryCeilingBytes;
+  return memoryCeilingBytes(m_settings.memoryCeilingPercent, physicalMemoryBytes());
+}
+
+void App::setMemoryCeilingPercent(uint32_t percent) {
+  m_settings.memoryCeilingPercent =
+      percent == 0 ? 0u : std::clamp<uint32_t>(percent, Settings::kMinMemoryCeilingPercent, 100u);
+  if (m_options.persist) saveSettings();
+  checkMemory();
+}
+
+void App::checkMemory() {
+  m_lastMemoryCheck = Clock::now();
+  if (!m_document) return;
+  if (m_memoryGeneration != m_documentGeneration) {  // a new document: new numbers, nothing degraded yet
+    m_memoryGeneration = m_documentGeneration;
+    m_memoryModelBytes = m_document->model().residentBytes();
+    m_memory.reset();
+  }
+  timeline::TimelineWidget* widget = nullptr;
+  if (PanelEntry* entry = m_panels.find(ThreadsTimelinePanel::kName)) {
+    if (auto* panel = dynamic_cast<ThreadsTimelinePanel*>(entry->panel.get())) widget = &panel->widget();
+  }
+  const Document& document = *m_document;
+  MemorySources sources;
+  sources.modelBytes = [this] { return m_memoryModelBytes; };
+  sources.lodBytes = [widget] { return widget ? static_cast<uint64_t>(widget->lodBytes()) : uint64_t{0}; };
+  sources.cacheBytes = [&document] { return static_cast<uint64_t>(document.analysis().cacheBytes()); };
+  sources.trimLod = [widget](uint64_t bytes) {
+    return widget ? static_cast<uint64_t>(widget->trimLod(static_cast<size_t>(bytes))) : uint64_t{0};
+  };
+  sources.limitCaches = [&document](uint64_t budget) {
+    document.analysis().setCacheBudget(static_cast<size_t>(budget));
+  };
+  if (m_memory.update(sources, memoryCeiling())) {
+    const MemoryStatus& status = m_memory.status();
+    TACHYON_LOG_WARN("memory: {}", status.message);
+    toast(ToastLevel::Warning, status.message);
+    m_banner.addNotice(CaptureWarningKind::MemoryDegraded, status.message);
+  }
+}
+
 void App::toast(ToastLevel level, std::string text) {
   m_toasts.push(level, std::move(text));
   requestRedraw();
@@ -374,13 +420,16 @@ bool App::addSymbolPath(const std::filesystem::path& path, std::string& error) {
 }
 
 void App::onDocumentLoaded(std::shared_ptr<Document> document) {
+  // The complete document of a stream replaces its preview: the user's selection stays.
+  const bool continuation =
+      m_document && document->streamId() != 0 && m_document->streamId() == document->streamId();
   m_symbolMailbox.reset();
   m_document = std::move(document);
   ++m_documentGeneration;
   ++m_symbolGeneration;
   startSymbolResolution(*m_document);
   m_lastError.clear();
-  m_selection.clear();
+  if (!continuation) m_selection.clear();
   m_settings.addRecentFile(pathToUtf8(std::filesystem::absolute(m_document->path())));
   if (m_options.persist) saveSettings();
   notifyDocumentChanged();
@@ -388,6 +437,9 @@ void App::onDocumentLoaded(std::shared_ptr<Document> document) {
 
 void App::closeDocument() {
   if (!m_document) return;
+  // Closing the preview of a trace that is still loading abandons the load.
+  if (m_openJob != 0 && m_document->streamId() != 0 && m_document->streamId() == m_openStream)
+    m_jobs.cancel(m_openJob);
   m_document.reset();  // joins the symbol workers before the model can go away
   m_symbolMailbox.reset();
   ++m_documentGeneration;
@@ -396,39 +448,106 @@ void App::closeDocument() {
   notifyDocumentChanged();
 }
 
+// WP-64: the previews of a streaming load, handed from the loading job to the main thread.
+struct StreamMailbox {
+  std::mutex mutex;
+  std::shared_ptr<const model::TraceModel> preview;  // the newest preview the main thread has not taken yet
+  uint64_t stream = 0;
+  std::filesystem::path path;
+};
+
 void App::openFile(const std::filesystem::path& path) {
   if (m_openJob != 0) m_jobs.cancel(m_openJob);  // a new open supersedes the load in flight
   using Loaded = std::optional<Result<model::TraceModel>>;
   auto loaded = std::make_shared<Loaded>();
   m_lastError.clear();
   m_redrawFrames = std::max(m_redrawFrames, 3);
+  // Big files open in stages (WP-64): a preview of the first part of the capture is shown while the rest
+  // loads.
+  std::error_code sizeError;
+  const uint64_t fileBytes = std::filesystem::file_size(path, sizeError);
+  const bool streaming = m_options.streamingLoad && !sizeError && fileBytes >= m_options.streamMinFileBytes &&
+                         !m_options.streamStages.empty();
+  auto mailbox = std::make_shared<StreamMailbox>();
+  mailbox->stream = ++m_streamCounter;
+  mailbox->path = path;
+  m_stream = mailbox;
+  m_openStream = mailbox->stream;
+  const std::vector<double> stages = m_options.streamStages;
+  const std::function<void()> gate = m_options.streamGate;
   m_openJob = m_jobs.submit(
       "Loading " + pathToUtf8(path.filename()),
-      [path, loaded](JobContext& ctx) {
+      [path, loaded, mailbox, streaming, stages, gate](JobContext& ctx) {
         model::LoadOptions options;
         options.cancel = ctx.cancelFlag();
-        loaded->emplace(model::TraceModel::load(path, options, [&ctx](float f) { ctx.setProgress(f); }));
+        auto progress = [&ctx](float f) { ctx.setProgress(f); };
         // The timeline and the analysis queries need the thread state intervals (WP-31); build them while the
         // model is still mutable, before it is shared as const.
-        if (loaded->has_value() && (*loaded)->ok() && !ctx.cancelled()) {
-          const Result<void> states = analysis::buildThreadStates((*loaded)->value());
+        auto buildStates = [&ctx](model::TraceModel& m) {
+          if (ctx.cancelled()) return;
+          const Result<void> states = analysis::buildThreadStates(m);
           if (!states.ok()) TACHYON_LOG_WARN("thread states: {}", states.error().toString());
+        };
+        if (streaming) {
+          loaded->emplace(model::TraceModel::loadProgressive(
+              path, options, stages,
+              [&](model::TraceModel&& preview) {
+                buildStates(preview);
+                if (ctx.cancelled()) return;
+                auto shared = std::make_shared<const model::TraceModel>(std::move(preview));
+                {
+                  const std::lock_guard<std::mutex> lock(mailbox->mutex);
+                  mailbox->preview = std::move(shared);
+                }
+                if (gate) gate();
+              },
+              progress));
+        } else {
+          loaded->emplace(model::TraceModel::load(path, options, progress));
         }
+        if (loaded->has_value() && (*loaded)->ok()) buildStates((*loaded)->value());
       },
-      [this, path, loaded](JobQueue::JobId id, JobOutcome outcome) {
+      [this, path, loaded, mailbox](JobQueue::JobId id, JobOutcome outcome) {
         if (id != m_openJob) return;  // superseded by a newer open
         m_openJob = 0;
+        if (m_stream == mailbox) m_stream.reset();
         if (outcome == JobOutcome::Cancelled || !loaded->has_value()) return;
         Result<model::TraceModel>& r = **loaded;
         if (!r.ok()) {
           m_lastError = "Cannot open " + pathToUtf8(path) + ": " + r.error().toString();
           TACHYON_LOG_ERROR("{}", m_lastError);
+          if (m_document && m_document->streamId() == mailbox->stream) closeDocument();  // the preview of it
           toast(ToastLevel::Error, m_lastError);
           return;
         }
         auto model = std::make_shared<const model::TraceModel>(std::move(r).value());
-        onDocumentLoaded(std::make_shared<Document>(path, std::move(model)));
+        auto document = std::make_shared<Document>(path, std::move(model));
+        document->setStreamId(mailbox->stream);
+        onDocumentLoaded(std::move(document));
       });
+}
+
+// Takes the newest preview of the loading job, if any, and shows it (the complete document replaces it
+// later).
+void App::pumpStream() {
+  if (!m_stream || m_openJob == 0) return;
+  std::shared_ptr<const model::TraceModel> preview;
+  {
+    const std::lock_guard<std::mutex> lock(m_stream->mutex);
+    preview = std::move(m_stream->preview);
+  }
+  if (!preview) return;
+  auto document = std::make_shared<Document>(m_stream->path, preview);
+  document->setStreamId(m_stream->stream);
+  onDocumentLoaded(std::move(document));
+  const model::LoadStatus& status = preview->loadStatus;
+  const double hz = static_cast<double>(std::max<uint64_t>(preview->header.clock_frequency_hz, 1));
+  char text[160];
+  std::snprintf(
+      text, sizeof text, "Showing the first %.1f s of %.1f s while the rest of the trace loads (%.0f%%)",
+      static_cast<double>(preview->header.end_ts - preview->header.start_ts) / hz,
+      static_cast<double>(status.fullEndTs - preview->header.start_ts) / hz, status.fraction() * 100.0);
+  toast(ToastLevel::Info, text);
 }
 
 bool App::frame(int waitMs) {
@@ -437,8 +556,12 @@ bool App::frame(int waitMs) {
   if (events.hadInput) m_redrawFrames = std::max(m_redrawFrames, 3);
   for (const std::string& dropped : events.droppedFiles) openFile(pathFromUtf8(dropped));
   m_jobs.pump();
+  pumpStream();
   pumpSymbolEvents();
   m_capture->pump();
+  if (m_document && (m_options.memoryCheckMs <= 0 || m_memoryGeneration != m_documentGeneration ||
+                     Clock::now() - m_lastMemoryCheck >= std::chrono::milliseconds(m_options.memoryCheckMs)))
+    checkMemory();
 
   applyPendingStyle();
   m_renderer->beginFrame();
@@ -583,6 +706,23 @@ void App::drawMenuBar() {
     if (ImGui::BeginMenu("Theme")) {
       if (ImGui::MenuItem("Dark", nullptr, m_settings.theme == ThemeKind::Dark)) setTheme(ThemeKind::Dark);
       if (ImGui::MenuItem("Light", nullptr, m_settings.theme == ThemeKind::Light)) setTheme(ThemeKind::Light);
+      ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Memory limit")) {
+      // WP-64: above the limit the viewer frees timeline detail levels and stops caching analysis results.
+      const uint64_t physical = physicalMemoryBytes();
+      struct Choice {
+        uint32_t percent;
+        const char* name;
+      };
+      for (const Choice c : {Choice{50, "50%"}, Choice{60, "60%"}, Choice{75, "75% (default)"},
+                             Choice{90, "90%"}, Choice{0, "No limit"}}) {
+        std::string label = c.name;
+        if (c.percent != 0 && physical != 0)
+          label += "  (" + formatBytes(memoryCeilingBytes(c.percent, physical)) + ")";
+        if (ImGui::MenuItem(label.c_str(), nullptr, m_settings.memoryCeilingPercent == c.percent))
+          setMemoryCeilingPercent(c.percent);
+      }
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("UI Scale")) {

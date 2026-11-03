@@ -74,6 +74,11 @@ struct Settings {
   // widget).
   bool blendScopes = true;
   double frameBudgetMs = 16.67;
+  // WP-64: memory ceiling of the open trace's data (model + timeline index + analysis caches) as a percentage
+  // of the physical RAM; 0 = no ceiling. Above it the viewer degrades gracefully (see memory_governor.h).
+  static constexpr uint32_t kDefaultMemoryCeilingPercent = 75;
+  static constexpr uint32_t kMinMemoryCeilingPercent = 10;
+  uint32_t memoryCeilingPercent = kDefaultMemoryCeilingPercent;
   // WP-41
   CaptureSettings capture;
 

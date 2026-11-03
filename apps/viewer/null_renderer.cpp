@@ -12,9 +12,11 @@ namespace {
 
 class NullRenderer final : public IRenderer {
  public:
+  NullRenderer(float width, float height) : m_width(width), m_height(height) {}
+
   bool init(std::string&) override {
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2(1280.0f, 720.0f);
+    io.DisplaySize = ImVec2(m_width, m_height);
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
     // Build the font atlas without a GPU: ImGui only needs the pixel data to exist and a texture id.
     unsigned char* pixels = nullptr;
@@ -28,7 +30,7 @@ class NullRenderer final : public IRenderer {
   PlatformEvents pollEvents(int) override { return {}; }
   void beginFrame() override {
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2(1280.0f, 720.0f);
+    io.DisplaySize = ImVec2(m_width, m_height);
     io.DeltaTime = 1.0f / 60.0f;
     ImGui::NewFrame();
   }
@@ -37,12 +39,15 @@ class NullRenderer final : public IRenderer {
   float dpiScale() const override { return 1.0f; }
   void setWindowTitle(const std::string&) override {}
   bool isHeadless() const override { return true; }
+
+ private:
+  float m_width, m_height;
 };
 
 }  // namespace
 
-std::unique_ptr<IRenderer> makeNullRenderer() {
-  return std::make_unique<NullRenderer>();
+std::unique_ptr<IRenderer> makeNullRenderer(float width, float height) {
+  return std::make_unique<NullRenderer>(width, height);
 }
 
 }  // namespace tachyon::viewer

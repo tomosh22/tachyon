@@ -1,5 +1,7 @@
 #include "viewer/timeline/timeline_widget.h"
 
+#include "viewer/memory_governor.h"
+
 #include "analysis/thread_states.h"
 #include "analysis/wait_reasons.h"
 #include "viewer/common/rect_batch.h"
@@ -156,6 +158,31 @@ void TimelineWidget::setHidden(ThreadIdx thread, bool hidden) {
   }
 }
 
+size_t TimelineWidget::lodBytes() const {
+  const analysis::TimelineLod* lod = m_doc && m_doc->shared ? m_doc->shared->lodIfPrepared() : nullptr;
+  return lod ? lod->memoryBytes() : 0;
+}
+
+size_t TimelineWidget::trimLod(size_t bytes) {
+  if (!m_doc || !m_doc->shared || !m_doc->shared->lodOwner) return 0;
+  if (m_doc->shared->lodIfPrepared() == nullptr) return 0;
+  const size_t freed = m_doc->shared->lodOwner->trimMemory(bytes);
+  if (freed > 0) {
+    for (RowCache& r : m_doc->rows) r.valid = false;  // the zooms of the dropped levels are answered anew
+  }
+  return freed;
+}
+
+analysis::LodTrim TimelineWidget::lodTrim() const {
+  const analysis::TimelineLod* lod = m_doc && m_doc->shared ? m_doc->shared->lodIfPrepared() : nullptr;
+  return lod ? lod->trimState() : analysis::LodTrim{};
+}
+
+uint32_t TimelineWidget::lodDegradedBaseLevels() const {
+  const analysis::TimelineLod* lod = m_doc && m_doc->shared ? m_doc->shared->lodIfPrepared() : nullptr;
+  return lod ? lod->degradedBaseLevels() : 0;
+}
+
 bool TimelineWidget::lodFinished() const {
   if (!m_doc || !m_doc->shared) return false;
   const analysis::TimelineLod* lod = m_doc->shared->lodIfPrepared();
@@ -211,7 +238,18 @@ void TimelineWidget::clearSelection(SelectionBus* bus) {
 
 void TimelineWidget::onDocumentChanged(const Document* document) {
   // Also when the panel is hidden and never drawn again: drop the old model, LOD and build job right away.
-  if (!document || document != m_documentPtr) resetDocument();
+  if (!document || document != m_documentPtr) {
+    m_carry.reset();
+    if (document && m_doc && m_streamId != 0 && document->streamId() == m_streamId) {
+      Carry carry;
+      carry.view = m_doc->view;
+      carry.wasFit = m_doc->view == fitView(m_doc->limits);
+      carry.flags = m_doc->flags;
+      carry.rowsScrollY = m_doc->rowsScrollY;
+      m_carry = std::move(carry);
+    }
+    resetDocument();
+  }
 }
 
 void TimelineWidget::resetDocument() {
@@ -236,6 +274,7 @@ void TimelineWidget::startDocument(const PanelContext& context) {
   resetDocument();
   m_generation = context.documentGeneration;
   m_documentPtr = context.document;
+  m_streamId = context.document->streamId();
   auto doc = std::make_unique<DocState>();
   doc->shared = std::make_shared<LodShared>(context.document->sharedModel());
   const model::TraceModel& model = *doc->shared->model;
@@ -248,6 +287,13 @@ void TimelineWidget::startDocument(const PanelContext& context) {
   doc->platform = model.header.platform;
   doc->frameTicks = buildFrameTicks(model);
   doc->flags.assign(model.threads.size(), RowFlags{});
+  if (m_carry) {  // the preview of this stream was replaced: keep the user's place
+    if (!m_carry->wasFit) doc->view = clampView(m_carry->view, doc->limits);
+    if (m_carry->flags.size() == model.threads.size()) doc->flags = m_carry->flags;
+    doc->rowsScrollY = m_carry->rowsScrollY;
+    m_pendingScrollY = m_carry->rowsScrollY;
+    m_carry.reset();
+  }
   doc->flameDepth.assign(model.threads.size(), 0);
   doc->rows.resize(model.threads.size());
   doc->hasScopes = common::traceHasScopes(model);
@@ -263,7 +309,19 @@ void TimelineWidget::startDocument(const PanelContext& context) {
 void TimelineWidget::startBuild(const PanelContext& context) {
   DocState& d = *m_doc;
   d.buildStarted = true;
-  const analysis::LodOptions options;
+  analysis::LodOptions options;
+  // WP-64: what the memory ceiling leaves for the index after the model (at least a few levels' worth).
+  const uint64_t ceiling =
+      m_options.memoryCeilingBytes != 0
+          ? m_options.memoryCeilingBytes
+          : (context.memoryCeilingBytes != 0
+                 ? context.memoryCeilingBytes
+                 : memoryCeilingBytes(context.settings ? context.settings->memoryCeilingPercent : 0,
+                                      physicalMemoryBytes()));
+  if (ceiling != 0) {
+    const uint64_t model = d.model->residentBytes();
+    options.maxBytes = std::max<uint64_t>(ceiling > model ? ceiling - model : 0, uint64_t{32} << 20);
+  }
   if (m_options.buildInline || !context.jobs) {
     buildLodShared(*d.shared, options, nullptr, {});
     d.shared->finished.store(true, std::memory_order_release);
@@ -390,19 +448,17 @@ void TimelineWidget::refreshRow(const PanelContext& context, const RowLayout& ro
     cache.flame.spans.clear();
     return;
   }
-  analysis::StateBandQuery bq;
-  bq.thread = row.thread;
-  bq.t0 = window.t0;
-  bq.t1 = window.t1;
-  bq.pixelWidth = columns;
-  if (!lod->stateBands(bq, cache.band).ok()) cache.band.columns.clear();
+  // One fused call for the band and the strip of the row (WP-64).
+  analysis::RowQuery rq;
+  rq.thread = row.thread;
+  rq.t0 = window.t0;
+  rq.t1 = window.t1;
+  rq.pixelWidth = columns;
+  if (!lod->rowColumns(rq, cache.band, cache.strip).ok()) {
+    cache.band.columns.clear();
+    cache.strip.columns.clear();
+  }
   ++m_stats.bandQueries;
-  analysis::SampleStripQuery sq;
-  sq.thread = row.thread;
-  sq.t0 = window.t0;
-  sq.t1 = window.t1;
-  sq.pixelWidth = columns;
-  if (!lod->sampleStrip(sq, cache.strip).ok()) cache.strip.columns.clear();
   ++m_stats.stripQueries;
   cache.pending = cache.band.pending || cache.strip.pending;
   if (depths > 0) {

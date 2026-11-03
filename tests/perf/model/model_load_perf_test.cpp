@@ -105,9 +105,56 @@ TEST(ModelLoadPerf, LargeLoad) {
       "[model perf] large load: %.2f s, %zu samples on %u cores (target %.1f s scaled from 30 s @ 8 cores, "
       "assert %.1f s)\n",
       l.seconds, sampleCount(l.model), cores, budget, budget * 2);
-  std::printf("[model perf] large: compressed %.1f MiB, resident %.1f MiB (ratio %.2fx)\n",
-              compressed / 1048576.0, resident / 1048576.0, resident / compressed);
+  // The WP-30 "resident <= 3x compressed" target is under user review and is NOT asserted: both ratios are
+  // printed. The uncompressed size is the sample columns (20 bytes per sample on disk), which dominate.
+  const double uncompressed = static_cast<double>(sampleCount(l.model)) * 20.0;
+  std::printf(
+      "[model perf] large: compressed %.1f MiB, resident %.1f MiB (resident/compressed %.2fx, "
+      "resident/uncompressed %.2fx, %.2f B/sample overall)\n",
+      compressed / 1048576.0, resident / 1048576.0, resident / compressed, resident / uncompressed,
+      resident / static_cast<double>(sampleCount(l.model)));
   EXPECT_LT(l.seconds, budget * 2);
+}
+
+// Streaming load (WP-64): how long until the first preview is on screen. A preview of 5% of the sample chunks
+// must arrive in a small fraction of the full load, so that the viewer opens big traces at once. Targets:
+// medium 0.4 s, large 3 s (asserted at 2x); also asserted to be well below the full load.
+TEST(ModelLoadPerf, MediumFirstPreview) {
+  const auto path = fixture("medium");
+  double best = 1e30;
+  for (int i = 0; i < 3; ++i) {
+    LoadOptions opt;
+    opt.prefixFraction = 0.05;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto r = TraceModel::load(path, opt);
+    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    ASSERT_TRUE(r.ok());
+    EXPECT_FALSE(r->loadStatus.complete);
+    best = std::min(best, s);
+  }
+  Loaded full = timedLoad(path);
+  std::printf("[model perf] medium first preview (5%% of the sample chunks): %.3f s (full load %.3f s)\n",
+              best, full.seconds);
+  EXPECT_LT(best, 0.4 * 2);
+  EXPECT_LT(best, full.seconds);
+}
+
+TEST(ModelLoadPerf, LargeFirstPreview) {
+  const auto path = fixture("large");
+  if (!std::filesystem::exists(path))
+    GTEST_SKIP() << "large.tachyon not generated (build target tachyon_fixtures_large)";
+  LoadOptions opt;
+  opt.prefixFraction = 0.05;
+  const auto t0 = std::chrono::steady_clock::now();
+  auto r = TraceModel::load(path, opt);
+  const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  ASSERT_TRUE(r.ok());
+  std::printf(
+      "[model perf] large first preview: %.2f s, %zu samples (%u of %u sample chunks), resident %.0f MiB "
+      "(target 3 s, assert 6 s)\n",
+      s, sampleCount(*r), r->loadStatus.sampleChunksLoaded, r->loadStatus.sampleChunksTotal,
+      static_cast<double>(r->residentBytes()) / 1048576.0);
+  EXPECT_LT(s, 3.0 * 2);
 }
 
 }  // namespace

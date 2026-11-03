@@ -44,6 +44,9 @@ struct TimelineOptions {
   uint32_t maxFlameDepths = 40;
   // Test hook: build the LOD synchronously on the first draw instead of on the JobQueue.
   bool buildInline = false;
+  // WP-64: byte ceiling of the whole trace used to budget the LOD levels up front (LodOptions::maxBytes = the
+  // ceiling minus the model); 0 = Settings::memoryCeilingPercent of the physical RAM.
+  uint64_t memoryCeilingBytes = 0;
   // Test hook: do not start the LOD build (every row stays pending) until this is cleared.
   bool deferLodBuild = false;
   // WP-54: what rows show below the state band. Effective only for traces with scope events (others are
@@ -177,6 +180,15 @@ class TimelineWidget {
   const PlotLanesView& plotLanes() const;
   // The scope or section item the tooltip of the last frame described (tests).
   const std::optional<FunctionKey>& lastHoveredScope() const { return m_hoveredScope; }
+  // ---- WP-64: memory ceiling ----
+  // Main-thread only. Bytes held by the timeline index (0 until it exists).
+  size_t lodBytes() const;
+  // Main-thread only, between frames. Frees at least `bytes` of timeline index (sample mipmap levels, finest
+  // first); returns the bytes freed (0 when the index is still building or nothing is left to free).
+  size_t trimLod(size_t bytes);
+  // Main-thread only. What the memory ceiling took from the index so far (zeros without an index).
+  analysis::LodTrim lodTrim() const;
+  uint32_t lodDegradedBaseLevels() const;
   // Block until the background build is done, pumping nothing (only valid with buildInline or after the job
   // completed); test helper.
   const std::string& lodError() const;
@@ -230,6 +242,16 @@ class TimelineWidget {
   std::unique_ptr<DocState> m_doc;
   uint64_t m_generation = 0;
   const Document* m_documentPtr = nullptr;
+  // WP-64: when a streaming preview is replaced by the complete document of the same stream, the user's place
+  // (view, row flags, scroll) carries over.
+  uint64_t m_streamId = 0;
+  struct Carry {
+    TimeView view;
+    bool wasFit = false;  // the view showed the whole preview: show the whole trace now
+    std::vector<RowFlags> flags;
+    float rowsScrollY = 0;
+  };
+  std::optional<Carry> m_carry;
 
   // Interaction state (not derived from the document).
   std::optional<TickRange> m_selection;

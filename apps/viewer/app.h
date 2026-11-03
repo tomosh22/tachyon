@@ -5,6 +5,7 @@
 #include "viewer/document.h"
 #include "viewer/file_browser.h"
 #include "viewer/job_queue.h"
+#include "viewer/memory_governor.h"
 #include "viewer/panel.h"
 #include "viewer/renderer.h"
 #include "viewer/selection_bus.h"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
@@ -35,6 +37,7 @@ class QueryExecutor;
 
 namespace tachyon::viewer {
 
+struct StreamMailbox;     // app.cpp (WP-64)
 class CaptureController;  // capture/capture_controller.h (WP-41)
 class IProcessLauncher;   // capture/process_launcher.h (WP-41)
 
@@ -66,6 +69,20 @@ struct AppOptions {
   std::shared_ptr<IProcessLauncher> processLauncher;
   // WP-41: try to connect to a running agent at startup (silently; also needs Settings::capture.autoConnect).
   bool autoConnectAgent = true;
+  // WP-64: open big traces in stages. A file of at least `streamMinFileBytes` is loaded as previews of the
+  // fractions in `streamStages` (each shown as soon as it is ready), then in full; the complete document
+  // replaces the last preview and the timeline keeps its view. Off for small files and when `streamingLoad`
+  // is false.
+  bool streamingLoad = true;
+  uint64_t streamMinFileBytes = 64ull << 20;
+  std::vector<double> streamStages = {0.05};
+  // WP-64 (tests): called on the loading thread after each preview was published, before the next stage
+  // starts; a test blocks here to look at the preview.
+  std::function<void()> streamGate;
+  // WP-64: memory ceiling. 0 = Settings::memoryCeilingPercent of the physical RAM; tests pass a byte count.
+  uint64_t memoryCeilingBytes = 0;
+  // How often the ceiling is checked (the first check of a document is immediate); 0 = every frame.
+  int memoryCheckMs = 1000;
 };
 
 class App {
@@ -132,6 +149,21 @@ class App {
   ShortcutRegistry& shortcuts() { return m_shortcuts; }
   ShortcutSheet& shortcutSheet() { return m_shortcutSheet; }
   PathPicker& symbolPathPicker() { return m_pathPicker; }
+  // ---- WP-64: memory ceiling ----
+  // Main-thread only. What the last check of the memory ceiling found and degraded (Normal when nothing).
+  const MemoryStatus& memoryStatus() const { return m_memory.status(); }
+  // Main-thread only. The ceiling in bytes now (0 = none).
+  uint64_t memoryCeiling() const;
+  // Main-thread only. Sets Settings::memoryCeilingPercent (0 = none), saves it and checks at once.
+  void setMemoryCeilingPercent(uint32_t percent);
+  // Main-thread only. Runs the check now (frame() runs it every options.memoryCheckMs).
+  void checkMemory();
+  // Main-thread only (tests). Replaces AppOptions::memoryCeilingBytes; checks at once.
+  void setMemoryCeilingOverride(uint64_t bytes) {
+    m_options.memoryCeilingBytes = bytes;
+    checkMemory();
+  }
+
   // Main-thread only. Adds `path` (a directory or a symbol file) to Settings::symbolSearchPaths (persisted
   // unless persist is off), then re-runs the symbol resolution of the open document. Returns false and sets
   // `error` (also toasted) if the path is unusable. Cost: resolution runs again for ALL modules.
@@ -145,6 +177,7 @@ class App {
   void registerCommands();
   void onDocumentLoaded(std::shared_ptr<Document> document);
   void closeDocument();
+  void pumpStream();
   // Main-thread only. Installs a SymbolService on `document` and starts resolving; the workers report through
   // m_symbolMailbox (thread-safe), which wakes the event loop.
   void startSymbolResolution(Document& document);
@@ -178,7 +211,14 @@ class App {
   uint64_t m_symbolGeneration = 0;
   std::shared_ptr<SymbolMailbox> m_symbolMailbox;
 
+  MemoryGovernor m_memory;
+  uint64_t m_memoryModelBytes = 0;  // TraceModel::residentBytes() of the document of m_memoryGeneration
+  uint64_t m_memoryGeneration = ~0ull;
+  std::chrono::steady_clock::time_point m_lastMemoryCheck{};
   JobQueue::JobId m_openJob = 0;
+  uint64_t m_streamCounter = 0;  // WP-64: numbers the opens; documents of one open share the id
+  uint64_t m_openStream = 0;     // the stream of m_openJob
+  std::shared_ptr<StreamMailbox> m_stream;
   std::string m_lastError;
   bool m_styleDirty = true;
   bool m_quit = false;

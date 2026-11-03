@@ -1,5 +1,5 @@
 tachyon_add_test(analysis_tests
-  SOURCES aggregation_test.cpp return_address_test.cpp aggregation_fixture_test.cpp attribution_test.cpp lod_test.cpp lod_fixture_test.cpp
+  SOURCES aggregation_test.cpp return_address_test.cpp aggregation_fixture_test.cpp attribution_test.cpp lod_test.cpp lod_fixture_test.cpp lod_row_columns_test.cpp streaming_query_test.cpp lod_memory_test.cpp
           thread_states_test.cpp thread_states_fixture_test.cpp wait_reasons_test.cpp
           query_cache_test.cpp query_executor_test.cpp filter_test.cpp cancellation_test.cpp alloc_counter.cpp
           lines_test.cpp instructions_test.cpp stats_test.cpp scope_stats_test.cpp frames_test.cpp scope_blend_test.cpp fibers_test.cpp locks_test.cpp scope_blend_fixture_test.cpp scope_blend_random_test.cpp fibers_cancel_test.cpp instances_test.cpp subtree_path_test.cpp

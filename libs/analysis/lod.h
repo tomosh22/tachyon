@@ -21,17 +21,18 @@
 //
 // Storage (decision 1 of the WP-36 brief)
 //   Levels are stored only from a base level upwards, as dense arrays per level (struct-of-arrays), with
-//   `levelStep` (default 2) level numbers between stored levels, up to the level with a single bucket. The
-//   base level is the finest L with <= maxBaseBuckets buckets per thread whose bucket is also at least
-//   minSamplesPerBaseBucket sample intervals wide (bounds LOD bytes per sample). Per bucket and level:
+//   `levelStep` (default 1, was 2 before WP-64) level numbers between stored levels, up to the level with a
+//   single bucket. The base level is the finest L with <= maxBaseBuckets buckets per thread whose bucket is
+//   also at least minSamplesPerBaseBucket sample intervals wide (bounds LOD bytes per sample). Per bucket and
+//   level:
 //     band   4 B  running / ready / waiting fraction of the bucket in 1/255 (unknown = the remainder) and the
 //                 dominant wait category of the Waiting ticks (kNoWaitCategory when none);
 //     strip  6 B  most frequent leaf callstack (by overlapped ticks, ties to the smaller id), its share of
 //                 the sampled ticks (1/255) and the sampled fraction of the bucket (1/255);
 //     flame  6 B  deepest common prefix node (LCA of all leaves of the bucket) and the deepest leaf depth.
-//   i.e. 16 B per bucket, about 21 B per base bucket with levelStep 2. Dominant stacks are exact as long as
-//   a bucket has <= maxStacksPerBucket distinct leaves (otherwise the lightest are dropped while merging
-//   levels), LCA and depth are always exact.
+//   i.e. 16 B per bucket, about 21 B per base bucket with levelStep 2 and 29 B with levelStep 1. Dominant
+//   stacks are exact as long as a bucket has <= maxStacksPerBucket distinct leaves (otherwise the lightest
+//   are dropped while merging levels), LCA and depth are always exact.
 //
 // Fine strip level (WP-36b). Scanning the raw samples of a pixel costs O(samples per pixel), which at a pixel
 // just under the base width is ~6 samples per column and too slow for 64 rows in a 4 ms frame. For
@@ -98,7 +99,8 @@ struct LodOptions {
   // Test hook: if >= 0 the base level L is exactly this (bucket width 64 << L) instead of the rule above.
   int forceBaseLevel = -1;
   // Stored levels are base, base + step, base + 2*step, ... (1..4).
-  uint32_t levelStep = 2;
+  uint32_t levelStep =
+      1;  // WP-64: was 2; one level per octave bounds a column to <= 2 bucket starts (frame budget)
   // Distinct leaf stacks kept per bucket while merging levels (exact below this).
   uint32_t maxStacksPerBucket = 32;
   // Store the fine strip level (see the header comment): the sample strip of pixel spans between half the
@@ -106,6 +108,17 @@ struct LodOptions {
   // Ignored (no fine level) when forceBaseLevel is set, the base level is L0 or the model has 2^24 callstack
   // nodes.
   bool fineStrip = true;
+  // Memory ceiling for the stored levels (WP-64), 0 = none. When the levels of the chosen base level would
+  // take more, prepare() raises the base level (fewer, wider buckets; the finest zooms are then answered from
+  // the samples) until they fit or only the top level is left, and drops the fine strip level. The result is
+  // reported by degradedBaseLevels().
+  uint64_t maxBytes = 0;
+};
+
+// What trimMemory() has taken away from a built TimelineLod.
+struct LodTrim {
+  uint32_t droppedLevels = 0;  // finest stored levels freed
+  bool fineDropped = false;    // the fine strip level was freed
 };
 
 enum class QueryMode : uint8_t {
@@ -165,6 +178,14 @@ struct SampleStripResult {
   bool pending = false;
   uint8_t level = kDirectLevel;
   std::vector<StripColumn> columns;
+};
+
+// ---- fused band + strip of one row ----
+struct RowQuery {
+  ThreadIdx thread;
+  uint64_t t0 = 0, t1 = 0;
+  uint32_t pixelWidth = 0;
+  QueryMode mode = QueryMode::Auto;
 };
 
 // ---- flame chart ----
@@ -229,8 +250,21 @@ class TimelineLod {
   // Fraction of the build work finished, weighted by sample count; 1.0 when all threads are ready.
   float progress() const;
 
-  // Thread-safe. Stored levels, finest first (empty before a successful prepare()).
+  // Thread-safe. Stored levels, finest first (empty before a successful prepare()). After trimMemory() the
+  // dropped levels are still listed (level indices stay stable) but hold no data: queries skip them.
   const std::vector<LodLevelInfo>& levels() const;
+
+  // WP-64, graceful degradation. Frees at least `bytes` of level data (the fine strip level first, then the
+  // finest stored levels one by one, always keeping the coarsest), only when the build has finished
+  // (otherwise returns 0) and returns the bytes freed. Queries for the zooms of the dropped levels are then
+  // answered directly from the samples (a coarser level is wider than a pixel): exact but slower. NOT
+  // thread-safe against queries or build(): the viewer calls it on the main thread between frames, where it
+  // queries.
+  size_t trimMemory(size_t bytes);
+  // Thread-safe. What trimMemory() has freed so far.
+  LodTrim trimState() const;
+  // Thread-safe. Levels prepare() left out because of LodOptions::maxBytes (0 = none).
+  uint32_t degradedBaseLevels() const;
   // Thread-safe. Bucket of a ready thread; false if the thread is not ready or the indices are out of range.
   bool bucket(ThreadIdx thread, size_t levelIndex, uint32_t bucketIndex, LodBucket& out) const;
   // Thread-safe. Bytes held by the per-thread level arrays of ready threads.
@@ -244,6 +278,12 @@ class TimelineLod {
   Result<void> stateBands(const StateBandQuery& query, StateBandResult& out) const;
   Result<void> sampleStrip(const SampleStripQuery& query, SampleStripResult& out) const;
   Result<void> timeline(const TimelineQuery& query, TimelineResult& out) const;
+
+  // WP-64. State band and sample strip of one row in a single call. The results are those of stateBands()
+  // and sampleStrip() for the same window (equal up to float rounding of the fractions), but when the zoom
+  // is answered from a stored level (the common case) both come from one fused, branch-light pass over the
+  // buckets, which is what the 64-row frame budget needs. Thread-safe; same errors.
+  Result<void> rowColumns(const RowQuery& query, StateBandResult& band, SampleStripResult& strip) const;
 
  private:
   struct Impl;
