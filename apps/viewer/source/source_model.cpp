@@ -92,9 +92,9 @@ std::string expandForDisplay(std::string_view line, size_t maxColumns) {
   return out;
 }
 
-uint32_t displayColumn(std::string_view line, size_t offset) {
-  size_t col = 0;
-  for (size_t i = 0; i < line.size() && i < offset;) {
+uint32_t displayColumnFrom(std::string_view line, size_t fromOffset, uint32_t fromColumn, size_t offset) {
+  size_t col = fromColumn;
+  for (size_t i = fromOffset; i < line.size() && i < offset;) {
     const unsigned char c = static_cast<unsigned char>(line[i]);
     if (c == '\t') {
       col += kTabWidth - col % kTabWidth;
@@ -108,6 +108,29 @@ uint32_t displayColumn(std::string_view line, size_t offset) {
     }
   }
   return static_cast<uint32_t>(col);
+}
+
+uint32_t displayColumn(std::string_view line, size_t offset) {
+  return displayColumnFrom(line, 0, 0, offset);
+}
+
+size_t offsetOfColumn(std::string_view line, uint32_t column, uint32_t* reached) {
+  size_t col = 0, i = 0;
+  while (i < line.size() && col < column) {
+    const unsigned char c = static_cast<unsigned char>(line[i]);
+    if (c == '\t') {
+      col += kTabWidth - col % kTabWidth;
+      ++i;
+    } else if (c < 0x80) {
+      ++col;
+      ++i;
+    } else {
+      ++col;
+      i += sequenceLength(line.data() + i, line.size() - i);
+    }
+  }
+  if (reached) *reached = static_cast<uint32_t>(col);
+  return i;
 }
 
 float heatOf(uint64_t ticks, uint64_t maxTicks) {
@@ -138,16 +161,22 @@ Result<std::shared_ptr<const SourceText>> SourceText::parse(std::string bytes) {
   while (i < n) {
     const size_t start = i;
     uint32_t col = 0;
+    bool simple = true;
     while (i < n && s[i] != '\n' && s[i] != '\r') {
       const unsigned char c = static_cast<unsigned char>(s[i]);
+      if (c < 0x20 || c >= 0x7F) simple = false;
       if (c == '\t')
         col += kTabWidth - col % kTabWidth;
-      else if (!isContinuationByte(c))
+      else if (c >= 0x80) {
+        ++col;  // one cell per code point, stray continuation bytes one each: as expandForDisplay
+        i += sequenceLength(s.data() + i, n - i) - 1;
+      } else
         ++col;
       ++i;
     }
     t->m_lineStart.push_back(static_cast<uint32_t>(start));
     t->m_lineEnd.push_back(static_cast<uint32_t>(i));
+    t->m_simple.push_back(simple ? 1 : 0);
     maxCols = std::max(maxCols, col);
     if (t->m_lineEnd.size() > kMaxSourceLines)
       return makeError(ErrorCode::InvalidArgument, "file has more than 2 million lines");
@@ -184,6 +213,10 @@ Result<std::shared_ptr<const SourceText>> SourceText::load(const fs::path& path,
   }
   bytes.resize(done);
   return parse(std::move(bytes));
+}
+
+bool SourceText::lineIsSimple(uint32_t number) const {
+  return number >= 1 && number <= lineCount() && m_simple[number - 1] != 0;
 }
 
 std::string_view SourceText::line(uint32_t number) const {
@@ -308,11 +341,32 @@ Derived derive(std::string_view debugPath, const std::string& chosen) {
 
 }  // namespace
 
+namespace {
+
+// True when a locator with `config` maps `debugPath` to the file `chosen`.
+bool resolvesTo(const symbols::SourceLocatorConfig& config, std::string_view debugPath,
+                const fs::path& chosen) {
+  const symbols::SourceLocator locator(config);
+  const Result<fs::path> found = locator.locate(debugPath);
+  if (!found.ok()) return false;
+  std::error_code ec;
+  return fs::equivalent(*found, chosen, ec) && !ec;
+}
+
+}  // namespace
+
 std::optional<symbols::SourceRemapRule> deriveRemapRule(std::string_view debugPath, const fs::path& chosen) {
   const std::string chosenUtf8 = pathToUtf8(chosen);
   const Derived d = derive(debugPath, chosenUtf8);
   if (d.fromPrefix.empty() || d.toPrefix.empty()) return std::nullopt;
-  return symbols::SourceRemapRule{d.fromPrefix, d.toPrefix};
+  symbols::SourceRemapRule rule{d.fromPrefix, d.toPrefix};
+  // The suffix match ignores case for Windows-looking paths but a prefix remap compares the rest of the path
+  // with the file system: when the rule does not lead to the chosen file, map exactly that one path.
+  if (!resolvesTo({{rule}, {}}, debugPath, chosen)) {
+    if (debugPath.empty()) return std::nullopt;
+    rule = symbols::SourceRemapRule{std::string(debugPath), chosenUtf8};
+  }
+  return rule;
 }
 
 LocateOutcome locateOutcome(std::string_view debugPath, const fs::path& chosen, bool chosenIsDirectory) {
@@ -324,12 +378,16 @@ LocateOutcome locateOutcome(std::string_view debugPath, const fs::path& chosen, 
   const std::string chosenUtf8 = pathToUtf8(chosen);
   const Derived d = derive(debugPath, chosenUtf8);
   if (!d.fromPrefix.empty() && !d.toPrefix.empty()) {
-    out.rule = symbols::SourceRemapRule{d.fromPrefix, d.toPrefix};
-  } else if (!d.toPrefix.empty()) {
-    out.root = pathFromUtf8(d.toPrefix);  // the debug path is just the shared tail: search under the parent
-  } else {
-    out.root = chosen.parent_path();
+    out.rule = deriveRemapRule(debugPath, chosen);
+    return out;
   }
+  fs::path root = !d.toPrefix.empty() ? pathFromUtf8(d.toPrefix) : chosen.parent_path();
+  // The debug path is just the shared tail: search under the parent. Verified like a rule.
+  if (!resolvesTo({{}, {root}}, debugPath, chosen) && !debugPath.empty()) {
+    out.rule = symbols::SourceRemapRule{std::string(debugPath), chosenUtf8};
+    return out;
+  }
+  out.root = std::move(root);
   return out;
 }
 
@@ -605,6 +663,12 @@ Result<std::shared_ptr<const SourceView>> buildSourceView(const analysis::QueryC
           v->otherTicks += a.ticks;
         }
       }
+      for (size_t i = 0; i < v->instructions.size(); ++i) {
+        InstructionRow& r = v->instructions[i];
+        r.groupLine = r.line;
+        if (r.afterCall && r.ticks != 0 && i > 0 && v->instructions[i - 1].line != 0)
+          r.groupLine = v->instructions[i - 1].line;
+      }
       uint64_t best = 0;
       for (size_t i = 0; i < v->instructions.size(); ++i) {
         if (v->instructions[i].ticks > best) {
@@ -623,12 +687,12 @@ Result<std::shared_ptr<const SourceView>> buildSourceView(const analysis::QueryC
     const uint32_t count = v->file->lineCount();
     v->lineInstrBegin.assign(static_cast<size_t>(count) + 2, 0);
     for (const InstructionRow& r : v->instructions)
-      if (r.line >= 1 && r.line <= count) ++v->lineInstrBegin[r.line + 1];
+      if (r.groupLine >= 1 && r.groupLine <= count) ++v->lineInstrBegin[r.groupLine + 1];
     for (size_t i = 1; i < v->lineInstrBegin.size(); ++i) v->lineInstrBegin[i] += v->lineInstrBegin[i - 1];
     v->lineInstrOrder.assign(v->lineInstrBegin.back(), 0);
     std::vector<uint32_t> fill(v->lineInstrBegin.begin(), v->lineInstrBegin.end() - 1);
     for (size_t i = 0; i < v->instructions.size(); ++i) {
-      const uint32_t l = v->instructions[i].line;
+      const uint32_t l = v->instructions[i].groupLine;
       if (l >= 1 && l <= count) v->lineInstrOrder[fill[l]++] = static_cast<uint32_t>(i);
     }
   }

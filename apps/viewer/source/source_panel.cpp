@@ -478,7 +478,9 @@ void SourcePanel::beginLocate(const PanelContext& context) {
       start = pathFromUtf8(context.settings->sourcePathMappings.back().to);
   }
   if (start.empty() && context.document) start = context.document->path().parent_path();
-  m_picker.open(start);
+  m_picker.open(start, "Locate source file",
+                "Choose the file on this machine that corresponds to\n" + m_pickerDebugPath +
+                    "\n(or a directory to search for it).");
 }
 
 void SourcePanel::locateFile(const std::filesystem::path& chosen, bool chosenIsDirectory) {
@@ -756,23 +758,39 @@ void SourcePanel::drawRow(const RowContext& c, size_t rowIndex) {
   char buf[160];
   if (!ins) {
     const std::string_view text = v.file->line(row.line);
-    const std::string shown = source::expandForDisplay(text, c.firstCol + c.visCols + 2);
+    // The text of the cells from firstCol on (enough to fill the view). A simple line is a substring as it
+    // is.
+    const bool simple = v.file->lineIsSimple(row.line);
+    std::string window;
+    if (simple) {
+      if (c.firstCol < text.size()) window.assign(text.substr(c.firstCol, c.visCols + 2));
+    } else {
+      const std::string shown = source::expandForDisplay(text, c.firstCol + c.visCols + 2);
+      if (c.firstCol < shown.size()) window = shown.substr(c.firstCol);
+    }
     if (!m_searchText.empty() && effectiveMode() != Mode::Disassembly) {
-      size_t at = 0;
+      // Only the visible columns: start at the byte of the first visible cell and carry the column along, so
+      // a very long line costs what is on screen, not its length.
+      uint32_t curCol = static_cast<uint32_t>(std::min<size_t>(c.firstCol, text.size()));
+      size_t curOff = curCol;
+      if (!simple) curOff = source::offsetOfColumn(text, static_cast<uint32_t>(c.firstCol), &curCol);
+      size_t at = curOff;
+      const bool current = rowIndex == m_selectedRow;
       while ((at = source::findInsensitive(text, m_searchText, at)) != std::string_view::npos) {
-        const uint32_t col0 = source::displayColumn(text, at);
-        const uint32_t col1 = source::displayColumn(text, at + m_searchText.size());
-        const bool current = rowIndex == m_selectedRow;
+        const uint32_t col0 = source::displayColumnFrom(text, curOff, curCol, at);
+        curOff = at;
+        curCol = col0;
+        if (col0 > c.firstCol + c.visCols + 2) break;
+        const uint32_t col1 = source::displayColumnFrom(text, at, col0, at + m_searchText.size());
         dl->AddRectFilled(ImVec2(codeX + static_cast<float>(col0) * c.charW, y0 + 1),
                           ImVec2(codeX + static_cast<float>(col1) * c.charW, y1 - 1),
                           current ? IM_COL32(255, 200, 0, 150) : IM_COL32(255, 220, 0, 80));
         at += std::max<size_t>(m_searchText.size(), 1);
-        if (col0 > c.firstCol + c.visCols + 2) break;
       }
     }
-    if (c.firstCol < shown.size())
+    if (!window.empty())
       dl->AddText(ImVec2(codeX + static_cast<float>(c.firstCol) * c.charW, y0 + 1.0f), c.textColor,
-                  shown.c_str() + c.firstCol, shown.c_str() + shown.size());
+                  window.c_str(), window.c_str() + window.size());
   } else {
     // "  0x1230  48 89 e5      mov rbp, rsp   <- after call"
     std::string bytes;
@@ -788,7 +806,10 @@ void SourcePanel::drawRow(const RowContext& c, size_t rowIndex) {
       std::snprintf(buf, sizeof buf, "%s", ins->text.c_str());
     }
     std::string text = buf;
-    if (ins->afterCall && ins->ticks != 0) text += "    ; after call";
+    if (ins->afterCall && ins->ticks != 0) {
+      text += "    ; after call";
+      if (ins->line != 0 && ins->line != ins->groupLine) text += " (line " + std::to_string(ins->line) + ")";
+    }
     if (!ins->valid) text += "    ; undecodable";
     if (!m_searchText.empty() && c.mode == Mode::Disassembly) {
       size_t at = source::findInsensitive(ins->text, m_searchText);

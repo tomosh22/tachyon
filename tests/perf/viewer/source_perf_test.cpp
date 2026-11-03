@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 
 #include <algorithm>
 #include <chrono>
@@ -259,5 +260,72 @@ TEST(SourcePerf, PanelFrameWithAFiftyThousandLineFile) {
   }
   std::printf("[source perf] panel frame with %u lines: best %.2f ms, mean %.2f ms (budget %.0f ms)\n",
               kFileLines, best, sum / kFrames, kFrameBudgetMs);
+  EXPECT_LT(best, kFrameBudgetMs * 2.0);
+}
+
+// A 1 MB line with a match in every cell, scrolled to its far right end: the search highlight must cost what
+// is on screen, not the length of the line (it once re-walked the line from column 0 per match: seconds).
+TEST(SourcePerf, SearchHighlightOnAOneMegabyteLineScrolledFarRight) {
+  AppOptions options;
+  options.persist = false;
+  options.pacing = false;
+  options.configPath = fs::path(TACHYON_BINARY_DIR) / "viewer_source_perf_no_such_settings.json";
+  App app(makeNullRenderer(), options);
+  std::string error;
+  ASSERT_TRUE(app.init(error)) << error;
+  ImGui::GetIO().BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
+  auto* panel = dynamic_cast<SourcePanel*>(app.panels().find(SourcePanel::kName)->panel.get());
+  ASSERT_NE(panel, nullptr);
+  for (PanelEntry& e : app.panels().entries()) e.open = e.panel.get() == panel;
+  app.openFile(fs::path(TACHYON_GENERATED_FIXTURE_DIR) / "tiny.tachyon");
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (!app.document()) {
+    ASSERT_LT(std::chrono::steady_clock::now(), deadline);
+    app.frame(0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  app.selection().setSelectedFunction(symbols::FunctionKey{ModuleIdx(0), 0x1200});
+  const auto ready = [&] {
+    const symbols::SymbolProgress p = app.document()->symbols()->progress();
+    return panel->view() && !panel->pending() && p.total > 0 && p.done == p.total &&
+           panel->requestedSpec().symbolGeneration == app.symbolGeneration();
+  };
+  while (!ready()) {
+    ASSERT_LT(std::chrono::steady_clock::now(), deadline);
+    app.frame(0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  std::string text(1 << 20, 'a');
+  text += "\nint x;\n";
+  auto parsed = source::SourceText::parse(std::move(text));
+  ASSERT_TRUE(parsed.ok());
+  auto view = std::make_shared<source::SourceView>();
+  view->kind = source::ViewKind::Source;
+  view->key = symbols::FunctionKey{ModuleIdx(0), 0x1200};
+  view->resolved = true;
+  view->file = *parsed;
+  view->lines.assign(static_cast<size_t>((*parsed)->lineCount()) + 1, source::LineTime{});
+  panel->injectView(view);
+  panel->setSearchText("a");
+  ASSERT_GT(panel->searchMatches().size(), 0u);
+  ImGui::SetWindowSize(SourcePanel::kName, ImVec2(1000, 600));
+  for (int i = 0; i < 3; ++i) app.frame(0);
+  ImGuiWindow* child = nullptr;
+  for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+    if (w->Name && std::string(w->Name).find("##sourcecode") != std::string::npos) child = w;
+  ASSERT_NE(child, nullptr);
+  ImGui::SetScrollX(child, 1e7f);
+  for (int i = 0; i < 5; ++i) app.frame(0);
+  ASSERT_GT(child->Scroll.x, 1e5f) << "the view must really be scrolled to the far right";
+  double best = 1e30;
+  for (int i = 0; i < 10; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    app.frame(0);
+    best = std::min(best, msSince(t0));
+  }
+  std::printf(
+      "[source perf] 1 MB line, dense matches, scrollX %.0f px: frame best %.3f ms (budget %.0f ms)\n",
+      child->Scroll.x, best, kFrameBudgetMs);
   EXPECT_LT(best, kFrameBudgetMs * 2.0);
 }

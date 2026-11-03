@@ -8,13 +8,16 @@
 #include <array>
 #include <filesystem>
 #include <optional>
+#include <string>
 
 namespace tachyon::viewer {
 
 class PathPicker {
  public:
   // Main-thread only. Opens the modal at `startDir` (falls back to the current directory if unusable).
-  void open(const std::filesystem::path& startDir);
+  // `title` (the modal's name; empty = "Add symbol path") and `hint` (the line above the list; empty = the
+  // symbol files text) let other panels reuse the picker, e.g. "Locate source file" (WP-45).
+  void open(const std::filesystem::path& startDir, std::string title = {}, std::string hint = {});
   // Main-thread only. Draws the modal if open; returns the chosen path exactly once.
   std::optional<std::filesystem::path> draw();
   // Main-thread only.
@@ -23,6 +26,7 @@ class PathPicker {
  private:
   void navigate(const std::filesystem::path& dir);
 
+  std::string m_title, m_hint;
   bool m_open = false;
   bool m_requestOpen = false;
   std::filesystem::path m_directory;

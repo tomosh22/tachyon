@@ -6,9 +6,10 @@
 //
 // Attribution notes (spec 3.7 + WP-34 clarifications). Line times are the rule-1 weights of linesForFunction
 // (non-leaf frames are looked up at rva - 1). Instruction times use the frame's EXACT address, which for a
-// caller frame is the return address, i.e. the instruction after the call ("after call"); an instruction
-// row therefore belongs to the source line of its own address, which can differ from the line the query
-// attributed that sample to.
+// caller frame is the return address, i.e. the instruction after the call ("after call"). An instruction
+// row is listed under the line of its own address, except that a post-call row with samples is listed under
+// the call's line (InstructionRow::groupLine), where linesForFunction attributes caller frames, so the
+// per-line sums of the rows match the line totals. Residual case: a leaf sample on a post-call instruction.
 #pragma once
 
 #include "analysis/query.h"
@@ -64,6 +65,9 @@ class SourceText {
   std::string_view line(uint32_t number) const;
   // Width of the widest line in character cells (tabs expanded to kTabWidth stops).
   uint32_t maxColumns() const { return m_maxColumns; }
+  // True when the line holds only printable ASCII (no tab, control or non-ASCII byte): then display column ==
+  // byte offset and the text can be drawn as it is, which keeps a window of a huge line O(window).
+  bool lineIsSimple(uint32_t number) const;
   size_t byteSize() const { return m_text.size(); }
   // Smallest line number >= `from` whose text contains `needle` (ASCII case-insensitive); 0 when none.
   uint32_t findNext(std::string_view needle, uint32_t from) const;
@@ -75,6 +79,7 @@ class SourceText {
 
   std::string m_text;
   std::vector<uint32_t> m_lineStart;  // lineCount + 1 offsets; line i spans [start[i-1], end of line)
+  std::vector<uint8_t> m_simple;      // lineCount flags, see lineIsSimple
   std::vector<uint32_t> m_lineEnd;    // lineCount offsets (terminator excluded)
   uint32_t m_maxColumns = 0;
 };
@@ -85,6 +90,12 @@ class SourceText {
 std::string expandForDisplay(std::string_view line, size_t maxColumns = SIZE_MAX);
 // Thread-safe (pure function). Display column (0-based) of byte offset `offset` of `line`.
 uint32_t displayColumn(std::string_view line, size_t offset);
+// Thread-safe (pure function). Same, continuing from byte `fromOffset` that is at display column `fromColumn`
+// (so a caller walking forward through matches stays linear).
+uint32_t displayColumnFrom(std::string_view line, size_t fromOffset, uint32_t fromColumn, size_t offset);
+// Thread-safe (pure function). Byte offset of the first character whose cell starts at or after `column`
+// (line.size() when the line is shorter); `*reached` receives the column of that offset.
+size_t offsetOfColumn(std::string_view line, uint32_t column, uint32_t* reached = nullptr);
 // Thread-safe (pure function). ASCII case-insensitive substring search; npos when absent. An empty needle
 // matches at 0.
 size_t findInsensitive(std::string_view haystack, std::string_view needle, size_t from = 0);
@@ -94,8 +105,14 @@ struct InstructionRow {
   uint64_t rva = 0;
   uint8_t length = 1;
   std::array<uint8_t, 15> bytes{};
-  std::string text;    // Intel syntax; call/branch targets carry " <symbol>" when known
-  uint32_t line = 0;   // source line of the instruction's address (0 = unknown); see the header note
+  std::string text;   // Intel syntax; call/branch targets carry " <symbol>" when known
+  uint32_t line = 0;  // source line of the instruction's address (0 = unknown); see the header note
+  // The line the row is listed under in mixed mode: `line`, except that a row with samples that follows a
+  // call (afterCall && ticks != 0) sits under the call's line, because linesForFunction attributes a caller
+  // frame's return address to the call (rva - 1). Residual case: a LEAF sample that executes on a post-call
+  // instruction is attributed to that instruction's own line by the query, but it is listed under the
+  // call's line here (the row cannot tell the two kinds of samples apart).
+  uint32_t groupLine = 0;
   uint64_t ticks = 0;  // running weight of the samples at an address inside this instruction
   bool isCall = false;
   bool afterCall = false;  // the previous instruction is a call: samples here are return addresses

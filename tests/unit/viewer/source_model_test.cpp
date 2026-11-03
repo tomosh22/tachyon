@@ -92,6 +92,19 @@ TEST(SourceText, FileSizeCapAndMissingFile) {
   EXPECT_EQ(missing.error().code, ErrorCode::NotFound);
 }
 
+TEST(SourceText, SimpleLinesAreTheOnesWhereColumnsEqualBytes) {
+  auto t = parseOk("plain text\n\ttab\ncaf\xC3\xA9\nctl\x01x\n");
+  ASSERT_EQ(t->lineCount(), 4u);
+  EXPECT_TRUE(t->lineIsSimple(1));
+  EXPECT_FALSE(t->lineIsSimple(2));
+  EXPECT_FALSE(t->lineIsSimple(3));
+  EXPECT_FALSE(t->lineIsSimple(4));
+  EXPECT_FALSE(t->lineIsSimple(9));
+  // A stray continuation byte counts a cell like expandForDisplay does.
+  auto stray = parseOk("a\x80\x80z\n");
+  EXPECT_EQ(stray->maxColumns(), static_cast<uint32_t>(expandForDisplay(stray->line(1)).size()));
+}
+
 TEST(SourceText, AbsurdLineCountsAreRejected) {
   auto r = SourceText::parse(std::string(kMaxSourceLines + 1u, '\n'));
   ASSERT_FALSE(r.ok());
@@ -202,12 +215,26 @@ TEST(SourceLocate, WindowsDebugPathMapsToACheckout) {
   EXPECT_TRUE(locator.locate("C:\\build\\agent\\engine\\src\\b.cpp").ok());
 }
 
-TEST(SourceLocate, CaseDifferencesOfWindowsPathsDoNotBreakTheSuffix) {
+TEST(SourceLocate, CaseDifferencesStillGiveARuleThatResolvesToTheChosenFile) {
   TempTree tree("locate_case");
-  const fs::path file = tree.write("co/Engine/Src/A.CPP", "x\n");
-  const auto rule = deriveRemapRule("D:/Work/engine/src/a.cpp", file);
-  ASSERT_TRUE(rule.has_value());
-  EXPECT_EQ(rule->from, "D:/Work");
+  // The suffix match ignores case, a prefix remap does not on a case-sensitive file system: the rule that is
+  // returned must resolve to the chosen file either way (an exact-path rule when the prefix rule would not).
+  const fs::path file = tree.write("engine/src/a.cpp", "x\n");
+  for (const char* debug : {"C:\\Build\\Engine\\SRC\\A.CPP", "D:/Work/engine/src/a.cpp"}) {
+    const auto rule = deriveRemapRule(debug, file);
+    ASSERT_TRUE(rule.has_value()) << debug;
+    symbols::SourceLocator locator(symbols::SourceLocatorConfig{{*rule}, {}});
+    auto found = locator.locate(debug);
+    ASSERT_TRUE(found.ok()) << debug << " -> " << rule->from << " => " << rule->to;
+    EXPECT_TRUE(fs::equivalent(*found, file)) << debug;
+    const LocateOutcome o = locateOutcome(debug, file, false);
+    ASSERT_TRUE(o.rule.has_value());
+    EXPECT_EQ(o.rule->from, rule->from);
+  }
+  // A prefix rule is kept when it resolves (the usual same-case checkout).
+  const auto same = deriveRemapRule("D:/Work/engine/src/a.cpp", file);
+  ASSERT_TRUE(same.has_value());
+  EXPECT_EQ(same->from, "D:/Work");
 }
 
 TEST(SourceLocate, AbsolutePosixPathsKeepTheRootAsTarget) {

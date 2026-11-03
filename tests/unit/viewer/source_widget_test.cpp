@@ -82,6 +82,8 @@ struct CallFn {
   Fn fn;
   size_t callIndex = 0;  // code[callIndex] is a call; code[callIndex + 1] is the return address
   bool found = false;
+  bool lineDiffers = false;  // the instruction after the call is on another source line
+  int score = -1;
   bool calleeNamed = false;  // the call is direct and its target is a function with a symbol
 };
 
@@ -107,14 +109,22 @@ CallFn findCallFunction() {
     Fn f = tb.function(name);
     for (size_t i = 0; i + 2 < f.code.size(); ++i) {
       if (f.code[i].isCall && f.code[i].valid && f.code[i + 1].valid) {
-        // Prefer a direct call to a function the symbols know: its text must carry the callee's name.
+        // Prefer a direct call to a function the symbols know (its text must carry the callee's name) and a
+        // call whose next instruction is on another source line (the verifier's AfterCallLineMismatch shape).
         const bool named = f.code[i].hasTarget && provider.resolve(f.code[i].targetRva).resolved;
-        if (!named && out.found) continue;
+        const symbols::ResolvedAddress a = provider.resolve(f.code[i].rva);
+        const symbols::ResolvedAddress b = provider.resolve(f.code[i + 1].rva);
+        const bool differs = a.resolved && b.resolved && a.inlines.empty() && b.inlines.empty() &&
+                             a.file == b.file && a.line != 0 && b.line != 0 && a.line != b.line;
+        const int score = (named ? 1 : 0) + (differs ? 2 : 0);
+        if (out.found && score <= out.score) continue;
         out.fn = f;
         out.callIndex = i;
         out.found = true;
         out.calleeNamed = named;
-        if (named) return out;
+        out.lineDiffers = differs;
+        out.score = score;
+        if (score == 3) return out;
       }
     }
   }
@@ -472,14 +482,14 @@ TEST(SourceWidget, MixedModeInstructionRowsEqualInstructionsForFunction) {
     previousLine = row.line;
     if (row.instr < 0) continue;
     const source::InstructionRow& in = view->instructions[static_cast<size_t>(row.instr)];
-    EXPECT_EQ(in.line, row.line);
+    EXPECT_EQ(in.groupLine, row.line);
     ++instrRows;
     if (in.ticks != 0) shown[in.rva] += in.ticks;
   }
   // Instructions whose line is outside the file are not listed under a line; here all are inside.
   size_t mapped = 0;
   for (const source::InstructionRow& in : view->instructions)
-    if (in.line >= 1 && in.line <= view->file->lineCount()) ++mapped;
+    if (in.groupLine >= 1 && in.groupLine <= view->file->lineCount()) ++mapped;
   EXPECT_EQ(instrRows, mapped);
   EXPECT_GT(instrRows, 0u);
   for (const auto& [rva, ticks] : expected) {
@@ -558,8 +568,7 @@ TEST(SourceWidget, SamplesAfterACallAreLabelled) {
   TempTree tree("aftercall");
   const uint64_t ret = cf.fn.code[cf.callIndex + 1].rva;
   std::vector<StackSpec> stacks;
-  stacks.push_back({{hot.code[0].rva, ret}, 40});  // the call is on the stack: ret is a return address
-  stacks.push_back({{cf.fn.code[0].rva}, 10});     // plain leaf samples elsewhere in the function
+  stacks.push_back({{hot.code[0].rva, ret}, 50});  // the call is on the stack: ret is a return address
   writeModuleTrace(tree.root() / "t.tachyon", tb.module, stacks);
   Harness h;
   h.open(tree.root() / "t.tachyon");
@@ -572,7 +581,7 @@ TEST(SourceWidget, SamplesAfterACallAreLabelled) {
     if (in.rva == ret) row = &in;
   ASSERT_NE(row, nullptr);
   EXPECT_TRUE(row->afterCall);
-  EXPECT_EQ(row->ticks, 40 * kSampleStepTicks);
+  EXPECT_EQ(row->ticks, 50 * kSampleStepTicks);
   // The call itself carries no time: the sample is attributed to the return address, not the call.
   EXPECT_EQ(view->instructions[cf.callIndex].ticks, 0u);
   EXPECT_TRUE(view->instructions[cf.callIndex].isCall);
@@ -591,6 +600,22 @@ TEST(SourceWidget, SamplesAfterACallAreLabelled) {
   for (const auto& a : *aggs)
     if (a.rva == ret) atRet = a.ticks;
   EXPECT_EQ(atRet, row->ticks);
+  // Mixed mode lists the row under the CALL's line, where linesForFunction put the samples, so the per-line
+  // sum of the listed rows equals the line total (the verifier's AfterCallLineMismatch case).
+  const source::InstructionRow& call = view->instructions[cf.callIndex];
+  std::printf("[source test] call line %u, next instruction line %u (differs: %d)\n", call.line, row->line,
+              cf.lineDiffers ? 1 : 0);
+  EXPECT_EQ(row->groupLine, call.line);
+  if (cf.lineDiffers) EXPECT_NE(row->line, call.line);
+  if (view->file && call.line >= 1 && call.line <= view->file->lineCount()) {
+    uint64_t listed = 0;
+    for (const uint32_t idx : view->instructionsOfLine(call.line)) listed += view->instructions[idx].ticks;
+    EXPECT_EQ(listed, view->lines[call.line].ticks);
+    EXPECT_EQ(view->lines[call.line].ticks, 50 * kSampleStepTicks);
+    if (cf.lineDiffers) EXPECT_EQ(view->lines[row->line].ticks, 0u);
+    const auto inLine = view->instructionsOfLine(call.line);
+    EXPECT_NE(std::find(inLine.begin(), inLine.end(), static_cast<uint32_t>(cf.callIndex + 1)), inLine.end());
+  }
   // Draw it in the disassembly view (fully, with the after-call tag path).
   h.panel->setMode(Mode::Disassembly);
   h.layout();
