@@ -573,6 +573,10 @@ TEST(FunctionListWidget, ContextMenuActionsPublishOnTheBus) {
   EXPECT_GT(h.bus().state().panelRequest.serial, serial);
   EXPECT_EQ(h.bus().state().panelRequest.name, "Source");
   EXPECT_EQ(*h.bus().state().selectedFunction, key);
+  // WP-45: the Source panel exists now and opens on that request; close it so that it does not cover the
+  // list for the right click below.
+  if (PanelEntry* source = h.app.panels().find("Source")) source->open = false;
+  h.frames(2);
 
   h.list->copyName(entry);
   EXPECT_STREQ(ImGui::GetClipboardText(), "game.exe!Engine::update");

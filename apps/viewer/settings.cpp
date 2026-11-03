@@ -55,6 +55,7 @@ Settings Settings::load(const std::filesystem::path& path) {
 
   s.symbolServers = readStringArray(j, "symbolServers", s.symbolServers);
   s.symbolSearchPaths = readStringArray(j, "symbolSearchPaths", s.symbolSearchPaths);
+  s.sourceRoots = readStringArray(j, "sourceRoots", s.sourceRoots);
   s.recentFiles = readStringArray(j, "recentFiles", s.recentFiles);
   if (s.recentFiles.size() > kMaxRecentFiles) s.recentFiles.resize(kMaxRecentFiles);
 
@@ -123,6 +124,7 @@ Result<void> Settings::save(const std::filesystem::path& path) const {
   json mappings = json::array();
   for (const SourcePathMapping& m : sourcePathMappings) mappings.push_back({{"from", m.from}, {"to", m.to}});
   j["sourcePathMappings"] = mappings;
+  j["sourceRoots"] = sourceRoots;
   j["theme"] = themeName(theme);
   j["uiScale"] = uiScale;
   j["recentFiles"] = recentFiles;
@@ -156,6 +158,21 @@ bool Settings::addSymbolSearchPath(const std::string& path) {
       std::find(symbolSearchPaths.begin(), symbolSearchPaths.end(), path) != symbolSearchPaths.end())
     return false;
   symbolSearchPaths.push_back(path);
+  return true;
+}
+
+bool Settings::addSourcePathMapping(const SourcePathMapping& mapping) {
+  if (mapping.from.empty() || mapping.to.empty() ||
+      std::find(sourcePathMappings.begin(), sourcePathMappings.end(), mapping) != sourcePathMappings.end())
+    return false;
+  sourcePathMappings.push_back(mapping);
+  return true;
+}
+
+bool Settings::addSourceRoot(const std::string& root) {
+  if (root.empty() || std::find(sourceRoots.begin(), sourceRoots.end(), root) != sourceRoots.end())
+    return false;
+  sourceRoots.push_back(root);
   return true;
 }
 

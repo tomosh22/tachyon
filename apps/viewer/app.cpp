@@ -8,6 +8,7 @@
 #include "symbols/dwarf/dwarf_provider.h"
 #include "viewer/builtin_panels.h"
 #include "viewer/paths.h"
+#include "viewer/source/source_panel.h"
 #include "viewer/status/symbol_paths.h"
 #include "viewer/status/symbols_panel.h"
 #include "viewer/theme.h"
@@ -104,7 +105,28 @@ bool App::init(std::string& error) {
     host.toast = [this](ToastLevel level, std::string text) { toast(level, std::move(text)); };
     m_panels.add(makeSymbolsPanel(std::move(host)), false);  // opened from the status bar or the View menu
   }
+  {
+    // WP-45: the Source panel; its host persists the path mappings that "Locate file..." derives.
+    SourcePanel::Host host;
+    host.addRemap = [this](const symbols::SourceRemapRule& rule) {
+      m_settings.addSourcePathMapping({rule.from, rule.to});
+      if (m_options.persist) saveSettings();
+      requestRedraw();
+    };
+    host.addRoot = [this](const std::filesystem::path& root) {
+      m_settings.addSourceRoot(pathToUtf8(root));
+      if (m_options.persist) saveSettings();
+      requestRedraw();
+    };
+    host.toast = [this](ToastLevel level, std::string text) { toast(level, std::move(text)); };
+    m_panels.add(makeSourcePanel(std::move(host)), false);  // opened by "Show source" requests
+  }
   registerBuiltinPanelShortcuts(m_shortcuts);
+  m_shortcuts.add("Source", "Ctrl+F", "Search in the file (Source panel focused)");
+  m_shortcuts.add("Source", "Enter / Shift+Enter, F3 / Shift+F3", "Next / previous match");
+  m_shortcuts.add("Source", "Esc", "Close the search");
+  m_shortcuts.add("Source", "Up / Down, PageUp / PageDown", "Move the selected row");
+  m_shortcuts.add("Source", "Click on >", "Expand the instructions of a line (Mixed mode)");
   m_selection.setBlendScopes(m_settings.blendScopes);  // before the first subscriber: nobody to notify
   m_selectionSub = m_selection.subscribe([this](const SelectionState& state, SelectionField field) {
     // WP-54: the blend choice is a preference, whichever panel changed it.
@@ -416,8 +438,14 @@ void App::drawUi() {
   if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_O)) m_commands.run("file.open");
   if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_Q)) requestQuit();
   // Ctrl+F opens the Function Statistics search, but never steals the keys from a text field.
+  // A focused Source panel keeps the key for its own search (WP-45).
+  bool sourceOwnsFind = false;
+  for (const PanelEntry& e : m_panels.entries()) {
+    if (const auto* source = dynamic_cast<const SourcePanel*>(e.panel.get()))
+      sourceOwnsFind = e.open && source->wantsFindShortcut();
+  }
   if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_F) && !io.WantTextInput && !m_paletteOpen &&
-      m_document) {
+      m_document && !sourceOwnsFind) {
     m_commands.run("stats.search");
   }
 
