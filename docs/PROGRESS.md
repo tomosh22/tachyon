@@ -29,9 +29,10 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-34 | Line/instruction attribution, disassembly | C | merged (WP-34b merged; WP-34c call-site field) | wp/34-lines-disasm | 2026-10-25 |
 | WP-35 | Function and scope statistics, frames | C | merged | wp/35-stats-frames | 2026-10-25 |
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
+| WP-41b | Elevated agent (pkexec/sudo) usable by the invoking user | A | not started | wp/41b-elevated-agent | |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | in progress | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
-| WP-41 | Session explorer and capture dialogs | D | in progress | wp/41-session-explorer | 2026-11-03 |
+| WP-41 | Session explorer and capture dialogs | D | merged (verifier PASS) | wp/41-session-explorer | 2026-11-03 |
 | WP-42 | Threads timeline | D | merged; needs GPU verification (60 fps) | wp/42-threads-timeline | 2026-10-25 |
 | WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | merged | wp/42b-timeline-symbols | 2026-10-25 |
 | WP-43 | Call graph panel | D | merged | wp/43-call-graph | 2026-10-25 |
@@ -214,6 +215,10 @@ Verifier fix round complete; CI green (Windows job re-run once for the known Sdk
 ## WP-73 notes
 
 Verifier PASS. `tachyon-cli doctor [--json] [--hz N] [--agent PATH] [--socket PATH]` runs 15 Linux checks with PASS/WARN/FAIL and fix hints (exit 0 / 1 on FAIL / 3 usage); Windows prints a note. Docs: apps/agent/LINUX.md, apps/cli/README.md. CI's privileged step ran SdkSocketPerf for real (real agent with the perf backend + instrumented testbed: events_lost 0, balanced scopes, no sidecar). Accepted deviation: `hasCapturePrivileges()` also accepts CAP_SYS_ADMIN and perf_event_paranoid <= 0. Open: the agent still refuses unprivileged users at paranoid 1–2 although the backend could do per-process captures (current behavior documented). Follow-ups: (done by the orchestrator: the agent ENOPRIV message lists every accepted privilege and points to `tachyon-cli doctor`); doctor treats a relative --socket as an unwritable directory and does not check the socket dir is 0700; ptrace_scope=1 PASS wording is optimistic; Windows doctor checks not implemented.
+
+## WP-41 notes
+
+Verifier PASS. Run→capture→stop→auto-open with the real agent (`--backend mock`) is tested (CaptureApp.RunCaptureStopOpensTheTrace); parked launch + Resume, killed agent → Lost + reconnect, Attach lists this pid, ASan-clean App destruction with a request in flight. Linux launching uses posix_spawnp with argv (no shell); Windows quoting follows CommandLineToArgvW. Orchestrator fixes: Delete refuses a directory named `*.tachyon`; viewer test TempDirs include the pid. Known gaps: an agent started with "Start with pkexec" runs as root and its 0600 socket (and the SDK's private inst-socket directory) is unreachable for the user → WP-41b; capture_done-only warnings (spool caps, refused connections, failed merges) appear as toasts, not in the banner (needs a hook in status/warnings_banner.*); `\\server\share` in the Run args line collapses one backslash; the Windows process list shows the image path, not the command line; Session Explorer capture time is the file mtime (CaptureInfo has no timestamp); `--selftest` makes one failing agent connect attempt (set autoConnectAgent=false there). Needs Windows verification: ShellExecuteExW runas (UAC), Toolhelp32 process list and user lookup, `explorer /select`.
 
 ## Queued follow-ups
 

@@ -18,6 +18,12 @@
 #include <string>
 #include <thread>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace tachyon::viewer::status_test {
 
 namespace fs = std::filesystem;
@@ -31,7 +37,14 @@ class TempDir {
  public:
   explicit TempDir(const std::string& name) {
     static std::atomic<int> counter{0};
-    m_path = fs::path(TACHYON_BINARY_DIR) / "viewer_status_tmp" / (name + "_" + std::to_string(counter++));
+#if defined(_WIN32)
+    const long pid = static_cast<long>(_getpid());
+#else
+    const long pid = static_cast<long>(::getpid());
+#endif
+    // The pid keeps parallel copies of the same test binary apart.
+    m_path = fs::path(TACHYON_BINARY_DIR) / "viewer_status_tmp" /
+             (name + "_" + std::to_string(pid) + "_" + std::to_string(counter++));
     std::error_code ec;
     fs::remove_all(m_path, ec);
     fs::create_directories(m_path, ec);

@@ -297,6 +297,14 @@ TEST(SessionDelete, OnlyExistingSiblingsAreListedAndOnlyTraceFilesAreDeleted) {
       << "nothing to delete is not an error";
 }
 
+TEST(SessionDelete, ADirectoryNamedLikeATraceIsRefused) {
+  TempDir dir("sess_delete_dir");
+  const fs::path notATrace = dir.path() / "folder.tachyon";
+  touch(notATrace / "keep.txt");
+  EXPECT_FALSE(deleteSession(notATrace).ok());
+  EXPECT_TRUE(fs::exists(notATrace / "keep.txt"));
+}
+
 #if !defined(_WIN32)
 TEST(SessionDelete, ASymlinkedSpoolIsUnlinkedNotFollowed) {
   TempDir dir("sess_delete_link");

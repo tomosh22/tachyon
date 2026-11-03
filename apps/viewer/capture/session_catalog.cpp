@@ -156,8 +156,7 @@ std::vector<fs::path> sessionFilesFor(const fs::path& trace) {
     fs::path sibling = trace;
     sibling += suffix;
     ec.clear();
-    if (sibling.parent_path() == trace.parent_path() && fs::exists(fs::symlink_status(sibling, ec)))
-      files.push_back(std::move(sibling));
+    if (fs::exists(fs::symlink_status(sibling, ec))) files.push_back(std::move(sibling));
   }
   return files;
 }
@@ -166,6 +165,10 @@ Result<void> deleteSession(const fs::path& trace, std::vector<fs::path>* removed
   if (!isTraceFile(trace))
     return makeError(ErrorCode::InvalidArgument,
                      "refusing to delete a file that is not a .tachyon trace: " + pathToUtf8(trace));
+  std::error_code dirEc;
+  if (fs::is_directory(fs::symlink_status(trace, dirEc)))
+    return makeError(ErrorCode::InvalidArgument,
+                     "refusing to delete a directory named like a trace: " + pathToUtf8(trace));
   for (const fs::path& file : sessionFilesFor(trace)) {
     std::error_code ec;
     const fs::file_status st = fs::symlink_status(file, ec);
