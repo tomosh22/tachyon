@@ -31,7 +31,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-36 | Timeline LOD | C | merged (frame target follow-up in WP-36b) | wp/36-lod | 2026-10-25 |
 | WP-36b | LOD 64-row frame under 4 ms; non-flaky frame assert | C | not started | wp/36b-lod-perf | 2026-10-25 |
 | WP-40 | Viewer shell | D | merged (headless selftest + Xvfb verified; not yet run on a real display) | wp/40-viewer-shell | 2026-10-25 |
-| WP-41 | Session explorer and capture dialogs | D | not started | wp/41-session-explorer | |
+| WP-41 | Session explorer and capture dialogs | D | in progress | wp/41-session-explorer | 2026-11-03 |
 | WP-42 | Threads timeline | D | merged; needs GPU verification (60 fps) | wp/42-threads-timeline | 2026-10-25 |
 | WP-42b | Timeline fixes + viewer SymbolService plumbing (real FunctionKeys) | D | merged | wp/42b-timeline-symbols | 2026-10-25 |
 | WP-43 | Call graph panel | D | merged | wp/43-call-graph | 2026-10-25 |
