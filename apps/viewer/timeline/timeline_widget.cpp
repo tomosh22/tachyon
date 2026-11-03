@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <map>
 
 namespace tachyon::viewer::timeline {
 
@@ -245,6 +246,7 @@ void TimelineWidget::onDocumentChanged(const Document* document) {
       carry.view = m_doc->view;
       carry.wasFit = m_doc->view == fitView(m_doc->limits);
       carry.flags = m_doc->flags;
+      for (const model::Thread& t : m_doc->model->threads) carry.threadIds.emplace_back(t.pid, t.tid);
       carry.rowsScrollY = m_doc->rowsScrollY;
       m_carry = std::move(carry);
     }
@@ -289,7 +291,22 @@ void TimelineWidget::startDocument(const PanelContext& context) {
   doc->flags.assign(model.threads.size(), RowFlags{});
   if (m_carry) {  // the preview of this stream was replaced: keep the user's place
     if (!m_carry->wasFit) doc->view = clampView(m_carry->view, doc->limits);
-    if (m_carry->flags.size() == model.threads.size()) doc->flags = m_carry->flags;
+    // WP-67: the complete model may number the threads differently (a thread without a ThreadRec that only
+    // later chunks mention): the row flags follow the (pid, tid) of their thread.
+    bool sameThreads =
+        m_carry->flags.size() == model.threads.size() && m_carry->threadIds.size() == model.threads.size();
+    for (size_t i = 0; sameThreads && i < model.threads.size(); ++i)
+      sameThreads = m_carry->threadIds[i] == std::make_pair(model.threads[i].pid, model.threads[i].tid);
+    if (sameThreads) {
+      doc->flags = m_carry->flags;
+    } else if (m_carry->threadIds.size() == m_carry->flags.size()) {
+      std::map<std::pair<uint32_t, uint32_t>, size_t> old;
+      for (size_t i = 0; i < m_carry->threadIds.size(); ++i) old.emplace(m_carry->threadIds[i], i);
+      for (size_t i = 0; i < model.threads.size(); ++i) {
+        const auto it = old.find({model.threads[i].pid, model.threads[i].tid});
+        if (it != old.end()) doc->flags[i] = m_carry->flags[it->second];
+      }
+    }
     doc->rowsScrollY = m_carry->rowsScrollY;
     m_pendingScrollY = m_carry->rowsScrollY;
     m_carry.reset();

@@ -34,6 +34,9 @@ struct CaptureHost {
   std::function<void()> saveSettings;
   std::function<void(const char*)> showPanel;  // open a panel by name
   std::function<void()> capturesChanged;       // a capture finished (refresh the Session Explorer)
+  // WP-67: the free-text warnings of a finished capture's `capture_done`, for the trace at `path` (shown by
+  // the warnings banner when that trace is open). Called before openFile.
+  std::function<void(const std::filesystem::path&, std::vector<std::string>)> captureWarnings;
 };
 
 // What starting the agent would run (see planAgentLaunch).
@@ -79,6 +82,7 @@ struct RemoteTransfer {
   bool openWhenDone = false;  // open the document once it has arrived (autoOpen of a finished capture)
   bool isCapture = true;      // capture_done (false: a flush of the flight recorder)
   uint64_t bytes = 0;         // size when Done
+  std::vector<std::string> warnings;  // WP-67: capture_done warnings, handed to the banner on arrival
 };
 
 // Result of "Test connection" in the Connect to remote agent dialog.
@@ -148,7 +152,8 @@ class CaptureController {
   void cancelTransfer(size_t index);
   void retryTransfer(size_t index);
   // Copies the trace `remotePath` of the connected remote agent into the captures directory.
-  void fetchRemote(const std::string& remotePath, bool openWhenDone, bool isCapture);
+  void fetchRemote(const std::string& remotePath, bool openWhenDone, bool isCapture,
+                   std::vector<std::string> warnings = {});
   // True if the agent for the current settings needs privileges this process does not have.
   bool agentNeedsElevation() const;
   void disconnectAgent();
@@ -231,7 +236,8 @@ class CaptureController {
   void revalidate();
   void toast(ToastLevel level, std::string text);
   void connectNow(int retryMs, bool userInitiated);
-  void finishLocalCapture(const std::filesystem::path& path, bool open);
+  void finishLocalCapture(const std::filesystem::path& path, bool open,
+                          std::vector<std::string> warnings = {});
   void startTransfer(size_t index);
   void onTransferDone(size_t index, bool ok, const std::string& error, uint64_t bytes);
   void drawRemoteDialog();

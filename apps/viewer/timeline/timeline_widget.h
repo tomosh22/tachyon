@@ -26,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace tachyon::viewer::timeline {
@@ -249,6 +250,7 @@ class TimelineWidget {
     TimeView view;
     bool wasFit = false;  // the view showed the whole preview: show the whole trace now
     std::vector<RowFlags> flags;
+    std::vector<std::pair<uint32_t, uint32_t>> threadIds;  // (pid, tid) of `flags` (WP-67: map by id)
     float rowsScrollY = 0;
   };
   std::optional<Carry> m_carry;

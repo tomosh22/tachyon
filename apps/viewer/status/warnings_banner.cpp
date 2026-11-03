@@ -13,8 +13,39 @@ namespace {
 constexpr size_t kMaxShownLines = 4;
 }
 
+std::string WarningsBanner::keyOf(const std::filesystem::path& path) {
+  std::error_code ec;
+  const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+  return pathToUtf8(ec ? path : abs);
+}
+
+void WarningsBanner::recollect(const Document& document) {
+  std::vector<std::string> agent;
+  if (const auto it = m_agentWarnings.find(m_key); it != m_agentWarnings.end()) agent = it->second;
+  m_warnings = collectCaptureWarnings(document.model(), agent);
+  for (const CaptureWarning& n : m_notices) m_warnings.push_back(n);
+}
+
 void WarningsBanner::update(const Document* document, uint64_t documentGeneration) {
-  if (m_haveDocument && m_generation == documentGeneration && (document != nullptr)) return;
+  if (m_haveDocument && m_generation == documentGeneration && (document != nullptr)) {
+    if (m_agentDirty) {
+      m_agentDirty = false;
+      const std::vector<CaptureWarning> before = m_warnings;
+      recollect(*document);
+      // Something the user has not seen shows the banner again, even if it was dismissed.
+      for (const CaptureWarning& w : m_warnings) {
+        const bool known = std::any_of(before.begin(), before.end(),
+                                       [&](const CaptureWarning& b) { return b.text == w.text; });
+        if (!known) {
+          m_dismissed = false;
+          m_dismissedDocuments.erase(m_key);
+        }
+      }
+    }
+    return;
+  }
+  m_agentDirty = false;
+  m_notices.clear();
   if (!document) {
     m_haveDocument = false;
     m_generation = documentGeneration;
@@ -25,14 +56,22 @@ void WarningsBanner::update(const Document* document, uint64_t documentGeneratio
   }
   m_haveDocument = true;
   m_generation = documentGeneration;
-  std::error_code ec;
-  std::filesystem::path key = std::filesystem::absolute(document->path(), ec);
-  m_key = pathToUtf8(ec ? document->path() : key);
-  m_warnings = collectCaptureWarnings(document->model());
+  m_key = keyOf(document->path());
+  recollect(*document);
   m_dismissed = m_dismissedDocuments.count(m_key) != 0;
 }
 
+void WarningsBanner::addAgentWarnings(const std::filesystem::path& path, std::vector<std::string> warnings) {
+  if (warnings.empty()) return;
+  const std::string key = keyOf(path);
+  m_agentWarnings[key] = std::move(warnings);
+  if (m_haveDocument && key == m_key) m_agentDirty = true;
+}
+
 void WarningsBanner::addNotice(CaptureWarningKind kind, std::string text) {
+  for (CaptureWarning& w : m_notices) {
+    if (w.kind == kind) w.text = text;
+  }
   for (CaptureWarning& w : m_warnings) {
     if (w.kind == kind) {
       w.text = std::move(text);
@@ -40,6 +79,7 @@ void WarningsBanner::addNotice(CaptureWarningKind kind, std::string text) {
       return;
     }
   }
+  m_notices.push_back({kind, text});
   m_warnings.push_back({kind, std::move(text)});
   m_dismissed = false;
 }

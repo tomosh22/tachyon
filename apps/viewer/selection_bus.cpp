@@ -99,6 +99,54 @@ void SelectionBus::clear() {
   publish(SelectionField::All);
 }
 
+void SelectionBus::remapThreads(const std::function<ThreadIdx(ThreadIdx)>& map) {
+  const SelectionState before = m_state;
+  auto mapped = [&](ThreadIdx t) { return t.valid() ? map(t) : ThreadIdx(); };
+  SelectionState& s = m_state;
+  if (s.timeFilter && s.timeFilter->threads) {
+    std::vector<ThreadIdx> kept;
+    for (const ThreadIdx t : *s.timeFilter->threads) {
+      const ThreadIdx m = mapped(t);
+      if (m.valid()) kept.push_back(m);
+    }
+    if (kept.empty()) {
+      s.timeFilter->threads.reset();
+    } else {
+      s.timeFilter->threads = std::move(kept);
+    }
+  }
+  s.selectedThread = mapped(s.selectedThread);
+  s.hovered.thread = mapped(s.hovered.thread);
+  if (s.hovered.kind == HoveredItem::Kind::Thread && !s.hovered.thread.valid()) s.hovered = {};
+  if (s.selectedWait) {
+    const ThreadIdx m = mapped(s.selectedWait->thread);
+    if (m.valid()) {
+      s.selectedWait->thread = m;
+    } else {
+      s.selectedWait.reset();
+    }
+  }
+  s.navigation.thread = mapped(s.navigation.thread);
+  if (s.instanceHighlight.active()) {
+    auto list = std::make_shared<std::vector<analysis::Instance>>();
+    list->reserve(s.instanceHighlight.instances->size());
+    for (analysis::Instance i : *s.instanceHighlight.instances) {
+      i.thread = mapped(i.thread);
+      if (i.thread.valid()) list->push_back(i);
+    }
+    if (*list != *s.instanceHighlight.instances) {  // indices into the list no longer mean the same
+      s.instanceHighlight.instances = std::move(list);
+      s.instanceHighlight.current.reset();
+    }
+  }
+  const bool same = s.timeFilter == before.timeFilter && s.selectedThread == before.selectedThread &&
+                    s.hovered == before.hovered && s.selectedWait == before.selectedWait &&
+                    s.navigation == before.navigation &&
+                    s.instanceHighlight.instances == before.instanceHighlight.instances &&
+                    s.instanceHighlight.current == before.instanceHighlight.current;
+  if (!same) publish(SelectionField::All);
+}
+
 void SelectionBus::publish(SelectionField field) {
   std::vector<SubscriptionId> ids;
   ids.reserve(m_subscribers.size());

@@ -776,10 +776,15 @@ TEST(ButterflyWidget, UnknownFunctionGivesAnEmptyView) {
   EXPECT_TRUE(h.butterfly->data()->view.empty());
   EXPECT_TRUE(h.butterfly->data()->view.callers.empty());
   EXPECT_TRUE(h.butterfly->data()->view.callees.empty());
-  // The synthetic root key is never queried.
+  // WP-67: the synthetic root key ("<no stack>") is queried: its row with totals, no callers or callees.
   h.bus().setSelectedFunction(analysis::kRootKey);
-  h.frames(3);
-  EXPECT_FALSE(h.butterfly->data());
+  h.settle();
+  ASSERT_TRUE(h.butterfly->data());
+  EXPECT_EQ(h.butterfly->data()->view.self.key, analysis::kRootKey);
+  EXPECT_EQ(h.butterfly->data()->view.self.name.function, "<no stack>");
+  EXPECT_TRUE(h.butterfly->showsNoStackRow());
+  EXPECT_TRUE(h.butterfly->data()->view.callers.empty());
+  EXPECT_TRUE(h.butterfly->data()->view.callees.empty());
 }
 
 TEST(ButterflyWidget, FollowsTheTimeFilterAndTheSubtreeToggle) {

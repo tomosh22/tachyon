@@ -25,6 +25,7 @@
 #include <fstream>
 #include <ostream>
 #include <thread>
+#include <unordered_map>
 
 namespace tachyon::viewer {
 
@@ -57,7 +58,8 @@ App::App(std::unique_ptr<IRenderer> renderer, AppOptions options)
 
 App::~App() {
   m_jobs.cancelAll();
-  m_capture.reset();   // joins the agent worker (it wakes the renderer) before the renderer is shut down
+  m_capture.reset();  // joins the agent worker (it wakes the renderer) before the renderer is shut down
+  m_symbolSetup.reset();
   m_document.reset();  // joins the symbol workers (they wake the renderer) before the renderer is shut down
   if (m_selectionSub != SelectionBus::kNoSubscription) m_selection.unsubscribe(m_selectionSub);
   if (m_imgui) {
@@ -107,6 +109,8 @@ bool App::init(std::string& error) {
     host.addSymbolPath = [this] { m_commands.run("symbols.addPath"); };
     host.retry = [this] { rerunSymbolResolution(); };
     host.toast = [this](ToastLevel level, std::string text) { toast(level, std::move(text)); };
+    host.pathProblems = [this]() -> const std::vector<std::string>& { return m_symbolPathProblems; };
+    host.scanRunning = [this] { return symbolPathScanRunning(); };
     m_panels.add(makeSymbolsPanel(std::move(host)), false);  // opened from the status bar or the View menu
   }
   {
@@ -133,6 +137,9 @@ bool App::init(std::string& error) {
     host.jobs = &m_jobs;
     host.toast = [this](ToastLevel level, std::string text) { toast(level, std::move(text)); };
     host.openFile = [this](const std::filesystem::path& path) { openFile(path); };
+    host.captureWarnings = [this](const std::filesystem::path& path, std::vector<std::string> warnings) {
+      m_banner.addAgentWarnings(path, std::move(warnings));
+    };
     host.wake = [renderer] { renderer->wake(); };
     host.requestRedraw = [this] { requestRedraw(); };
     host.saveSettings = [this] {
@@ -289,15 +296,54 @@ void App::notifyDocumentChanged() {
                                         : std::string("Tachyon"));
 }
 
+// WP-67: scans the symbol search paths (directory listings and `*.symbols.json` reads) off the UI thread.
+struct SymbolSetupRun {
+  std::shared_ptr<symbols::SymbolService> service;
+  std::atomic<bool> cancel{false};
+  std::atomic<bool> ready{false};
+  SymbolPathReport report;  // written by the thread before `ready`
+  std::thread thread;
+  ~SymbolSetupRun() {
+    cancel.store(true);
+    if (thread.joinable()) thread.join();
+  }
+};
+
+void App::finishSymbolSetup() {
+  std::unique_ptr<SymbolSetupRun> run = std::move(m_symbolSetup);
+  if (!run) return;
+  if (run->thread.joinable()) run->thread.join();
+  m_symbolPathProblems = run->report.problems;
+  constexpr size_t kMaxToasted = 3;
+  for (size_t i = 0; i < m_symbolPathProblems.size() && i < kMaxToasted; ++i) {
+    TACHYON_LOG_WARN("symbols: search path: {}", m_symbolPathProblems[i]);
+    toast(ToastLevel::Warning, "Symbol path: " + m_symbolPathProblems[i]);
+  }
+  if (m_symbolPathProblems.size() > kMaxToasted)
+    toast(ToastLevel::Warning, "... and " + std::to_string(m_symbolPathProblems.size() - kMaxToasted) +
+                                   " more symbol path problems (see the Symbols panel)");
+  if (!run->report.cancelled && m_document && m_document->symbols() == run->service)
+    beginSymbolResolve(*m_document);
+}
+
 bool App::pumpSymbolEvents() {
-  if (!m_symbolMailbox || !m_symbolMailbox->dirty.exchange(false)) return false;
+  bool setupFinished = false;
+  if (m_symbolSetup && m_symbolSetup->ready.load(std::memory_order_acquire)) {
+    finishSymbolSetup();
+    setupFinished = true;
+  }
+  if (setupFinished) {
+    ++m_symbolGeneration;
+    requestRedraw();
+  }
+  if (!m_symbolMailbox || !m_symbolMailbox->dirty.exchange(false)) return setupFinished;
   size_t delivered = 0;
   {
     const std::lock_guard<std::mutex> lock(m_symbolMailbox->mutex);
     delivered = m_symbolMailbox->events.size();
     m_symbolMailbox->events.clear();
   }
-  if (delivered == 0) return false;
+  if (delivered == 0) return setupFinished;
   ++m_symbolGeneration;
   requestRedraw();
   return true;
@@ -323,15 +369,38 @@ void App::startSymbolResolution(Document& document) {
     const Result<void> added = service->addSymbolFileOverride(sidecar);
     if (!added.ok()) TACHYON_LOG_WARN("symbols: {}: {}", pathToUtf8(sidecar), added.error().toString());
   }
-  // WP-48: explicit symbol search paths from the Symbols panel / settings.
-  const SymbolPathReport paths =
-      applySymbolSearchPaths(*service, m_settings.symbolSearchPaths, m_settings.symbolServers, cacheDir);
-  for (const std::string& problem : paths.problems) TACHYON_LOG_WARN("symbols: search path: {}", problem);
   if (m_options.configureSymbols) m_options.configureSymbols(*service);
   m_symbolMailbox = std::make_shared<SymbolMailbox>();
   IRenderer* renderer = m_renderer.get();
   m_symbolMailbox->wake = [renderer] { renderer->wake(); };
   document.setSymbols(service);
+  m_symbolPathProblems.clear();
+  m_symbolSetup.reset();  // joins a worker of an earlier run
+  // WP-48: explicit symbol search paths from the Symbols panel / settings. WP-67: scanning them (a directory
+  // listing and one JSON read per `*.symbols.json`) runs on a worker; the modules are resolved when it is
+  // done. Until then the service answers every lookup as unresolved. Nothing else reads what the worker
+  // writes (the overrides and the locator).
+  if (m_settings.symbolSearchPaths.empty()) {
+    beginSymbolResolve(document);
+    return;
+  }
+  auto run = std::make_unique<SymbolSetupRun>();
+  run->service = service;
+  SymbolSetupRun* raw = run.get();
+  run->thread = std::thread([raw, service, paths = m_settings.symbolSearchPaths,
+                             servers = m_settings.symbolServers, cacheDir, renderer] {
+    SymbolPathOptions options;
+    options.cancel = &raw->cancel;
+    raw->report = applySymbolSearchPaths(*service, paths, servers, cacheDir, options);
+    raw->ready.store(true, std::memory_order_release);
+    renderer->wake();
+  });
+  m_symbolSetup = std::move(run);
+}
+
+void App::beginSymbolResolve(Document& document) {
+  const std::shared_ptr<symbols::SymbolService>& service = document.symbols();
+  if (!service) return;
   auto mailbox = m_symbolMailbox;
   // The const overload never writes the model (Module::state is written only by the non-const overload's
   // waitAll()); module states are read with SymbolService::moduleState().
@@ -394,6 +463,7 @@ void App::toast(ToastLevel level, std::string text) {
 
 void App::rerunSymbolResolution() {
   if (!m_document) return;
+  m_symbolSetup.reset();  // WP-67: joins the search-path worker (cancel() below must not overlap it)
   // Stop the old run first: snapshots and in-flight queries may keep the old service alive, and its workers
   // would otherwise keep loading providers alongside the new run. cancel() keeps lookups usable.
   if (const std::shared_ptr<symbols::SymbolService>& old = m_document->symbols()) old->cancel();
@@ -419,17 +489,55 @@ bool App::addSymbolPath(const std::filesystem::path& path, std::string& error) {
   return true;
 }
 
+// WP-67: the old model's ThreadIdx -> the new model's, by (pid, tid); null when every index maps to itself.
+// A thread the new model lacks maps to an invalid index. Like TraceModel::tidToThread, the first thread of a
+// (pid, tid) pair wins.
+std::function<ThreadIdx(ThreadIdx)> threadMapBetween(const model::TraceModel& from,
+                                                     const model::TraceModel& to) {
+  std::unordered_map<uint64_t, ThreadIdx> byId;
+  byId.reserve(to.threads.size());
+  for (size_t i = 0; i < to.threads.size(); ++i)
+    byId.emplace((static_cast<uint64_t>(to.threads[i].pid) << 32) | to.threads[i].tid,
+                 ThreadIdx(static_cast<uint32_t>(i)));
+  auto table = std::make_shared<std::vector<ThreadIdx>>(from.threads.size());
+  bool identity = true;
+  for (size_t i = 0; i < from.threads.size(); ++i) {
+    const auto it = byId.find((static_cast<uint64_t>(from.threads[i].pid) << 32) | from.threads[i].tid);
+    (*table)[i] = it == byId.end() ? ThreadIdx() : it->second;
+    if ((*table)[i] != ThreadIdx(static_cast<uint32_t>(i))) identity = false;
+  }
+  if (identity) return nullptr;
+  return [table](ThreadIdx t) { return t.get() < table->size() ? (*table)[t.get()] : ThreadIdx(); };
+}
+
 void App::onDocumentLoaded(std::shared_ptr<Document> document) {
   // The complete document of a stream replaces its preview: the user's selection stays.
   const bool continuation =
       m_document && document->streamId() != 0 && m_document->streamId() == document->streamId();
+  // WP-67 (e): the complete document gets a fresh SymbolService and resolves every module again; the
+  // preview's results are NOT reused. A resolved module's provider interns its strings into the service's
+  // table and the service memoizes FrameIdx -> ResolvedAddress for the model it was started on (it points
+  // into that model's frame table), so neither can move to a service for another model; sharing them would
+  // need a SymbolService API to adopt the providers of a finished run (libs/symbols, outside this change).
+  // The expensive part is cheap the second time anyway: the symbol files are already located and pinned in
+  // the locator's cache, so the repeat is provider loading only. If the preview's run is still going, it is
+  // cancelled with its service.
   m_symbolMailbox.reset();
+  m_symbolSetup.reset();
+  // WP-67: the complete model can number the threads differently from the preview (a thread without a
+  // ThreadRec that only the later chunks mention): the kept selection is mapped by pid/tid.
+  std::function<ThreadIdx(ThreadIdx)> threadMap;
+  if (continuation) threadMap = threadMapBetween(m_document->model(), document->model());
   m_document = std::move(document);
   ++m_documentGeneration;
   ++m_symbolGeneration;
   startSymbolResolution(*m_document);
   m_lastError.clear();
-  if (!continuation) m_selection.clear();
+  if (!continuation) {
+    m_selection.clear();
+  } else if (threadMap) {
+    m_selection.remapThreads(threadMap);
+  }
   m_settings.addRecentFile(pathToUtf8(std::filesystem::absolute(m_document->path())));
   if (m_options.persist) saveSettings();
   notifyDocumentChanged();
@@ -440,6 +548,7 @@ void App::closeDocument() {
   // Closing the preview of a trace that is still loading abandons the load.
   if (m_openJob != 0 && m_document->streamId() != 0 && m_document->streamId() == m_openStream)
     m_jobs.cancel(m_openJob);
+  m_symbolSetup.reset();
   m_document.reset();  // joins the symbol workers before the model can go away
   m_symbolMailbox.reset();
   ++m_documentGeneration;
@@ -537,6 +646,9 @@ void App::pumpStream() {
     preview = std::move(m_stream->preview);
   }
   if (!preview) return;
+  // WP-67: a preview published before the load was cancelled (the job is cancelled, or a newer open took
+  // over) is not shown: the user abandoned that load.
+  if (m_stream->stream != m_openStream || m_jobs.cancelRequested(m_openJob)) return;
   auto document = std::make_shared<Document>(m_stream->path, preview);
   document->setStreamId(m_stream->stream);
   onDocumentLoaded(std::move(document));

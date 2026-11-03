@@ -37,6 +37,10 @@ class ButterflyPanel final : public IPanel {
   // setting).
   static constexpr const char* kInlineForcedHint = "inline frames on for this selection";
   static constexpr const char* kKernelForcedHint = "kernel grouped for this selection";
+  // Shown above the table when "<no stack>" (kRootKey) is selected (WP-67): the row has totals only.
+  static constexpr const char* kNoStackNote =
+      "<no stack>: samples without a call stack. They have no callers or callees; the row shows their "
+      "totals.";
 
   // The result a query delivers: the display lines plus the clock for the ms columns.
   struct Data {
@@ -90,6 +94,8 @@ class ButterflyPanel final : public IPanel {
   // True while the selected key forces inline expansion / kernel grouping on against the toggles.
   bool inlineForced() const { return m_forcedInline; }
   bool kernelForced() const { return m_forcedKernel; }
+  // True while the shown result is the "<no stack>" row (WP-67).
+  bool showsNoStackRow() const { return m_data && m_data->view.self.key == analysis::kRootKey; }
   bool pending() const { return m_query.pending(); }
   uint64_t issuedQueries() const { return m_query.issued(); }
   uint64_t deliveredResults() const { return m_delivered; }

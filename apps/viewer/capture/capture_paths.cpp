@@ -64,8 +64,71 @@ std::filesystem::path defaultCaptureFile(const std::filesystem::path& dir, std::
   return dir / pathFromUtf8(clean + "-" + stamp + ".tachyon");
 }
 
-std::vector<std::string> splitArguments(std::string_view text, std::string& error) {
+namespace {
+
+std::vector<std::string> splitArgumentsWindows(std::string_view text, std::string& error) {
+  std::vector<std::string> out;
+  std::string current;
+  bool inToken = false;
+  bool quoted = false;
+  size_t i = 0;
+  while (i < text.size()) {
+    const char c = text[i];
+    if (c == '\\') {
+      size_t n = 0;
+      while (i < text.size() && text[i] == '\\') {
+        ++n;
+        ++i;
+      }
+      inToken = true;
+      if (i < text.size() && text[i] == '"') {
+        current.append(n / 2, '\\');
+        if (n % 2 == 1) {
+          current.push_back('"');
+          ++i;
+        }  // else: the quote below toggles
+      } else {
+        current.append(n, '\\');
+      }
+      continue;
+    }
+    if (c == '"') {
+      inToken = true;
+      if (quoted && i + 1 < text.size() && text[i + 1] == '"') {
+        current.push_back('"');  // "" inside quotes: a literal quote, still quoted
+        i += 2;
+        continue;
+      }
+      quoted = !quoted;
+      ++i;
+      continue;
+    }
+    if (!quoted && (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
+      if (inToken) out.push_back(std::move(current));
+      current.clear();
+      inToken = false;
+      ++i;
+      continue;
+    }
+    current.push_back(c);
+    inToken = true;
+    ++i;
+  }
+  if (quoted) {
+    error = "unterminated double quote";
+    return {};
+  }
+  if (inToken) out.push_back(std::move(current));
+  return out;
+}
+
+}  // namespace
+
+std::vector<std::string> splitArguments(std::string_view text, std::string& error, ArgumentStyle style) {
   error.clear();
+  if (style == ArgumentStyle::Native)
+    style = TACHYON_PLATFORM_WINDOWS ? ArgumentStyle::Windows : ArgumentStyle::Posix;
+  if (style == ArgumentStyle::Windows) return splitArgumentsWindows(text, error);
   std::vector<std::string> out;
   std::string current;
   bool inToken = false;

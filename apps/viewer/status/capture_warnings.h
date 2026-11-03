@@ -22,8 +22,10 @@ enum class CaptureWarningKind : uint8_t {
   InstrumentationWarning,
   ConverterWarning,
   Partial,
-  MemoryDegraded  // WP-64: the memory ceiling made the viewer free optional data (added by the App, not by
-                  // the model)
+  MemoryDegraded,  // WP-64: the memory ceiling made the viewer free optional data (added by the App, not by
+                   // the model)
+  AgentWarning     // WP-67: reported by the capture agent in `capture_done` (spool caps, refused connections,
+                   // failed merges); not part of the trace
 };
 
 struct CaptureWarning {
@@ -33,7 +35,12 @@ struct CaptureWarning {
 
 // Thread-safe: pure function on the model. Never fails; a CaptureInfo that is missing or not a JSON object
 // contributes nothing. At most kMaxCaptureWarnings entries (a final "... and N more" line is added).
+// WP-67: `agentWarnings` are the free-text warnings of the agent's `capture_done` for this trace; they are
+// appended as AgentWarning. Duplicates are dropped by meaning, not only by exact text: a lost-events or a
+// throttle sentence in `convert_stats.warnings` or in `agentWarnings` is not shown when the structured
+// EventsLost / Throttled line already says it, and an exact repeat of an earlier text is dropped.
 inline constexpr size_t kMaxCaptureWarnings = 32;
-std::vector<CaptureWarning> collectCaptureWarnings(const model::TraceModel& model);
+std::vector<CaptureWarning> collectCaptureWarnings(const model::TraceModel& model,
+                                                   const std::vector<std::string>& agentWarnings = {});
 
 }  // namespace tachyon::viewer

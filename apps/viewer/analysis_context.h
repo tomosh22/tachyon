@@ -32,21 +32,6 @@ namespace tachyon::viewer {
 
 class Document;
 
-// Children of every callstack node (compressed sparse rows), built once per model. Used to map a call graph
-// path back to a CallstackIdx (Filter::subtreeRoot).
-class NodeChildIndex {
- public:
-  // Thread-safe (constructor): O(nodes).
-  explicit NodeChildIndex(const model::TraceModel& model);
-  // Thread-safe (const). Child node indices of `node` in increasing order; empty for an unknown node.
-  std::span<const uint32_t> children(uint32_t node) const;
-  size_t nodeCount() const { return m_offsets.empty() ? 0 : m_offsets.size() - 1; }
-
- private:
-  std::vector<uint32_t> m_offsets;  // nodeCount + 1
-  std::vector<uint32_t> m_children;
-};
-
 // A QueryContext plus the objects it refers to. Immutable after construction; thread-safe.
 class AnalysisSnapshot {
  public:
@@ -106,8 +91,6 @@ class AnalysisContext {
   // (the caches evict down to it at once; 0 = nothing is cached any more).
   void setCacheBudget(size_t bytes) const;
 
-  // Thread-safe. The child index of the model, built on first use (O(nodes)).
-  std::shared_ptr<const NodeChildIndex> childIndex() const;
   // Thread-safe. Number of snapshots currently held (tests).
   size_t snapshotCount() const;
 
@@ -117,7 +100,6 @@ class AnalysisContext {
   const Document& m_owner;
   mutable std::mutex m_mutex;
   mutable std::vector<std::shared_ptr<const AnalysisSnapshot>> m_snapshots;
-  mutable std::shared_ptr<const NodeChildIndex> m_childIndex;
   mutable size_t m_cacheBudget = analysis::QueryCacheConfig{}.budgetBytes;
   mutable std::vector<std::pair<analysis::QueryExecutor*, analysis::TaskHandle>> m_tasks;
 };
