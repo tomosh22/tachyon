@@ -59,7 +59,7 @@ if(TACHYON_ENABLE_LIBDW)
 
   tachyon_add_test(dwarf_symbols_tests
     SOURCES dwarf_elf_test.cpp dwarf_provider_test.cpp dwarf_libdw_test.cpp dwarf_locator_test.cpp
-            dwarf_robustness_test.cpp
+            dwarf_robustness_test.cpp remote_module_test.cpp
     DEPS tachyon::symbols tachyon::model tachyon::trace)
   if(TARGET dwarf_symbols_tests)
     add_dependencies(dwarf_symbols_tests ${_dwarf_fx_targets})

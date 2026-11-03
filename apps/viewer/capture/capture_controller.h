@@ -55,12 +55,43 @@ std::string formatElapsed(double seconds);
 struct FlushedCapture {
   std::string name;
   std::string reason;
+  // The trace on this machine. With a remote agent it is the path on the agent until the background
+  // transfer has finished (`fetched`), then the local copy.
   std::string path;
+  std::string remotePath;  // WP-61: as the agent reported it ("" for a local agent)
+  bool fetched = true;     // false while a remote trace has not arrived yet
   double durationS = 0.0;
   uint64_t eventsLost = 0;
   uint32_t coalesced = 0;                    // triggers folded into this flush
   std::chrono::system_clock::time_point at;  // when the viewer heard of it
 };
+
+// WP-61: a trace being copied from a remote agent into the captures directory (a `capture_done` or
+// `flushed` event of a tcp:// agent). The data goes to `<localPath>.part`; Retry after a failure or a cancel
+// resumes from there.
+struct RemoteTransfer {
+  enum class State : uint8_t { Running, Done, Failed, Cancelled };
+  std::string remotePath;
+  std::filesystem::path localPath;
+  State state = State::Running;
+  std::string error;
+  uint64_t jobId = 0;         // JobQueue job while Running (0 when run inline)
+  bool openWhenDone = false;  // open the document once it has arrived (autoOpen of a finished capture)
+  bool isCapture = true;      // capture_done (false: a flush of the flight recorder)
+  uint64_t bytes = 0;         // size when Done
+};
+
+// Result of "Test connection" in the Connect to remote agent dialog.
+struct RemoteProbe {
+  bool done = false;
+  bool ok = false;
+  std::string message;
+};
+
+// Thread-safe: no shared state. Connects to `hostPort` ("host:port") with the token in `tokenFile`, asks for
+// the status and disconnects. The message says what was found ("connected: perf backend, idle, elevated") or
+// why not. Blocks for the connect timeout at most: call it off the UI thread.
+RemoteProbe probeRemoteAgent(const std::string& hostPort, const std::string& tokenFile);
 
 // What the Flight Recorder panel shows.
 struct FlightRecorderState {
@@ -92,6 +123,32 @@ class CaptureController {
   void reconnect();
   // Starts the agent through the launcher and connects to it. `elevate`: pkexec / UAC.
   void startAgent(bool elevate);
+
+  // ---- remote agent (WP-61) ----
+  // Connects to the agent at `hostPort` ("host:port", IPv6 in brackets) with the token read from `tokenFile`;
+  // both are remembered in the settings (the path, never the token). False (with a toast) when the address
+  // is malformed.
+  bool connectRemote(const std::string& hostPort, const std::string& tokenFile);
+  // Back to the agent on this machine (the configured address).
+  void useLocalAgent();
+  // True while connected (or connecting) to a tcp:// agent.
+  bool remoteActive() const;
+  // The "Connect to remote agent" dialog.
+  void openRemoteDialog();
+  void closeRemoteDialog() { m_remoteDialogOpen = false; }
+  bool remoteDialogOpen() const { return m_remoteDialogOpen; }
+  std::string& remoteAddressField() { return m_remoteAddressText; }
+  std::string& remoteTokenFileField() { return m_remoteTokenText; }
+  // Runs probeRemoteAgent for the dialog's fields in the background (inline without a JobQueue).
+  void testRemote();
+  const RemoteProbe& remoteProbe() const { return m_remoteProbe; }
+  // Transfers of this run, oldest first (at most 100 are kept).
+  const std::vector<RemoteTransfer>& transfers() const { return m_transfers; }
+  // Cancels a running transfer (the .part file stays). Retry resumes it.
+  void cancelTransfer(size_t index);
+  void retryTransfer(size_t index);
+  // Copies the trace `remotePath` of the connected remote agent into the captures directory.
+  void fetchRemote(const std::string& remotePath, bool openWhenDone, bool isCapture);
   // True if the agent for the current settings needs privileges this process does not have.
   bool agentNeedsElevation() const;
   void disconnectAgent();
@@ -149,7 +206,7 @@ class CaptureController {
   // The processes of the Attach dialog (all of them; filteredProcesses() applies the filter).
   const std::vector<ProcessInfo>& processes() const { return m_processes; }
   std::vector<size_t> filteredProcesses() const { return filterProcesses(m_processes, m_processFilter); }
-  bool processesLoading() const { return m_processJob != 0; }
+  bool processesLoading() const { return m_processJob != 0 || m_remoteProcessesPending; }
   const std::string& processError() const { return m_processError; }
   std::string& processFilter() { return m_processFilter; }
   // Starts the (asynchronous) enumeration for the Attach dialog.
@@ -174,6 +231,11 @@ class CaptureController {
   void revalidate();
   void toast(ToastLevel level, std::string text);
   void connectNow(int retryMs, bool userInitiated);
+  void finishLocalCapture(const std::filesystem::path& path, bool open);
+  void startTransfer(size_t index);
+  void onTransferDone(size_t index, bool ok, const std::string& error, uint64_t bytes);
+  void drawRemoteDialog();
+  void drawTransfers();
 
   CaptureHost m_host;
   std::shared_ptr<IProcessLauncher> m_launcher;
@@ -199,6 +261,16 @@ class CaptureController {
   uint32_t m_selectedPid = 0;
 
   AgentPhase m_lastPhase = AgentPhase::Unknown;
+
+  // WP-61
+  bool m_connectedRemote = false;  // the last connect was to a remote agent (Reconnect goes there again)
+  bool m_remoteDialogOpen = false;
+  bool m_remoteDialogJustOpened = false;
+  std::string m_remoteAddressText, m_remoteTokenText;
+  RemoteProbe m_remoteProbe;
+  uint64_t m_probeJob = 0;
+  std::vector<RemoteTransfer> m_transfers;
+  bool m_remoteProcessesPending = false;
 
   std::vector<FlushedCapture> m_flushed;
   int m_flushSeconds = 10;

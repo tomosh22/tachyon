@@ -3,8 +3,11 @@
 #include "capture/windows_etw/launch.h"
 #include "cli/doctor.h"
 #include "cli/export_command.h"
+#include "control/auth.h"
 #include "control/client.h"
+#include "control/fetch.h"
 #include "control/protocol.h"
+#include "control/tcp.h"
 #include "control/transport.h"
 #include "inst/merge.h"
 #include "inst/sidecar_paths.h"
@@ -27,6 +30,11 @@ using namespace control;
 
 struct Parsed {
   std::string address;
+  std::string tokenFile;    // tcp:// agents (WP-61); else $TACHYON_AGENT_TOKEN_FILE
+  bool fetchAfter = false;  // capture: fetch the trace at capture_done
+  std::string fetchDir;     // capture --fetch: where (default: the current directory)
+  std::string fetchPath;    // fetch: the agent-side path
+  std::string fetchOut;     // fetch: local file (default: ./<name of the remote file>)
   bool json = false;
   int timeoutS = 600;
   int connectTimeoutMs = 0;
@@ -93,8 +101,10 @@ std::string parse(const std::vector<std::string>& args, Parsed& p) {
     uint32_t n = 0;
     const bool startLike = isStartLike(p.command);
 
-    if (a == "--socket" || a == "--pipe") {
+    if (a == "--socket" || a == "--pipe" || a == "--agent") {
       if (!needValue(p.address)) return "missing value for " + a;
+    } else if (a == "--token-file") {
+      if (!needValue(p.tokenFile)) return "missing value for --token-file";
     } else if (a == "--json") {
       p.json = true;
     } else if (a == "--timeout") {
@@ -107,6 +117,14 @@ std::string parse(const std::vector<std::string>& args, Parsed& p) {
       p.wait = true;
     } else if (a.rfind("--", 0) != 0 && p.command.empty()) {
       p.command = a;
+    } else if (p.command == "fetch" && a.rfind("--", 0) != 0 && p.fetchPath.empty()) {
+      p.fetchPath = a;
+    } else if (p.command == "fetch" && a == "--out") {
+      if (!needValue(p.fetchOut)) return "missing value for --out";
+    } else if (p.command == "capture" && a == "--fetch") {
+      p.fetchAfter = true;
+    } else if (p.command == "capture" && a == "--fetch-dir") {
+      if (!needValue(p.fetchDir)) return "missing value for --fetch-dir";
     } else if (p.command == "capture" && a == "--duration") {
       if (!needValue(v)) return "missing value for --duration";
       if (!parseSeconds(v, p.durationS)) return "--duration expects a positive number of seconds: " + v;
@@ -219,11 +237,19 @@ std::string parse(const std::vector<std::string>& args, Parsed& p) {
   } else if (p.command == "flush") {
     if (!haveName || !haveSeconds) return "flush requires --name and --seconds";
     p.request = std::move(flush);
+  } else if (p.command == "fetch") {
+    if (p.fetchPath.empty()) return "fetch requires the path of a trace on the agent (PATH)";
+    p.request = StatusRequest{};  // unused
+  } else if (p.command == "processes") {
+    p.request = ProcessesRequest{};
+  } else if (!p.fetchDir.empty() && !p.fetchAfter) {
+    return "--fetch-dir needs --fetch";
   } else if (p.command.empty()) {
     return "missing command";
   } else {
     return "unknown command: " + p.command;
   }
+  if (p.fetchAfter && p.command != "capture") return "--fetch applies to capture only";
   if (p.wait && p.command != "start" && p.command != "stop") return "--wait applies to start and stop only";
   if (p.wait && p.noStart) return "--wait cannot be combined with --no-start";
   if (p.durationS > 0.0 && p.command != "capture") return "--duration applies to capture only";
@@ -231,7 +257,10 @@ std::string parse(const std::vector<std::string>& args, Parsed& p) {
 }
 
 void printUsage(std::ostream& err) {
-  err << "usage: tachyon-cli [--socket PATH | --pipe NAME] [--json] [--timeout SECONDS] <command> [options]\n"
+  err << "usage: tachyon-cli [--socket PATH | --pipe NAME | --agent ADDRESS] [--token-file FILE] [--json]\n"
+         "                   [--timeout SECONDS] <command> [options]\n"
+         "ADDRESS is a socket path, a pipe name or tcp://HOST:PORT (a remote agent: needs --token-file or\n"
+         "$TACHYON_AGENT_TOKEN_FILE)\n"
          "commands:\n"
          "  status\n"
          "  start   <target> [start options] [--no-start] [--wait]\n"
@@ -246,7 +275,10 @@ void printUsage(std::ostream& err) {
          "  export  TRACE.tachyon --format speedscope|chrome --out PATH [--threads TID,...]\n"
          "          [--from-ms X] [--to-ms Y] [--symbols PATH]... [--symbol-server URL]...\n"
          "                               writes a speedscope or Chrome trace JSON file; needs no agent\n"
-         "  capture <target> [start options] [--duration S]\n"
+         "  capture <target> [start options] [--duration S] [--fetch [--fetch-dir DIR]]\n"
+         "  fetch   PATH [--out FILE]    copies a trace the agent produced to this machine (resumes, "
+         "verifies)\n"
+         "  processes                    lists the processes visible to the agent\n"
          "  doctor  [--hz N] [--agent PATH] [--socket PATH]\n"
          "                               checks this machine's capture prerequisites (Linux); exit 1 on "
          "FAIL\n"
@@ -359,6 +391,42 @@ int finish(const Event& event, bool json, std::ostream& out, std::ostream& err) 
   return kExitOk;
 }
 
+// The local file for a remote trace path: `dir`/<file name>. The name is taken from the text after the last
+// slash or backslash so a path from another OS works.
+std::filesystem::path localNameFor(const std::string& remotePath, const std::string& dir) {
+  const size_t cut = remotePath.find_last_of("/\\");
+  std::string name = cut == std::string::npos ? remotePath : remotePath.substr(cut + 1);
+  if (name.empty() || name == "." || name == "..") name = "capture.tachyon";
+  return std::filesystem::path(dir.empty() ? "." : dir) / name;
+}
+
+// Fetches `remote` into `local` and reports it. Returns an exit code.
+int fetchAndReport(Client& client, const std::string& remote, const std::filesystem::path& local,
+                   const Parsed& p, std::ostream& out, std::ostream& err) {
+  FetchOptions options;
+  auto fetched = fetchFile(client, remote, local, options);
+  if (!fetched.ok()) {
+    const bool transport =
+        fetched.error().code == ErrorCode::IoError || fetched.error().code == ErrorCode::Timeout;
+    reportFailure(p.json, out, err, transport ? codeFor(fetched.error()) : "EFETCH",
+                  "fetch of " + remote + " failed: " + fetched.error().message);
+    return transport ? kExitConnectionFailure : kExitProtocolError;
+  }
+  if (p.json) {
+    out << "{\"ok\":true,\"fetched\":{\"remote\":\"" << jsonEscape(remote) << "\",\"path\":\""
+        << jsonEscape(fetched->path.string()) << "\",\"size\":" << fetched->size << ",\"sha256\":\""
+        << fetched->sha256 << "\",\"resumed_from\":" << fetched->resumedFrom
+        << ",\"restarted\":" << (fetched->restarted ? "true" : "false") << "}}\n";
+  } else {
+    out << "fetched " << fetched->size << " bytes to " << fetched->path.string() << " (sha256 "
+        << fetched->sha256 << ")";
+    if (fetched->resumedFrom > 0) out << ", resumed from byte " << fetched->resumedFrom;
+    if (fetched->restarted) out << ", restarted after a checksum mismatch";
+    out << "\n";
+  }
+  return kExitOk;
+}
+
 // `capture`: the start request was accepted; wait for the end, stop when --duration runs out.
 int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream& err) {
   const int timeoutMs = p.timeoutS * 1000;
@@ -397,7 +465,15 @@ int runCapture(Client& client, const Parsed& p, std::ostream& out, std::ostream&
       return kExitConnectionFailure;
     }
   }
-  const int code = finish(*event, p.json, out, err);
+  int code = finish(*event, p.json, out, err);
+  if (p.fetchAfter) {
+    if (const auto* done = std::get_if<CaptureDoneEvent>(&*event);
+        done != nullptr && !done->summary.path.empty()) {
+      const int fetchCode = fetchAndReport(client, done->summary.path,
+                                           localNameFor(done->summary.path, p.fetchDir), p, out, err);
+      if (fetchCode != kExitOk) code = fetchCode;
+    }
+  }
   if (timedOut && code == kExitOk) {
     reportFailure(p.json, out, err, "ETIMEOUT",
                   "the target did not exit within --timeout " + std::to_string(p.timeoutS) +
@@ -498,7 +574,8 @@ int runMerge(const std::vector<std::string>& args, bool json, std::ostream& out,
 size_t commandIndex(const std::vector<std::string>& args) {
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string& a = args[i];
-    if (a == "--socket" || a == "--pipe" || a == "--timeout" || a == "--connect-timeout-ms") {
+    if (a == "--socket" || a == "--pipe" || a == "--agent" || a == "--token-file" || a == "--timeout" ||
+        a == "--connect-timeout-ms") {
       ++i;
     } else if (a.rfind("--", 0) != 0) {
       return i;
@@ -536,11 +613,55 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
   }
   if (p.address.empty()) p.address = defaultAgentAddress();
 
-  auto client = Client::connectWithRetry(p.address, p.connectTimeoutMs);
+  std::string token;
+  if (isTcpAddress(p.address)) {
+    std::filesystem::path tokenFile =
+        p.tokenFile.empty() ? tokenFileFromEnvironment() : std::filesystem::path(p.tokenFile);
+    if (tokenFile.empty()) {
+      reportFailure(p.json, out, err, "EUSAGE",
+                    "a tcp:// agent needs --token-file FILE (or $TACHYON_AGENT_TOKEN_FILE)");
+      return kExitUsage;
+    }
+    auto loaded = loadTokenFile(tokenFile, 1);
+    if (!loaded.ok()) {
+      reportFailure(p.json, out, err, "EUSAGE", loaded.error().message);
+      return kExitUsage;
+    }
+    token = std::move(*loaded);
+  }
+
+  auto client = Client::connectWithRetry(p.address, p.connectTimeoutMs, token);
   if (!client.ok()) {
-    reportFailure(p.json, out, err, "ECONNECT",
+    reportFailure(p.json, out, err, client.error().code == ErrorCode::NoPrivilege ? "ENOPRIV" : "ECONNECT",
                   "cannot connect to agent at " + p.address + ": " + client.error().message);
     return kExitConnectionFailure;
+  }
+
+  if (p.command == "fetch") {
+    const std::filesystem::path local =
+        p.fetchOut.empty() ? localNameFor(p.fetchPath, "") : std::filesystem::path(p.fetchOut);
+    return fetchAndReport(*client, p.fetchPath, local, p, out, err);
+  }
+  if (p.command == "processes") {
+    auto list = fetchProcessList(*client);
+    if (!list.ok()) {
+      reportFailure(p.json, out, err, codeFor(list.error()), list.error().message);
+      return kExitConnectionFailure;
+    }
+    if (p.json) {
+      out << "{\"ok\":true,\"processes\":[";
+      for (size_t i = 0; i < list->size(); ++i) {
+        const ProcessEntry& e = (*list)[i];
+        out << (i ? "," : "") << "{\"pid\":" << e.pid << ",\"name\":\"" << jsonEscape(e.name)
+            << "\",\"user\":\"" << jsonEscape(e.user) << "\",\"cmdline\":\"" << jsonEscape(e.cmdline)
+            << "\"}";
+      }
+      out << "]}\n";
+    } else {
+      for (const ProcessEntry& e : *list)
+        out << e.pid << "\t" << e.name << "\t" << e.user << "\t" << e.cmdline << "\n";
+    }
+    return kExitOk;
   }
 
   auto resp = client->call(p.request);

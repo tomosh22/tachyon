@@ -5,12 +5,15 @@ Command-line client for `tachyon-agent` (the control protocol of `libs/control/p
 `apps/cli/cli.h`.
 
 ```
-tachyon-cli [--socket PATH | --pipe NAME] [--json] [--timeout SECONDS] <command> [options]
+tachyon-cli [--socket PATH | --pipe NAME | --agent ADDRESS] [--token-file FILE] [--json] [--timeout SECONDS]
+            <command> [options]
 ```
 
 | command | what it does | needs the agent |
 |---|---|---|
 | `status`, `start`, `stop`, `resume`, `flush`, `cancel`, `capture` | drive a capture | yes |
+| `fetch` | copy a trace the agent produced to this machine (resumes, verifies) | yes |
+| `processes` | list the processes visible to the agent (a remote agent has its own) | yes |
 | `merge` | add an SDK sidecar file to a trace | no |
 | `export` | write a speedscope or Chrome trace file | no |
 | `doctor` | check whether this machine can capture | no |
@@ -18,6 +21,38 @@ tachyon-cli [--socket PATH | --pipe NAME] [--json] [--timeout SECONDS] <command>
 Exit codes: 0 success; 1 the agent or the capture reported an error (offline commands: bad input or output;
 `doctor`: at least one FAIL); 2 cannot reach the agent or a wait timed out; 3 usage error; 4 the trace was
 written but events were lost.
+
+## Remote agents (tcp://)
+
+`--agent tcp://HOST:PORT` (IPv6: `tcp://[::1]:7331`) talks to a `tachyon-agent --listen HOST:PORT --token-file
+FILE` on another machine. The token is read from `--token-file FILE` or `$TACHYON_AGENT_TOKEN_FILE`: the first
+line of the file, which must not be readable by group or others on POSIX (`chmod 600`). It is sent once, in the
+first line of the connection, and never printed or logged. The channel is **not encrypted**; see "Remote
+capture" in [apps/agent/LINUX.md](../agent/LINUX.md) (use a trusted network or `ssh -L`).
+
+```sh
+# on the machine with the game
+head -c 24 /dev/urandom | base64 > agent.token && chmod 600 agent.token
+tachyon-agent --listen 0.0.0.0:7331 --token-file agent.token --backend perf
+
+# on the workstation (agent.token copied over a secure channel)
+export TACHYON_AGENT_TOKEN_FILE=$PWD/agent.token
+tachyon-cli --agent tcp://build-box:7331 processes
+tachyon-cli --agent tcp://build-box:7331 capture --attach 4242 --duration 20 --fetch --fetch-dir ./captures
+tachyon-cli --agent tcp://build-box:7331 fetch /var/tmp/capture-1700000000.tachyon --out ./game.tachyon
+```
+
+* `capture ... --fetch [--fetch-dir DIR]` copies the finished trace to DIR (default: the current directory) after
+  `capture_done`. `--out` of a remote `capture` is a file name for the agent to use in its own output directory.
+* `fetch PATH [--out FILE]` takes the path from `capture_done` / `flushed`. Only traces the agent produced since
+  it started are served; any other path is refused (exit 1). The data lands in `FILE.part`; if the transfer is
+  interrupted, running the same command again continues from the size of `FILE.part`. The SHA-256 the agent
+  computed over the whole file must match before `FILE` appears; a mismatch of a resumed transfer discards the
+  partial file and starts over once.
+* `start --launch` is refused (`ENOPRIV`, exit 1) unless the agent was started with `--allow-remote-launch`.
+  `--attach` and `--system` are allowed.
+* Exit codes: a wrong token or an unreachable agent is 2, a missing token file is 3 (usage), a refused fetch or
+  launch is 1.
 
 ## doctor (Linux)
 

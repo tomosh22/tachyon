@@ -1,5 +1,7 @@
 #include "control/client.h"
 
+#include "control/tcp.h"
+
 #include <chrono>
 #include <thread>
 
@@ -16,17 +18,32 @@ int remainingMs(bool hasDeadline, Clock::time_point deadline) {
 }
 }  // namespace
 
-Result<Client> Client::connect(const std::string& address) {
+Result<Client> Client::connect(const std::string& address, const std::string& token) {
+  const bool tcp = isTcpAddress(address);
+  if (tcp && token.empty())
+    return makeError(ErrorCode::InvalidArgument,
+                     "a tcp:// agent needs a token (--token-file or TACHYON_AGENT_TOKEN_FILE)");
   auto conn = connectTo(address);
   if (!conn.ok()) return std::move(conn).error();
-  return Client(std::move(*conn));
+  Client client(std::move(*conn));
+  if (tcp) {
+    auto reply = client.call(AuthRequest{token}, 10000);
+    if (!reply.ok()) return std::move(reply).error();
+    if (!reply->ok) {
+      client.close();
+      return makeError(reply->code == ErrorCode::Ok ? ErrorCode::NoPrivilege : reply->code, reply->error);
+    }
+  }
+  return client;
 }
 
-Result<Client> Client::connectWithRetry(const std::string& address, int timeoutMs) {
+Result<Client> Client::connectWithRetry(const std::string& address, int timeoutMs, const std::string& token) {
   const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
   for (;;) {
-    auto c = connect(address);
+    auto c = connect(address, token);
     if (c.ok() || Clock::now() >= deadline) return c;
+    // A wrong token or a bad address will not get better.
+    if (c.error().code == ErrorCode::NoPrivilege || c.error().code == ErrorCode::InvalidArgument) return c;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
 }

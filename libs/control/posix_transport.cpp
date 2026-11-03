@@ -4,6 +4,7 @@
 #if !TACHYON_PLATFORM_WINDOWS
 
 #include "control/framed_connection.h"
+#include "control/tcp.h"
 #include "control/transport.h"
 
 #include <fcntl.h>
@@ -162,6 +163,10 @@ Result<void> applySocketOwner(const std::string& path, const SocketOwner& owner)
 }
 
 Result<std::unique_ptr<IListener>> listenOn(const std::string& address, const SocketOwner& owner) {
+  if (isTcpAddress(address)) {
+    TACHYON_TRY_ASSIGN(TcpEndpoint endpoint, parseTcpEndpoint(address));
+    return listenTcp(endpoint);
+  }
   auto addr = makeAddr(address);
   if (!addr.ok()) return std::move(addr).error();
 
@@ -203,6 +208,10 @@ Result<std::unique_ptr<IListener>> listenOn(const std::string& address, const So
 }
 
 Result<std::unique_ptr<IConnection>> connectTo(const std::string& address) {
+  if (isTcpAddress(address)) {
+    TACHYON_TRY_ASSIGN(TcpEndpoint endpoint, parseTcpEndpoint(address));
+    return connectTcp(endpoint);
+  }
   auto addr = makeAddr(address);
   if (!addr.ok()) return std::move(addr).error();
   const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);

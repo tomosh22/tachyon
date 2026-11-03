@@ -44,13 +44,13 @@ std::vector<FormError> validateForm(const CaptureForm& f) {
   if (f.mode == capture::CaptureMode::Launch) {
     if (f.exe.empty()) {
       errors.push_back({"exe", "Choose the executable to run"});
-    } else if (!std::filesystem::is_regular_file(pathFromUtf8(f.exe), ec)) {
+    } else if (!f.remote && !std::filesystem::is_regular_file(pathFromUtf8(f.exe), ec)) {
       errors.push_back({"exe", "Executable not found: " + f.exe});
     }
     std::string splitError;
     splitArguments(f.args, splitError);
     if (!splitError.empty()) errors.push_back({"args", "Arguments: " + splitError});
-    if (!f.cwd.empty() && !std::filesystem::is_directory(pathFromUtf8(f.cwd), ec))
+    if (!f.remote && !f.cwd.empty() && !std::filesystem::is_directory(pathFromUtf8(f.cwd), ec))
       errors.push_back({"cwd", "Working directory not found: " + f.cwd});
     for (const std::string& entry : f.env) {
       const size_t eq = entry.find('=');
@@ -71,7 +71,10 @@ std::vector<FormError> validateForm(const CaptureForm& f) {
                                         std::to_string(kMaxCircularMb) + " MB"});
   if (!f.followChildren && !f.childFilter.empty())
     errors.push_back({"childFilter", "The child filter needs \"Follow children\""});
-  if (!f.outPath.empty()) {
+  if (f.remote && !f.outPath.empty()) {
+    if (f.outPath.find_first_of("/\\") != std::string::npos)
+      errors.push_back({"outPath", "Give a file name only: the agent chooses the directory"});
+  } else if (!f.outPath.empty()) {
     const std::filesystem::path out = pathFromUtf8(f.outPath);
     if (std::filesystem::is_directory(out, ec)) {
       errors.push_back({"outPath", "The output path is a directory: " + f.outPath});
@@ -110,6 +113,11 @@ Result<control::StartRequest> buildStartRequest(const CaptureForm& f, const std:
   } else if (f.mode == capture::CaptureMode::Attach) {
     r.pid = f.pid;
     stem = f.processName.empty() ? "pid" + std::to_string(f.pid) : f.processName;
+  }
+  if (f.remote) {
+    // A name for the agent to use in its own directory; the viewer fetches the file afterwards.
+    r.out_path = f.outPath.empty() ? pathToUtf8(defaultCaptureFile({}, stem, now).filename()) : f.outPath;
+    return r;
   }
   std::filesystem::path out =
       f.outPath.empty() ? defaultCaptureFile(captures, stem, now) : pathFromUtf8(f.outPath);

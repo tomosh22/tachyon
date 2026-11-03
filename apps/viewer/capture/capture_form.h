@@ -29,6 +29,9 @@ struct CaptureForm {
   std::string childFilter;
   bool kernelStacks = true;
   std::string outPath;  // empty = <captures dir>/<stem>-<YYYYMMDD-HHMMSS>.tachyon
+  // WP-61: the agent is on another machine. exe / cwd are paths there (not checked against this file
+  // system), and outPath is only a file name for the agent to use in its own output directory.
+  bool remote = false;
 
   // Thread-safe: pure function on the value.
   bool operator==(const CaptureForm&) const = default;
@@ -50,10 +53,11 @@ CaptureForm formFromSettings(const CaptureSettings& settings, capture::CaptureMo
 // Thread-safe: pure function. Stores the reusable values (not pid / output path) back.
 void storeFormInSettings(const CaptureForm& form, CaptureSettings& settings);
 
-// Thread-safe (reads the filesystem). Every problem of the form, empty when it can be sent. Launch: the
-// executable must exist and be a file, the working directory (if any) a directory, arguments must split,
-// environment entries must be KEY=VALUE. Attach: pid > 0. Numbers must be in range; the child filter needs
-// follow-children; the output directory (if the path is given) must not be a file.
+// Thread-safe (reads the filesystem unless form.remote). Every problem of the form, empty when it can be
+// sent. Launch: the executable must exist and be a file (remote: be non-empty), the working directory (if
+// any) a directory, arguments must split, environment entries must be KEY=VALUE. Attach: pid > 0. Numbers
+// must be in range; the child filter needs follow-children; the output directory (if the path is given) must
+// not be a file.
 std::vector<FormError> validateForm(const CaptureForm& form);
 
 // Thread-safe (reads the filesystem for the default name only through `capturesDir`). Builds the request;

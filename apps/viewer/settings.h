@@ -30,6 +30,10 @@ struct CaptureSettings {
   std::string agentBackend;
   // Extra arguments for an agent started by the viewer (e.g. --mock-fixture FILE).
   std::vector<std::string> agentArgs;
+  // WP-61: the remote agent of "Connect to remote agent": "host:port" and the path of the token file (the
+  // path only: the token itself is never stored by the viewer).
+  std::string remoteAddress;
+  std::string remoteTokenFile;
   bool autoConnect = true;  // try to reach a running agent at startup
   bool autoOpen = true;     // open the trace when a capture finishes
   // Last used values of the Run / Attach dialogs.

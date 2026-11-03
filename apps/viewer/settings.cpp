@@ -72,6 +72,8 @@ CaptureSettings readCaptureSettings(const json& j) {
   }
   readString(j, "capturesDir", c.capturesDir);
   readString(j, "agentAddress", c.agentAddress);
+  readString(j, "remoteAddress", c.remoteAddress);
+  readString(j, "remoteTokenFile", c.remoteTokenFile);
   readString(j, "agentExe", c.agentExe);
   readString(j, "agentBackend", c.agentBackend);
   c.agentArgs = readStringArray(j, "agentArgs", c.agentArgs);
@@ -94,6 +96,8 @@ json captureSettingsToJson(const CaptureSettings& c) {
   json j;
   j["capturesDir"] = c.capturesDir;
   j["agentAddress"] = c.agentAddress;
+  j["remoteAddress"] = c.remoteAddress;
+  j["remoteTokenFile"] = c.remoteTokenFile;
   j["agentExe"] = c.agentExe;
   j["agentBackend"] = c.agentBackend;
   j["agentArgs"] = c.agentArgs;
