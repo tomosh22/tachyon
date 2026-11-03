@@ -1,8 +1,14 @@
 #include "control/framed_connection.h"
 
+#include <chrono>
+
 namespace tachyon::control::detail {
 
 Result<bool> FramedConnection::readLine(std::string& line, int timeoutMs) {
+  // The timeout bounds the whole line, not each read: a peer dribbling bytes must not hold the reader
+  // forever.
+  using Clock = std::chrono::steady_clock;
+  const Clock::time_point deadline = Clock::now() + std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs);
   for (;;) {
     const size_t nl = m_buffer.find('\n', m_scanned);
     if (nl != std::string::npos) {
@@ -18,8 +24,15 @@ Result<bool> FramedConnection::readLine(std::string& line, int timeoutMs) {
     if (m_buffer.size() > kMaxLineBytes)
       return makeError(ErrorCode::InvalidArgument, "line exceeds 1 MiB limit");
 
+    int waitMs = -1;
+    if (timeoutMs >= 0) {
+      const auto left =
+          std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+      if (left <= 0 && timeoutMs > 0) return makeError(ErrorCode::Timeout, "read timed out");
+      waitMs = left <= 0 ? 0 : static_cast<int>(left);
+    }
     char chunk[16384];
-    auto n = readSome(chunk, sizeof(chunk), timeoutMs);
+    auto n = readSome(chunk, sizeof(chunk), waitMs);
     if (!n.ok()) return std::move(n).error();
     if (*n == 0) return false;  // EOF; a trailing partial line is discarded
     m_buffer.append(chunk, *n);

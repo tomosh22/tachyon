@@ -1,5 +1,9 @@
 #include "viewer/capture/capture_controller.h"
 
+#include "control/auth.h"
+#include "control/client.h"
+#include "control/fetch.h"
+#include "control/tcp.h"
 #include "control/transport.h"
 #include "core/log.h"
 #include "core/platform.h"
@@ -18,6 +22,10 @@
 #include <memory>
 #include <optional>
 
+#if !TACHYON_PLATFORM_WINDOWS
+#include <unistd.h>
+#endif
+
 namespace tachyon::viewer {
 
 using capture_ui::inputString;
@@ -30,11 +38,15 @@ constexpr ImVec4 kRed(1.0f, 0.4f, 0.4f, 1.0f);
 constexpr ImVec4 kAmber(1.0f, 0.75f, 0.2f, 1.0f);
 constexpr ImVec4 kGreen(0.4f, 0.85f, 0.45f, 1.0f);
 
-const char* modeTitle(capture::CaptureMode mode) {
+const char* modeTitle(capture::CaptureMode mode, bool remote) {
   switch (mode) {
-    case capture::CaptureMode::Launch: return "Run Application##capture-dialog";
-    case capture::CaptureMode::Attach: return "Attach to Process##capture-dialog";
-    case capture::CaptureMode::System: return "System Capture##capture-dialog";
+    case capture::CaptureMode::Launch:
+      return remote ? "Run Application (remote agent)##capture-dialog" : "Run Application##capture-dialog";
+    case capture::CaptureMode::Attach:
+      return remote ? "Attach to Process (remote agent)##capture-dialog"
+                    : "Attach to Process##capture-dialog";
+    case capture::CaptureMode::System:
+      return remote ? "System Capture (remote agent)##capture-dialog" : "System Capture##capture-dialog";
   }
   return "Capture##capture-dialog";
 }
@@ -54,6 +66,13 @@ AgentLaunchPlan planAgentLaunch(const CaptureSettings& settings, const std::file
         viewerExe.parent_path() / (TACHYON_PLATFORM_WINDOWS ? "tachyon-agent.exe" : "tachyon-agent");
   }
   plan.spec.args = {"--backend", plan.backend, TACHYON_PLATFORM_WINDOWS ? "--pipe" : "--socket", address};
+#if !TACHYON_PLATFORM_WINDOWS
+  // pkexec runs the agent as root: it must hand its sockets to the user who is starting it (WP-41b).
+  if (elevate) {
+    plan.spec.args.push_back("--socket-owner");
+    plan.spec.args.push_back(std::to_string(static_cast<unsigned long>(::getuid())));
+  }
+#endif
   plan.spec.args.insert(plan.spec.args.end(), settings.agentArgs.begin(), settings.agentArgs.end());
   plan.spec.elevate = elevate;
   plan.spec.description = "the capture agent";
@@ -101,7 +120,13 @@ std::string CaptureController::agentAddress() const {
 }
 
 void CaptureController::connectNow(int retryMs, bool userInitiated) {
-  m_session.connect(agentAddress(), retryMs, userInitiated);
+  if (m_connectedRemote && m_host.settings && !m_host.settings->capture.remoteAddress.empty()) {
+    m_session.connect("tcp://" + m_host.settings->capture.remoteAddress, retryMs, userInitiated,
+                      m_host.settings->capture.remoteTokenFile);
+  } else {
+    m_connectedRemote = false;
+    m_session.connect(agentAddress(), retryMs, userInitiated);
+  }
   if (m_host.requestRedraw) m_host.requestRedraw();
 }
 
@@ -126,6 +151,7 @@ bool CaptureController::agentNeedsElevation() const {
 }
 
 void CaptureController::startAgent(bool elevate) {
+  m_connectedRemote = false;  // starting an agent means the one on this machine
   const CaptureSettings empty;
   const CaptureSettings& settings = m_host.settings ? m_host.settings->capture : empty;
   const AgentLaunchPlan plan = planAgentLaunch(settings, currentExecutablePath(), agentAddress(), elevate);
@@ -143,6 +169,243 @@ void CaptureController::startAgent(bool elevate) {
   toast(ToastLevel::Info,
         std::string("Starting the agent (") + plan.backend + (elevate ? ", elevated" : "") + ")...");
   connectNow(elevate ? kElevatedRetryMs : kStartAgentRetryMs, true);
+}
+
+// ---- remote agent (WP-61) ----
+
+RemoteProbe probeRemoteAgent(const std::string& hostPort, const std::string& tokenFile) {
+  RemoteProbe probe;
+  probe.done = true;
+  auto endpoint = control::parseTcpEndpoint(hostPort);
+  if (!endpoint.ok()) {
+    probe.message = endpoint.error().message;
+    return probe;
+  }
+  if (tokenFile.empty()) {
+    probe.message = "Choose the token file (the agent's --token-file)";
+    return probe;
+  }
+  auto token = control::loadTokenFile(pathFromUtf8(tokenFile), 1);
+  if (!token.ok()) {
+    probe.message = token.error().message;
+    return probe;
+  }
+  auto client = control::Client::connect("tcp://" + control::formatTcpEndpoint(*endpoint), *token);
+  if (!client.ok()) {
+    probe.message = client.error().message;
+    return probe;
+  }
+  auto status = client->call(control::StatusRequest{}, 5000);
+  if (!status.ok() || !status->ok) {
+    probe.message = status.ok() ? status->error : status.error().message;
+    return probe;
+  }
+  probe.ok = true;
+  probe.message = "connected";
+  if (const auto* body = std::get_if<control::StatusBody>(&status->body)) {
+    probe.message += ": " + (body->backend.empty() ? std::string("agent") : body->backend + " backend") +
+                     ", " + std::string(capture::captureStateName(body->state)) +
+                     (body->elevated ? ", elevated" : ", not elevated");
+  }
+  return probe;
+}
+
+bool CaptureController::remoteActive() const {
+  const AgentSnapshot s = m_session.snapshot();
+  return s.remote && s.connection != ConnectionState::Disconnected;
+}
+
+bool CaptureController::connectRemote(const std::string& hostPort, const std::string& tokenFile) {
+  auto endpoint = control::parseTcpEndpoint(hostPort);
+  if (!endpoint.ok()) {
+    toast(ToastLevel::Error, "Remote agent address: " + endpoint.error().message);
+    return false;
+  }
+  const std::string normalized = control::formatTcpEndpoint(*endpoint);
+  if (m_host.settings) {
+    m_host.settings->capture.remoteAddress = normalized;
+    m_host.settings->capture.remoteTokenFile = tokenFile;
+    if (m_host.saveSettings) m_host.saveSettings();
+  }
+  m_connectedRemote = true;
+  m_session.connect("tcp://" + normalized, 0, true, tokenFile);
+  if (m_host.requestRedraw) m_host.requestRedraw();
+  return true;
+}
+
+void CaptureController::useLocalAgent() {
+  m_connectedRemote = false;
+  connectNow(0, true);
+}
+
+void CaptureController::openRemoteDialog() {
+  const CaptureSettings empty;
+  const CaptureSettings& c = m_host.settings ? m_host.settings->capture : empty;
+  m_remoteAddressText = c.remoteAddress;
+  m_remoteTokenText = c.remoteTokenFile;
+  m_remoteProbe = {};
+  m_remoteDialogOpen = true;
+  m_remoteDialogJustOpened = true;
+  if (m_host.requestRedraw) m_host.requestRedraw();
+}
+
+void CaptureController::testRemote() {
+  if (m_probeJob != 0 && m_host.jobs) m_host.jobs->cancel(m_probeJob);
+  m_remoteProbe = {};
+  const std::string address = m_remoteAddressText;
+  const std::string tokenFile = m_remoteTokenText;
+  if (!m_host.jobs) {
+    m_remoteProbe = probeRemoteAgent(address, tokenFile);
+    return;
+  }
+  auto result = std::make_shared<RemoteProbe>();
+  m_probeJob = m_host.jobs->submit(
+      "Testing the remote agent",
+      [result, address, tokenFile](JobContext&) { *result = probeRemoteAgent(address, tokenFile); },
+      [this, result](JobQueue::JobId id, JobOutcome outcome) {
+        if (id != m_probeJob) return;
+        m_probeJob = 0;
+        if (outcome == JobOutcome::Cancelled) return;
+        m_remoteProbe = *result;
+        if (m_host.requestRedraw) m_host.requestRedraw();
+      });
+}
+
+void CaptureController::fetchRemote(const std::string& remotePath, bool openWhenDone, bool isCapture) {
+  if (remotePath.empty()) return;
+  for (const RemoteTransfer& t : m_transfers)
+    if (t.remotePath == remotePath && t.state == RemoteTransfer::State::Running) return;
+  // The file name is the last component of the remote path, whichever OS wrote it.
+  const size_t cut = remotePath.find_last_of("/\\");
+  std::string name = cut == std::string::npos ? remotePath : remotePath.substr(cut + 1);
+  while (!name.empty() && name.front() == '.') name.erase(name.begin());
+  if (name.empty()) name = "remote-capture.tachyon";
+  const std::filesystem::path dir =
+      capturesDir(m_host.settings ? m_host.settings->capture : CaptureSettings());
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  std::filesystem::path local = dir / pathFromUtf8(name);
+  // Never replace a trace that is already here: a second agent can produce the same name. A .part file left
+  // by an earlier attempt for this very remote path is resumed, so it counts as free.
+  for (int n = 1; n < 1000 && std::filesystem::exists(local, ec); ++n)
+    local = dir / pathFromUtf8(pathToUtf8(pathFromUtf8(name).stem()) + "-" + std::to_string(n) +
+                               pathToUtf8(pathFromUtf8(name).extension()));
+  RemoteTransfer t;
+  t.remotePath = remotePath;
+  t.localPath = local;
+  t.openWhenDone = openWhenDone;
+  t.isCapture = isCapture;
+  m_transfers.push_back(std::move(t));
+  constexpr size_t kMaxTransfers = 100;
+  if (m_transfers.size() > kMaxTransfers)
+    m_transfers.erase(m_transfers.begin(),
+                      m_transfers.begin() + static_cast<std::ptrdiff_t>(m_transfers.size() - kMaxTransfers));
+  startTransfer(m_transfers.size() - 1);
+}
+
+void CaptureController::startTransfer(size_t index) {
+  RemoteTransfer& t = m_transfers[index];
+  t.state = RemoteTransfer::State::Running;
+  t.error.clear();
+  const AgentSnapshot snap = m_session.snapshot();
+  const std::string address = snap.address;
+  const std::string tokenFile = m_host.settings ? m_host.settings->capture.remoteTokenFile : std::string();
+  const std::string remotePath = t.remotePath;
+  const std::filesystem::path local = t.localPath;
+
+  struct Outcome {
+    bool ok = false;
+    std::string error;
+    uint64_t bytes = 0;
+  };
+  auto outcome = std::make_shared<Outcome>();
+  // Runs on a worker thread. It has its own connection, so the session's polling never waits for the data.
+  auto work = [outcome, address, tokenFile, remotePath, local](JobContext& ctx) {
+    auto token = control::loadTokenFile(pathFromUtf8(tokenFile), 1);
+    if (!token.ok()) {
+      outcome->error = token.error().message;
+      return;
+    }
+    auto client = control::Client::connectWithRetry(address, 5000, *token);
+    if (!client.ok()) {
+      outcome->error = client.error().message;
+      return;
+    }
+    control::FetchOptions options;
+    options.cancel = ctx.cancelFlag();
+    options.progress = [&ctx](uint64_t done, uint64_t total) {
+      if (total > 0)
+        ctx.setProgress(static_cast<float>(static_cast<double>(done) / static_cast<double>(total)));
+      return true;
+    };
+    auto fetched = control::fetchFile(*client, remotePath, local, options);
+    if (fetched.ok()) {
+      outcome->ok = true;
+      outcome->bytes = fetched->size;
+    } else {
+      outcome->error = fetched.error().message;
+    }
+  };
+  if (!m_host.jobs) {  // no job queue (some tests): run inline
+    JobContext ctx;
+    work(ctx);
+    onTransferDone(index, outcome->ok, outcome->error, outcome->bytes);
+    return;
+  }
+  const std::string label = "Fetching " + pathToUtf8(local.filename());
+  t.jobId = m_host.jobs->submit(label, work, [this, outcome, remotePath](JobQueue::JobId id, JobOutcome how) {
+    // The vector may have been trimmed or the transfer retried since: find it by its job.
+    for (size_t i = 0; i < m_transfers.size(); ++i) {
+      if (m_transfers[i].jobId != id || m_transfers[i].remotePath != remotePath) continue;
+      m_transfers[i].jobId = 0;
+      if (how == JobOutcome::Cancelled) {
+        m_transfers[i].state = RemoteTransfer::State::Cancelled;
+        m_transfers[i].error = "cancelled";
+        if (m_host.requestRedraw) m_host.requestRedraw();
+      } else {
+        onTransferDone(i, outcome->ok, outcome->error, outcome->bytes);
+      }
+      return;
+    }
+  });
+}
+
+void CaptureController::onTransferDone(size_t index, bool ok, const std::string& error, uint64_t bytes) {
+  RemoteTransfer& t = m_transfers[index];
+  if (!ok) {
+    t.state = error == "fetch cancelled" ? RemoteTransfer::State::Cancelled : RemoteTransfer::State::Failed;
+    t.error = error;
+    if (t.state == RemoteTransfer::State::Failed)
+      toast(ToastLevel::Error, "Could not fetch " + pathToUtf8(t.localPath.filename()) + ": " + error +
+                                   " (the partial download is kept; Retry in the Capture window resumes it)");
+    if (m_host.requestRedraw) m_host.requestRedraw();
+    return;
+  }
+  t.state = RemoteTransfer::State::Done;
+  t.bytes = bytes;
+  const std::string localText = pathToUtf8(t.localPath);
+  char size[32];
+  std::snprintf(size, sizeof(size), "%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+  toast(ToastLevel::Info, "Fetched " + pathToUtf8(t.localPath.filename()) + " (" + size + ")");
+  for (FlushedCapture& f : m_flushed) {
+    if (f.remotePath == t.remotePath) {
+      f.path = localText;
+      f.fetched = true;
+    }
+  }
+  finishLocalCapture(t.localPath, t.openWhenDone);
+}
+
+void CaptureController::cancelTransfer(size_t index) {
+  if (index >= m_transfers.size()) return;
+  RemoteTransfer& t = m_transfers[index];
+  if (t.state == RemoteTransfer::State::Running && t.jobId != 0 && m_host.jobs) m_host.jobs->cancel(t.jobId);
+}
+
+void CaptureController::retryTransfer(size_t index) {
+  if (index >= m_transfers.size()) return;
+  const RemoteTransfer::State s = m_transfers[index].state;
+  if (s == RemoteTransfer::State::Failed || s == RemoteTransfer::State::Cancelled) startTransfer(index);
 }
 
 // ---- capture commands ----
@@ -191,9 +454,10 @@ void CaptureController::handleEvent(const AgentEvent& e) {
     case AgentEventKind::ConnectFailed:
       if (e.userInitiated) {
         std::string text = e.message;
-        // An agent started as another user (pkexec / sudo) creates a socket this user cannot open.
+        // An agent started as root outside pkexec / sudo (a service, su) creates a socket this user cannot
+        // open; the viewer's own pkexec launch and sudo hand the socket over (--socket-owner).
         if (text.find("ermission denied") != std::string::npos || text.find("ACCES") != std::string::npos)
-          text += " (the agent runs as another user and its socket is not accessible to you)";
+          text += " (the agent runs as another user; start it with --socket-owner <your uid>)";
         toast(ToastLevel::Warning, std::move(text));
       }
       break;
@@ -218,13 +482,34 @@ void CaptureController::handleEvent(const AgentEvent& e) {
       f.eventsLost = e.flushed.events_lost;
       f.coalesced = e.flushed.coalesced;
       f.at = std::chrono::system_clock::now();
+      const bool remote = m_session.snapshot().remote;
+      if (remote) {
+        f.remotePath = e.flushed.path;
+        f.fetched = false;
+      }
       m_flushed.push_back(std::move(f));
       constexpr size_t kMaxFlushed = 200;
       if (m_flushed.size() > kMaxFlushed)
         m_flushed.erase(m_flushed.begin(),
                         m_flushed.begin() + static_cast<std::ptrdiff_t>(m_flushed.size() - kMaxFlushed));
       toast(ToastLevel::Info, "Flight recorder: flushed " + e.flushed.name + " (" + e.flushed.reason + ")");
-      if (m_host.capturesChanged) m_host.capturesChanged();
+      if (remote) {
+        fetchRemote(e.flushed.path, /*openWhenDone=*/false, /*isCapture=*/false);
+      } else if (m_host.capturesChanged) {
+        m_host.capturesChanged();
+      }
+      break;
+    }
+    case AgentEventKind::ProcessList: {
+      m_remoteProcessesPending = false;
+      if (!e.message.empty()) {
+        m_processError = e.message;
+      } else {
+        m_processes.clear();
+        for (const control::ProcessEntry& p : e.processes)
+          m_processes.push_back({p.pid, p.name, p.user, p.cmdline});
+        m_processError.clear();
+      }
       break;
     }
     case AgentEventKind::CaptureDone: onCaptureDone(e); break;
@@ -255,15 +540,30 @@ void CaptureController::onCaptureDone(const AgentEvent& e) {
           "... and " + std::to_string(s.warnings.size() - kMaxToasted) + " more capture warnings");
   for (const std::string& w : s.warnings) TACHYON_LOG_WARN("capture: {}", w);
 
-  if (m_host.settings && !s.path.empty()) {
+  if (m_session.snapshot().remote && !s.path.empty()) {
+    // The trace is on the agent's machine: bring it here first (in the background); it is listed and opened
+    // when it has arrived.
+    const bool open = m_host.settings && m_host.settings->capture.autoOpen;
+    fetchRemote(s.path, open, /*isCapture=*/true);
+    return;
+  }
+  const bool open = m_host.settings && m_host.settings->capture.autoOpen && !s.path.empty();
+  if (!s.path.empty())
+    finishLocalCapture(path, open);
+  else if (m_host.capturesChanged)
+    m_host.capturesChanged();
+}
+
+// A finished capture that is a file on this machine: remember it, refresh the Session Explorer and open it.
+void CaptureController::finishLocalCapture(const std::filesystem::path& path, bool open) {
+  if (m_host.settings) {
     std::error_code ec;
     const std::filesystem::path absolute = std::filesystem::absolute(path, ec);
     m_host.settings->addRecentFile(pathToUtf8(ec ? path : absolute));
     if (m_host.saveSettings) m_host.saveSettings();
   }
   if (m_host.capturesChanged) m_host.capturesChanged();
-  if (m_host.settings && m_host.settings->capture.autoOpen && !s.path.empty() && m_host.openFile)
-    m_host.openFile(path);
+  if (open && m_host.openFile) m_host.openFile(path);
 }
 
 // ---- dialogs ----
@@ -272,6 +572,7 @@ void CaptureController::openDialog(capture::CaptureMode mode) {
   const CaptureSettings empty;
   const CaptureSettings& settings = m_host.settings ? m_host.settings->capture : empty;
   m_form = formFromSettings(settings, mode);
+  m_form.remote = m_session.snapshot().remote;
   m_form.outPath.clear();
   m_form.pid = 0;
   m_form.processName.clear();
@@ -289,6 +590,16 @@ void CaptureController::openDialog(capture::CaptureMode mode) {
 void CaptureController::refreshProcesses() {
   if (m_processJob != 0 && m_host.jobs) m_host.jobs->cancel(m_processJob);
   m_processError.clear();
+  if (m_session.snapshot().remote) {
+    // The processes of the other machine come from the agent (`processes` command).
+    if (m_session.snapshot().connection == ConnectionState::Connected) {
+      m_remoteProcessesPending = true;
+      m_session.listProcesses();
+    } else {
+      m_processError = "Connect to the remote agent to list its processes";
+    }
+    return;
+  }
   if (!m_host.jobs) {
     auto list = enumerateProcesses();
     if (list.ok()) {
@@ -326,6 +637,7 @@ void CaptureController::selectProcess(uint32_t pid) {
 }
 
 void CaptureController::revalidate() {
+  m_form.remote = m_session.snapshot().remote;
   m_errors = validateForm(m_form);
   m_validatedForm = m_form;
   m_formDirty = false;
@@ -347,17 +659,20 @@ bool CaptureController::submitDialog() {
   if (!m_errors.empty()) return false;
   const std::filesystem::path captures =
       capturesDir(m_host.settings ? m_host.settings->capture : CaptureSettings());
+  m_form.remote = snap.remote;
   auto request = buildStartRequest(m_form, captures, std::time(nullptr));
   if (!request.ok()) {
     m_errors.push_back({"outPath", request.error().message});
     return false;
   }
-  std::error_code ec;
-  const std::filesystem::path out = pathFromUtf8(request->out_path);
-  if (out.has_parent_path()) std::filesystem::create_directories(out.parent_path(), ec);
-  if (ec) {
-    m_errors.push_back({"outPath", "Cannot create " + pathToUtf8(out.parent_path()) + ": " + ec.message()});
-    return false;
+  if (!snap.remote) {
+    std::error_code ec;
+    const std::filesystem::path out = pathFromUtf8(request->out_path);
+    if (out.has_parent_path()) std::filesystem::create_directories(out.parent_path(), ec);
+    if (ec) {
+      m_errors.push_back({"outPath", "Cannot create " + pathToUtf8(out.parent_path()) + ": " + ec.message()});
+      return false;
+    }
   }
   if (m_host.settings) {
     storeFormInSettings(m_form, m_host.settings->capture);
@@ -419,7 +734,7 @@ void CaptureController::drawProcessTable() {
   inputString("##processFilter", m_processFilter, "Filter (pid, name, user, command)");
   ImGui::SameLine();
   if (ImGui::Button("Refresh")) refreshProcesses();
-  if (m_processJob != 0) {
+  if (processesLoading()) {
     ImGui::SameLine();
     ImGui::TextDisabled("listing...");
   }
@@ -475,18 +790,21 @@ void CaptureController::drawDialog() {
   ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
   bool open = true;
   const ImGuiWindowFlags flags = ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking;
-  if (ImGui::Begin(modeTitle(m_form.mode), &open, flags)) {
+  const bool remote = m_form.remote;
+  if (ImGui::Begin(modeTitle(m_form.mode, remote), &open, flags)) {
     if (m_dialogJustOpened) {
       ImGui::SetWindowFocus();
       m_dialogJustOpened = false;
     }
     drawAgentControls();
+    if (remote)
+      ImGui::TextColored(kAmber, "Remote agent: paths and processes below are on the agent's machine.");
     ImGui::Separator();
     bool changed = false;
     if (m_form.mode == capture::CaptureMode::Launch) {
-      changed |= inputString("Executable", m_form.exe);
+      changed |= inputString(remote ? "Executable (on agent)" : "Executable", m_form.exe);
       ImGui::SameLine();
-      if (ImGui::Button("Browse...##exe")) {
+      if (!remote && ImGui::Button("Browse...##exe")) {
         m_pickTarget = PickTarget::Exe;
         m_picker.open(
             pathFromUtf8(m_form.exe).parent_path(), "Choose executable",
@@ -495,9 +813,10 @@ void CaptureController::drawDialog() {
       fieldError("exe");
       changed |= inputString("Arguments", m_form.args, "quoted like a shell: --scene \"My Level\"");
       fieldError("args");
-      changed |= inputString("Working directory", m_form.cwd, "empty = the viewer's directory");
+      changed |= inputString(remote ? "Working directory (on agent)" : "Working directory", m_form.cwd,
+                             remote ? "empty = the agent's directory" : "empty = the viewer's directory");
       ImGui::SameLine();
-      if (ImGui::Button("Browse...##cwd")) {
+      if (!remote && ImGui::Button("Browse...##cwd")) {
         m_pickTarget = PickTarget::Cwd;
         m_picker.open(pathFromUtf8(m_form.cwd), "Choose working directory",
                       "Choose the directory and use \"Use this directory\".");
@@ -531,7 +850,10 @@ void CaptureController::drawDialog() {
       drawProcessTable();
     } else {
       ImGui::TextWrapped(
-          "Samples every process on this machine. The agent needs administrator / root rights for this.");
+          remote ? "Samples every process on the agent's machine. The agent needs administrator / "
+                   "root rights for this."
+                 : "Samples every process on this machine. The agent needs administrator / "
+                   "root rights for this.");
     }
     ImGui::Separator();
     changed |= ImGui::InputInt("Sampling rate (Hz)", &m_form.samplingHz, 100, 1000);
@@ -546,9 +868,12 @@ void CaptureController::drawDialog() {
     }
     fieldError("childFilter");
     changed |= ImGui::Checkbox("Kernel stacks", &m_form.kernelStacks);
-    changed |= inputString("Output file", m_form.outPath, "empty = <captures dir>/<name>-<date>.tachyon");
+    changed |=
+        inputString(remote ? "Output name (on agent)" : "Output file", m_form.outPath,
+                    remote ? "file name only; empty = generated. It is fetched into the captures directory"
+                           : "empty = <captures dir>/<name>-<date>.tachyon");
     ImGui::SameLine();
-    if (ImGui::Button("Browse...##out")) {
+    if (!remote && ImGui::Button("Browse...##out")) {
       m_pickTarget = PickTarget::Out;
       m_picker.open(
           capturesDir(m_host.settings ? m_host.settings->capture : CaptureSettings()),
@@ -601,6 +926,82 @@ void CaptureController::drawDialog() {
 
 void CaptureController::draw() {
   drawDialog();
+  drawRemoteDialog();
+}
+
+void CaptureController::drawRemoteDialog() {
+  if (!m_remoteDialogOpen) return;
+  ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 36.0f, 0.0f), ImGuiCond_Appearing);
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+  bool open = true;
+  const ImGuiWindowFlags flags = ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking;
+  if (ImGui::Begin("Connect to Remote Agent##remote-dialog", &open, flags)) {
+    if (m_remoteDialogJustOpened) {
+      ImGui::SetWindowFocus();
+      m_remoteDialogJustOpened = false;
+    }
+    ImGui::TextWrapped(
+        "A tachyon-agent on another machine, started with --listen HOST:PORT --token-file FILE. Traces are "
+        "copied here when a capture finishes. The connection is not encrypted: use a trusted network or an "
+        "SSH tunnel (ssh -L 7331:localhost:7331 host, then connect to localhost:7331).");
+    inputString("Address", m_remoteAddressText, "host:port, e.g. build-box:7331 or [::1]:7331");
+    inputString("Token file", m_remoteTokenText, "path of the file the agent was started with");
+    ImGui::TextDisabled("Only the path of the token file is saved, never the token.");
+    const bool testing = m_probeJob != 0;
+    ImGui::BeginDisabled(testing || m_remoteAddressText.empty());
+    if (ImGui::Button("Test connection")) testRemote();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (testing) {
+      ImGui::TextDisabled("testing...");
+    } else if (m_remoteProbe.done) {
+      ImGui::TextColored(m_remoteProbe.ok ? kGreen : kRed, "%s", m_remoteProbe.message.c_str());
+    }
+    ImGui::Separator();
+    ImGui::BeginDisabled(m_remoteAddressText.empty());
+    if (ImGui::Button("Connect")) {
+      if (connectRemote(m_remoteAddressText, m_remoteTokenText)) open = false;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) open = false;
+  }
+  ImGui::End();
+  if (!open) m_remoteDialogOpen = false;
+}
+
+void CaptureController::drawTransfers() {
+  if (m_transfers.empty()) return;
+  ImGui::Separator();
+  ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+  if (!ImGui::CollapsingHeader("Transfers from the remote agent")) return;
+  std::vector<JobQueue::Info> jobs;
+  if (m_host.jobs) jobs = m_host.jobs->active();
+  for (size_t i = m_transfers.size(); i-- > 0;) {
+    const RemoteTransfer& t = m_transfers[i];
+    ImGui::PushID(static_cast<int>(i));
+    ImGui::TextUnformatted(pathToUtf8(t.localPath.filename()).c_str());
+    ImGui::SameLine();
+    switch (t.state) {
+      case RemoteTransfer::State::Running: {
+        float progress = 0.0f;
+        for (const JobQueue::Info& j : jobs)
+          if (j.id == t.jobId) progress = j.progress;
+        ImGui::ProgressBar(progress, ImVec2(ImGui::GetFontSize() * 10.0f, 0.0f));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cancel")) cancelTransfer(i);
+        break;
+      }
+      case RemoteTransfer::State::Done: ImGui::TextColored(kGreen, "done"); break;
+      case RemoteTransfer::State::Cancelled:
+      case RemoteTransfer::State::Failed:
+        ImGui::TextColored(t.state == RemoteTransfer::State::Failed ? kRed : kAmber, "%s", t.error.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Retry")) retryTransfer(i);
+        break;
+    }
+    ImGui::PopID();
+  }
 }
 
 // ---- menu, status bar, panel ----
@@ -625,6 +1026,9 @@ void CaptureController::drawMenu() {
       snap.connection == ConnectionState::Disconnected || snap.connection == ConnectionState::Lost;
   if (ImGui::MenuItem("Reconnect to Agent", nullptr, false, disconnected)) reconnect();
   if (ImGui::MenuItem("Start Agent", nullptr, false, disconnected)) startAgent(agentNeedsElevation());
+  ImGui::Separator();
+  if (ImGui::MenuItem("Connect to Remote Agent...")) openRemoteDialog();
+  if (ImGui::MenuItem("Use Local Agent", nullptr, false, m_connectedRemote || snap.remote)) useLocalAgent();
   ImGui::EndMenu();
 }
 
@@ -636,7 +1040,8 @@ std::string CaptureController::statusText() const {
     case ConnectionState::Lost: return "Agent: connection lost";
     case ConnectionState::Connected: break;
   }
-  std::string text = "Agent: " + (s.backend.empty() ? std::string("connected") : s.backend);
+  std::string text = std::string(s.remote ? "Remote agent: " : "Agent: ") +
+                     (s.backend.empty() ? std::string("connected") : s.backend);
   switch (s.phase) {
     case AgentPhase::Armed: text += " | Armed: " + s.target; break;
     case AgentPhase::Starting: text += " | Starting..."; break;
@@ -708,6 +1113,8 @@ void CaptureController::drawPanelContents() {
     }
   }
   if (!snap.lastError.empty()) ImGui::TextColored(kRed, "%s", snap.lastError.c_str());
+  if (ImGui::Button("Connect to remote agent...")) openRemoteDialog();
+  drawTransfers();
   drawAgentSettings();
 }
 
@@ -781,7 +1188,13 @@ bool CaptureController::flushNow() {
 
 void CaptureController::openFlushed(size_t index) {
   if (index >= m_flushed.size() || !m_host.openFile) return;
-  m_host.openFile(pathFromUtf8(m_flushed[index].path));
+  const FlushedCapture& f = m_flushed[index];
+  if (!f.fetched) {  // still on the remote agent: bring it here, then open it
+    toast(ToastLevel::Info, "Fetching " + f.name + " from the remote agent...");
+    fetchRemote(f.remotePath, /*openWhenDone=*/true, /*isCapture=*/false);
+    return;
+  }
+  m_host.openFile(pathFromUtf8(f.path));
 }
 
 void CaptureController::drawFlightRecorderContents() {

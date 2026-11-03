@@ -22,7 +22,7 @@ class IConnection {
 
   // Thread-safe with respect to writeLine/close, but only one thread may read at a time. Reads one
   // '\n'-terminated line (terminator and an optional preceding '\r' are stripped). Returns true on a line,
-  // false on orderly EOF/close. timeoutMs < 0 waits forever; on timeout fails with ErrorCode::Timeout and
+  // false on orderly EOF/close. timeoutMs < 0 waits forever, otherwise it bounds the whole line; on timeout fails with ErrorCode::Timeout and
   // keeps any partial data buffered.
   virtual Result<bool> readLine(std::string& line, int timeoutMs = -1) = 0;
 
@@ -31,6 +31,15 @@ class IConnection {
 
   // Thread-safe, idempotent. Unblocks any thread blocked in readLine/writeLine; later operations fail/EOF.
   virtual void close() = 0;
+
+  // Thread-safe. WP-61. "ip:port" of the peer of a TCP connection ("[v6]:port" for IPv6), empty for local
+  // sockets and pipes.
+  virtual std::string peerAddress() const { return {}; }
+  // Thread-safe. WP-61. The peer's IP without the port (what the authentication rate limit is keyed on).
+  virtual std::string peerHost() const { return {}; }
+  // Thread-safe. WP-61. True for a connection that came in over the network (TCP): the server then requires
+  // the token handshake and the agent applies its remote-client restrictions.
+  virtual bool isRemote() const { return false; }
 };
 
 class IListener {
@@ -56,10 +65,26 @@ std::string defaultAgentAddress();
 // namespace as agentAddress (Windows: \\.\pipe\tachyon-inst-<pid>; Linux: next to the agent socket).
 std::string instrumentationAddress(const std::string& agentAddress, uint32_t pid);
 
-// Thread-safe. Starts listening. Fails with Busy if another live agent already owns the address.
-Result<std::unique_ptr<IListener>> listenOn(const std::string& address);
+// WP-41b. Who should own the sockets of an agent started with elevated rights on behalf of another user
+// (pkexec, sudo). uid < 0: leave the owner alone. gid < 0: leave the group alone. Modes are never changed.
+// Windows ignores it (the pipe DACL already admits the invoking user).
+struct SocketOwner {
+  int64_t uid = -1;
+  int64_t gid = -1;
+  bool set() const { return uid >= 0; }
+};
 
-// Thread-safe. Connects to a listening agent.
+// Thread-safe. Hands the socket file at `path` to `owner` (chown; the mode, 0600, stays). No-op for an unset
+// owner and on Windows. Fails with NoPrivilege when the process may not give files away.
+Result<void> applySocketOwner(const std::string& path, const SocketOwner& owner);
+
+// Thread-safe. Starts listening. An address "tcp://host:port" starts a TCP listener (tcp.h; `owner` does not
+// apply). Fails with Busy if another live agent already owns the address. A set `owner` is applied to the
+// Unix socket file before the first client can connect (it is 0600 from the moment it exists).
+Result<std::unique_ptr<IListener>> listenOn(const std::string& address, const SocketOwner& owner = {});
+
+// Thread-safe. Connects to a listening agent. "tcp://host:port" connects over TCP (the caller then has to
+// authenticate: see Client::connect).
 Result<std::unique_ptr<IConnection>> connectTo(const std::string& address);
 
 }  // namespace tachyon::control

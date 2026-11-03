@@ -72,6 +72,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -81,6 +82,9 @@ struct AgentConfig {
   std::string backendName;   // reported by status
   std::string agentAddress;  // used to derive instrumentation addresses for inst_hello
   bool elevated = false;     // reported by status
+  // WP-41b: owner of the per-process SDK sockets created for inst_hello (the control socket is handled by
+  // listenOn). Unset: the agent's own user.
+  control::SocketOwner socketOwner;
 
   // Instrumentation ingestion (WP-52).
   // Per-process spool cap in bytes; frames past it are dropped and reported as tachyon.dropped markers.
@@ -102,6 +106,15 @@ struct AgentConfig {
   // Close SDK connections whose peer process id is not the pid that said hello (Linux SO_PEERCRED, Windows
   // GetNamedPipeClientProcessId).
   bool verifyInstPeerPid = true;
+
+  // Remote clients (WP-61): clients that came in over TCP.
+  // `start` with mode launch from a remote client is refused with ENOPRIV unless this is set
+  // (--allow-remote-launch): it lets anyone holding the token run programs as the agent's user.
+  bool allowRemoteLaunch = false;
+  // Where the traces of captures requested by remote clients are written: out_path is reduced to its file
+  // name inside this directory, so a remote client cannot make the agent write elsewhere. Empty: the agent's
+  // working directory.
+  std::filesystem::path remoteOutDir;
 
   // Flight recorder (WP-60).
   // Circular captures keep the newest instrumentation in a ring of segment files of max(circular_mb,
@@ -131,6 +144,9 @@ class Agent final : public control::IRequestHandler {
 
   // Thread-safe.
   control::Response handle(control::ClientId client, const control::Request& request) override;
+  // Thread-safe (WP-61). Remember which clients are remote so their requests can be restricted.
+  void onClientAccepted(control::ClientId client, const control::ClientInfo& info) override;
+  void onDisconnect(control::ClientId client) override;
 
   // Thread-safe, idempotent. Stops a running capture (discarding nothing: the result is converted and
   // reported like a normal stop) and joins the conversion worker. Stop the server first.
@@ -141,7 +157,12 @@ class Agent final : public control::IRequestHandler {
 
  private:
   control::Response handleStatus(std::optional<int64_t> id);
-  control::Response handleStart(const control::StartRequest& req);
+  control::Response handleStart(const control::StartRequest& req, bool remote);
+  control::Response handleFetch(const control::FetchRequest& req);
+  control::Response handleProcesses(const control::ProcessesRequest& req);
+  bool isRemoteClient(control::ClientId client) const;
+  // Records `path` (a trace this agent produced) as fetchable.
+  void noteProduced(const std::filesystem::path& path);
   control::Response handleStop();
   control::Response handleFlush(const control::FlushRequest& req);
   struct FlushJob {
@@ -192,6 +213,11 @@ class Agent final : public control::IRequestHandler {
   // Serialises state transitions and the events they emit. Never held across a backend call (start, stop,
   // flush, checkPrivileges): the backend's progress callback takes it, and a slow backend must not stall
   // status requests or other clients.
+  mutable std::mutex m_remoteMutex;  // guards m_remoteClients
+  std::set<control::ClientId> m_remoteClients;
+  std::mutex m_producedMutex;                  // guards m_produced
+  std::set<std::filesystem::path> m_produced;  // canonical paths of traces produced by this agent process
+
   std::mutex m_mutex;
   std::condition_variable m_flushDone;             // signalled when m_flushing drops
   bool m_flushing = false;                         // a backend->flush() is in flight (guarded by m_mutex)

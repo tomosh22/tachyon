@@ -1,5 +1,7 @@
 #include "control/protocol.h"
 
+#include "control/sha256.h"
+
 #include <nlohmann/json.hpp>
 
 #include <limits>
@@ -216,6 +218,9 @@ std::string_view cmdName(Cmd cmd) {
     case Cmd::Flush: return "flush";
     case Cmd::Cancel: return "cancel";
     case Cmd::InstHello: return "inst_hello";
+    case Cmd::Auth: return "auth";
+    case Cmd::Fetch: return "fetch";
+    case Cmd::Processes: return "processes";
   }
   return "unknown";
 }
@@ -269,6 +274,15 @@ std::string encodeRequest(const Request& request) {
   } else if (const auto* h = std::get_if<InstHelloRequest>(&request.body)) {
     j["pid"] = h->pid;
     j["api_version"] = h->api_version;
+  } else if (const auto* a = std::get_if<AuthRequest>(&request.body)) {
+    j["token"] = a->token;
+  } else if (const auto* fe = std::get_if<FetchRequest>(&request.body)) {
+    j["path"] = fe->path;
+    j["offset"] = fe->offset;
+    j["length"] = fe->length;
+    if (fe->want_sha256) j["sha256"] = true;
+  } else if (const auto* pr = std::get_if<ProcessesRequest>(&request.body)) {
+    if (pr->offset != 0) j["offset"] = pr->offset;
   }
   return dump(j);
 }
@@ -280,12 +294,13 @@ Result<Request> decodeRequest(std::string_view line, std::optional<int64_t>* idO
   if (!j.is_object()) return bad("request must be a JSON object");
   const std::optional<int64_t> id = extractId(j);
   if (idOut != nullptr) *idOut = id;
-  if (!id) return bad("missing or invalid required field 'id' (integer)");
   std::string cmd;
   TACHYON_TRY(getString(j, "cmd", cmd, true));
+  // The handshake line may omit the id ({"cmd":"auth","token":"..."}); its response then carries id null.
+  if (!id && cmd != "auth") return bad("missing or invalid required field 'id' (integer)");
 
   Request req;
-  req.id = *id;
+  req.id = id.value_or(0);
   if (cmd == "status") {
     req.body = StatusRequest{};
   } else if (cmd == "stop") {
@@ -303,6 +318,21 @@ Result<Request> decodeRequest(std::string_view line, std::optional<int64_t>* idO
     TACHYON_TRY(getBool(j, "trigger", f.trigger, false));
     TACHYON_TRY(getU32(j, "pid", f.pid, false));
     req.body = std::move(f);
+  } else if (cmd == "auth") {
+    AuthRequest a;
+    TACHYON_TRY(getString(j, "token", a.token, true));
+    req.body = std::move(a);
+  } else if (cmd == "fetch") {
+    FetchRequest fe;
+    TACHYON_TRY(getString(j, "path", fe.path, true));
+    TACHYON_TRY(getU64(j, "offset", fe.offset, false));
+    TACHYON_TRY(getU64(j, "length", fe.length, false));
+    TACHYON_TRY(getBool(j, "sha256", fe.want_sha256, false));
+    req.body = std::move(fe);
+  } else if (cmd == "processes") {
+    ProcessesRequest pr;
+    TACHYON_TRY(getU32(j, "offset", pr.offset, false));
+    req.body = pr;
   } else if (cmd == "inst_hello") {
     InstHelloRequest h;
     TACHYON_TRY(getU32(j, "pid", h.pid, true));
@@ -335,6 +365,19 @@ std::string encodeResponse(const Response& response) {
     for (auto it = sj.begin(); it != sj.end(); ++it) j[it.key()] = it.value();
   } else if (const auto* h = std::get_if<InstHelloBody>(&response.body)) {
     j["pipe"] = h->pipe;
+  } else if (const auto* fb = std::get_if<FetchBody>(&response.body)) {
+    j["data"] = base64Encode(fb->data.data(), fb->data.size());
+    j["offset"] = fb->offset;
+    j["size"] = fb->size;
+    j["eof"] = fb->eof;
+    if (!fb->sha256.empty()) j["sha256"] = fb->sha256;
+  } else if (const auto* pb = std::get_if<ProcessesBody>(&response.body)) {
+    json list = json::array();
+    for (const ProcessEntry& p : pb->processes)
+      list.push_back({{"pid", p.pid}, {"name", p.name}, {"user", p.user}, {"cmdline", p.cmdline}});
+    j["processes"] = std::move(list);
+    j["offset"] = pb->offset;
+    j["total"] = pb->total;
   }
   return dump(j);
 }
@@ -433,9 +476,41 @@ Result<ServerMessage> decodeServerMessage(std::string_view line, std::optional<C
         r.body = std::move(h);
         break;
       }
+      case Cmd::Fetch: {
+        FetchBody fb;
+        std::string encoded;
+        TACHYON_TRY(getString(j, "data", encoded, true));
+        TACHYON_TRY_ASSIGN(fb.data, base64Decode(encoded));
+        TACHYON_TRY(getU64(j, "offset", fb.offset, true));
+        TACHYON_TRY(getU64(j, "size", fb.size, true));
+        TACHYON_TRY(getBool(j, "eof", fb.eof, false));
+        TACHYON_TRY(getString(j, "sha256", fb.sha256, false));
+        r.body = std::move(fb);
+        break;
+      }
+      case Cmd::Processes: {
+        ProcessesBody pb;
+        TACHYON_TRY(getU32(j, "offset", pb.offset, false));
+        TACHYON_TRY(getU32(j, "total", pb.total, false));
+        if (const json* list = find(j, "processes")) {
+          if (!list->is_array()) return bad("field 'processes' must be an array");
+          for (const json& e : *list) {
+            if (!e.is_object()) return bad("field 'processes' must hold objects");
+            ProcessEntry p;
+            TACHYON_TRY(getU32(e, "pid", p.pid, true));
+            TACHYON_TRY(getString(e, "name", p.name, false));
+            TACHYON_TRY(getString(e, "user", p.user, false));
+            TACHYON_TRY(getString(e, "cmdline", p.cmdline, false));
+            pb.processes.push_back(std::move(p));
+          }
+        }
+        r.body = std::move(pb);
+        break;
+      }
       case Cmd::Start:
       case Cmd::Stop:
-      case Cmd::Cancel: break;
+      case Cmd::Cancel:
+      case Cmd::Auth: break;
     }
   }
   return ServerMessage(std::move(r));

@@ -13,10 +13,14 @@ namespace tachyon::control {
 // Not thread-safe: use one Client per thread.
 class Client {
  public:
-  // Thread-safe. Connects once. See connectWithRetry for waiting on a starting agent.
-  static Result<Client> connect(const std::string& address);
-  // Thread-safe. Retries for up to timeoutMs while the agent is not yet listening.
-  static Result<Client> connectWithRetry(const std::string& address, int timeoutMs);
+  // Thread-safe. Connects once. See connectWithRetry for waiting on a starting agent. A "tcp://host:port"
+  // address (WP-61) needs `token` (auth.h); the handshake is done before this returns, and a refused token
+  // fails with ErrorCode::NoPrivilege. For local addresses `token` is ignored.
+  static Result<Client> connect(const std::string& address, const std::string& token = {});
+  // Thread-safe. Retries for up to timeoutMs while the agent is not yet listening (connection failures only:
+  // a refused token is final).
+  static Result<Client> connectWithRetry(const std::string& address, int timeoutMs,
+                                         const std::string& token = {});
 
   Client(Client&&) noexcept = default;
   Client& operator=(Client&&) noexcept = default;

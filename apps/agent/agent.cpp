@@ -1,6 +1,8 @@
 #include "agent/agent.h"
 
 #include "capture/windows_etw/launch.h"
+#include "control/process_list.h"
+#include "control/sha256.h"
 #include "control/transport.h"
 #include "core/log.h"
 #include "core/platform.h"
@@ -22,6 +24,7 @@
 #include <ctime>
 #include <fstream>
 #include <system_error>
+#include <vector>
 
 namespace tachyon::agent {
 
@@ -176,14 +179,30 @@ void Agent::setStateLocked(CaptureState state, double progress) {
   emit(StateEvent{state, progress});
 }
 
+void Agent::onClientAccepted(ClientId client, const ClientInfo& info) {
+  if (!info.remote) return;
+  std::lock_guard lock(m_remoteMutex);
+  m_remoteClients.insert(client);
+}
+
+void Agent::onDisconnect(ClientId client) {
+  std::lock_guard lock(m_remoteMutex);
+  m_remoteClients.erase(client);
+}
+
+bool Agent::isRemoteClient(ClientId client) const {
+  std::lock_guard lock(m_remoteMutex);
+  return m_remoteClients.count(client) != 0;
+}
+
 Response Agent::handle(ClientId client, const Request& request) {
-  (void)client;
   const std::optional<int64_t> id = request.id;
+  const bool remote = isRemoteClient(client);
   Response resp;
   if (std::holds_alternative<StatusRequest>(request.body)) {
     resp = handleStatus(id);
   } else if (const auto* s = std::get_if<StartRequest>(&request.body)) {
-    resp = handleStart(*s);
+    resp = handleStart(*s, remote);
   } else if (std::holds_alternative<StopRequest>(request.body)) {
     resp = handleStop();
   } else if (const auto* f = std::get_if<FlushRequest>(&request.body)) {
@@ -191,8 +210,16 @@ Response Agent::handle(ClientId client, const Request& request) {
   } else if (std::holds_alternative<CancelRequest>(request.body)) {
     resp = handleCancel();
   } else if (const auto* h = std::get_if<InstHelloRequest>(&request.body)) {
-    resp = handleInstHello(*h);
-  }
+    // The SDK's sockets are local to this machine; a remote client has no business creating them.
+    resp = remote
+               ? makeErrorResponse(std::nullopt, makeError(ErrorCode::NoPrivilege,
+                                                           "inst_hello is only accepted from local clients"))
+               : handleInstHello(*h);
+  } else if (const auto* fe = std::get_if<FetchRequest>(&request.body)) {
+    resp = handleFetch(*fe);
+  } else if (const auto* pr = std::get_if<ProcessesRequest>(&request.body)) {
+    resp = handleProcesses(*pr);
+  }  // AuthRequest is answered by the server
   resp.id = id;
   return resp;
 }
@@ -210,7 +237,12 @@ bool Agent::armedLocked() const {
   return m_state.load() == CaptureState::Starting && m_watch != nullptr && m_watch->launchPending();
 }
 
-Response Agent::handleStart(const StartRequest& req) {
+Response Agent::handleStart(const StartRequest& req, bool remote) {
+  if (remote && req.mode == capture::CaptureMode::Launch && !m_config.allowRemoteLaunch)
+    return makeErrorResponse(std::nullopt,
+                             makeError(ErrorCode::NoPrivilege,
+                                       "launching programs over a remote connection is disabled; attach to a "
+                                       "running process, or start the agent with --allow-remote-launch"));
   capture::CaptureOptions opts;
   opts.mode = req.mode;
   opts.exe = req.exe;
@@ -229,7 +261,27 @@ Response Agent::handleStart(const StartRequest& req) {
   opts.kernelStacks = req.kernel_stacks;
   if (opts.mode == capture::CaptureMode::Launch && !m_config.agentAddress.empty())
     opts.env[std::string(capture::etw::kAgentPipeEnvVar)] = m_config.agentAddress;  // the SDK connects here
-  if (req.out_path.empty()) {
+  if (remote) {
+    // A remote client chooses a file name, not a location.
+    const auto now =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    std::string stem;
+    if (!req.out_path.empty()) {
+      try {
+        stem = sanitizeFileStem(std::filesystem::path(req.out_path).stem().string());
+      } catch (const std::exception&) {
+      }
+    }
+    if (stem.empty()) stem = "capture-" + std::to_string(now);
+    std::filesystem::path dir =
+        m_config.remoteOutDir.empty() ? std::filesystem::path(".") : m_config.remoteOutDir;
+    std::error_code ec;
+    std::filesystem::path candidate = dir / (stem + ".tachyon");
+    for (int n = 1; n < 10000 && std::filesystem::exists(candidate, ec); ++n)
+      candidate = dir / (stem + "-" + std::to_string(n) + ".tachyon");
+    opts.outPath = candidate;
+  } else if (req.out_path.empty()) {
     const auto now =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
             .count();
@@ -444,6 +496,7 @@ void Agent::conversionWorker() {
   auto result = stopAndMerge(warnings);
   std::lock_guard lock(m_mutex);
   if (result.ok()) {
+    noteProduced(result->tracePath);
     TACHYON_LOG_INFO("agent: capture done: {} ({} events lost)", result->tracePath.string(),
                      result->eventsLost);
     setStateLocked(CaptureState::Done, 1.0);
@@ -500,6 +553,7 @@ Result<CaptureSummary> Agent::performFlush(const FlushJob& job) {
     const std::vector<inst::SpoolInfo> spools = ingest->snapshot();
     flushWarnings = mergeSpools(*ingest, spools, *result, true, false, patch);
   }
+  noteProduced(result->tracePath);
   CaptureSummary summary = toSummary(*result, std::move(flushWarnings));
   FlushedEvent event;
   event.path = summary.path;
@@ -646,6 +700,83 @@ Response Agent::handleCancel() {
   return makeOkResponse(std::nullopt);
 }
 
+void Agent::noteProduced(const std::filesystem::path& path) {
+  std::error_code ec;
+  std::filesystem::path canonical = std::filesystem::canonical(path, ec);
+  if (ec) return;  // not on disk (a backend that reports a path it did not write): nothing to serve
+  std::lock_guard lock(m_producedMutex);
+  m_produced.insert(std::move(canonical));
+}
+
+Response Agent::handleFetch(const FetchRequest& req) {
+  // One answer for "does not exist" and "not yours to read", so the reply does not map the file system.
+  const auto notFound = [] {
+    return makeErrorResponse(std::nullopt, makeError(ErrorCode::NotFound,
+                                                     "no such trace: the agent only serves files it produced "
+                                                     "since it started"));
+  };
+  if (req.path.empty() || req.path.find('\0') != std::string::npos)
+    return makeErrorResponse(std::nullopt, makeError(ErrorCode::InvalidArgument, "bad path"));
+  std::error_code ec;
+  // Resolves "..", "." and every symlink: whatever the request spells, only the real file is compared.
+  const std::filesystem::path canonical = std::filesystem::canonical(std::filesystem::path(req.path), ec);
+  if (ec) return notFound();
+  {
+    std::lock_guard lock(m_producedMutex);
+    if (m_produced.count(canonical) == 0) return notFound();
+  }
+  if (!std::filesystem::is_regular_file(canonical, ec) || ec) return notFound();
+  const uint64_t size = std::filesystem::file_size(canonical, ec);
+  if (ec) return makeErrorResponse(std::nullopt, makeError(ErrorCode::IoError, "cannot stat the trace"));
+
+  FetchBody body;
+  body.offset = req.offset;
+  body.size = size;
+  if (req.offset < size) {
+    const uint64_t want = std::min<uint64_t>({req.length, kMaxFetchChunkBytes, size - req.offset});
+    std::ifstream in(canonical, std::ios::binary);
+    if (!in) return makeErrorResponse(std::nullopt, makeError(ErrorCode::IoError, "cannot open the trace"));
+    in.seekg(static_cast<std::streamoff>(req.offset));
+    body.data.resize(static_cast<size_t>(want));
+    in.read(body.data.data(), static_cast<std::streamsize>(want));
+    body.data.resize(static_cast<size_t>(in.gcount()));
+    if (body.data.size() != want)
+      return makeErrorResponse(std::nullopt, makeError(ErrorCode::IoError, "short read from the trace"));
+  }
+  // offset beyond the end: an empty answer that tells the client the size (a stale partial download).
+  body.eof = req.offset <= size && req.offset + body.data.size() == size;
+  if (body.eof || req.want_sha256) {
+    auto hash = sha256OfFile(canonical);
+    if (!hash.ok()) return makeErrorResponse(std::nullopt, hash.error());
+    body.sha256 = std::move(*hash);
+  }
+  return makeOkResponse(std::nullopt, std::move(body));
+}
+
+Response Agent::handleProcesses(const ProcessesRequest& req) {
+  auto list = control::listProcesses();
+  if (!list.ok()) return makeErrorResponse(std::nullopt, list.error());
+  constexpr size_t kMaxCmdlineChars = 256;
+  constexpr size_t kBudgetBytes =
+      600 * 1024;  // well under kMaxLineBytes after JSON escaping of the usual text
+  ProcessesBody body;
+  body.offset = req.offset;
+  body.total = static_cast<uint32_t>(list->size());
+  size_t used = 0;
+  for (size_t i = req.offset; i < list->size(); ++i) {
+    ProcessEntry p = std::move((*list)[i]);
+    if (p.cmdline.size() > kMaxCmdlineChars) p.cmdline.resize(kMaxCmdlineChars);
+    if (p.name.size() > 128) p.name.resize(128);
+    if (p.user.size() > 128) p.user.resize(128);
+    // Control characters and non-ASCII bytes can grow six-fold when escaped: charge for it.
+    const size_t cost = 48 + 3 * (p.name.size() + p.user.size() + p.cmdline.size());
+    if (!body.processes.empty() && used + cost > kBudgetBytes) break;
+    used += cost;
+    body.processes.push_back(std::move(p));
+  }
+  return makeOkResponse(std::nullopt, std::move(body));
+}
+
 bool Agent::instPidAllowedLocked(uint32_t pid) const {
   if (pid == 0) return false;
   if (m_sessionFollow) return true;  // descendants are not known through the backend interface
@@ -685,6 +816,9 @@ Response Agent::handleInstHello(const InstHelloRequest& req) {
   body.pipe = instrumentationAddress(m_config.agentAddress, req.pid);
   // The listener must exist before the client is told where to connect.
   auto attached = ingest->attach(req.pid, body.pipe);
+  // The socket is 0600 and owned by the agent's user; for an agent running on behalf of another user it is
+  // handed over before the client learns its address (WP-41b).
+  if (attached.ok()) attached = applySocketOwner(body.pipe, m_config.socketOwner);
   if (!attached.ok()) {
     TACHYON_LOG_WARN("agent: inst_hello from pid {}: {}", req.pid, attached.error().toString());
     return makeErrorResponse(std::nullopt, attached.error());
@@ -728,6 +862,7 @@ void Agent::shutdown() {
     auto result = stopAndMerge(warnings);
     std::lock_guard lock(m_mutex);
     if (result.ok()) {
+      noteProduced(result->tracePath);
       TACHYON_LOG_INFO("agent: shutdown stopped capture: {}", result->tracePath.string());
       setStateLocked(CaptureState::Done, 1.0);
       finishCaptureLocked(CaptureDoneEvent{toSummary(*result, std::move(warnings))});

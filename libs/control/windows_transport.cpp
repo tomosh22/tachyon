@@ -4,6 +4,7 @@
 #if TACHYON_PLATFORM_WINDOWS
 
 #include "control/framed_connection.h"
+#include "control/tcp.h"
 #include "control/transport.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -272,7 +273,15 @@ std::string instrumentationAddress(const std::string& agentAddress, uint32_t pid
   return R"(\\.\pipe\tachyon-inst-)" + std::to_string(pid);
 }
 
-Result<std::unique_ptr<IListener>> listenOn(const std::string& address) {
+Result<void> applySocketOwner(const std::string&, const SocketOwner&) {
+  return ok();  // the pipe DACL already admits the invoking user
+}
+
+Result<std::unique_ptr<IListener>> listenOn(const std::string& address, const SocketOwner&) {
+  if (isTcpAddress(address)) {
+    TACHYON_TRY_ASSIGN(TcpEndpoint endpoint, parseTcpEndpoint(address));
+    return listenTcp(endpoint);
+  }
   auto security = std::make_unique<PipeSecurity>();
   if (!security->init()) return winError(ErrorCode::IoError, "building the pipe security descriptor");
   HANDLE h = createInstance(address, true, *security);
@@ -286,6 +295,10 @@ Result<std::unique_ptr<IListener>> listenOn(const std::string& address) {
 }
 
 Result<std::unique_ptr<IConnection>> connectTo(const std::string& address) {
+  if (isTcpAddress(address)) {
+    TACHYON_TRY_ASSIGN(TcpEndpoint endpoint, parseTcpEndpoint(address));
+    return connectTcp(endpoint);
+  }
   // ERROR_PIPE_BUSY: every instance is connected, or the server is between accepting a client and creating
   // the next instance (WaitNamedPipe then fails at once). Keep trying for a few seconds.
   const ULONGLONG deadline = GetTickCount64() + 5000;

@@ -5,8 +5,12 @@
 #include "viewer/capture/capture_paths.h"
 #include "viewer/capture/process_list.h"
 
+#include <algorithm>
 #include <fstream>
 #include <regex>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 using namespace tachyon;
 using namespace tachyon::viewer;
@@ -348,6 +352,8 @@ TEST(CaptureAgentLaunch, PlansTheAgentCommandLine) {
   EXPECT_EQ(plan.spec.args[0], "--backend");
   EXPECT_EQ(plan.spec.args[1], plan.backend);
   EXPECT_EQ(plan.spec.args[3], "/tmp/a.sock");
+  EXPECT_EQ(std::count(plan.spec.args.begin(), plan.spec.args.end(), "--socket-owner"), 0)
+      << "an agent started without elevation owns its sockets already";
 
   s.agentBackend = "mock";
   s.agentExe = "/x/my-agent";
@@ -357,6 +363,13 @@ TEST(CaptureAgentLaunch, PlansTheAgentCommandLine) {
   EXPECT_FALSE(plan.backendNeedsPrivileges);
   EXPECT_EQ(plan.spec.exe, fs::path("/x/my-agent"));
   EXPECT_TRUE(plan.spec.elevate);
+#if !defined(_WIN32)
+  // WP-41b: the pkexec launch tells the root agent whose sockets these are.
+  const auto owner = std::find(plan.spec.args.begin(), plan.spec.args.end(), "--socket-owner");
+  ASSERT_NE(owner, plan.spec.args.end());
+  ASSERT_NE(owner + 1, plan.spec.args.end());
+  EXPECT_EQ(*(owner + 1), std::to_string(static_cast<unsigned long>(::getuid())));
+#endif
   EXPECT_EQ(plan.spec.args.back(), "f.tachyon");
   EXPECT_EQ(plan.spec.args[plan.spec.args.size() - 2], "--mock-fixture");
 }

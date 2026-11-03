@@ -123,19 +123,76 @@ CLI. The path must be shorter than 108 bytes.
 
 * The socket file is created with mode `0600`, owned by the agent's user. Put it in a private directory (`0700`)
   when the machine is shared: `/tmp` is not private.
+* **An agent running as root for another user** (the viewer's "Start with pkexec", `sudo tachyon-agent`) hands the
+  control socket and every per-process SDK socket to that user with `chown` and leaves the modes at `0600`, so
+  the unprivileged viewer, CLI and instrumented programs can connect and nobody else can. The user is, in this
+  order: `--socket-owner UID` (the viewer passes its own uid), `$PKEXEC_UID`, `$SUDO_UID` (only honoured when
+  the agent's effective uid is 0; uid 0 is never accepted). The group is the user's primary group from the
+  account database. Run the agent with `--socket`/`TACHYON_AGENT_PIPE` pointing into a directory that user can
+  enter (the default path of a root process is `/run/user/0/...`, which the user cannot). An agent started as
+  root by other means (a service, `su`) has no invoking user: pass `--socket-owner`, otherwise the socket stays
+  root's and the viewer reports "permission denied".
 * An SDK client sends `inst_hello` with its pid on the control socket; the agent answers with a per-process
   socket `tachyon-inst-<pid>.sock` in the same directory (also `0600`), which the SDK then streams to.
   The agent checks the connecting process with `SO_PEERCRED`: the peer pid has to be the pid of the `inst_hello`,
   or the connection is dropped and counted as refused in the capture's warnings.
 * `inst_hello` is answered only while a capture is starting or running, and only for processes that belong to it
   (the launched or attached process; any pid in a system capture; descendants with `--follow-children`).
-* The SDK and the agent therefore have to run as the same user. A program started by `sudo tachyon-agent` runs as
-  root and cannot talk to a socket of another user; a program started under another account cannot talk to this
-  agent. Use `setcap` so that the agent and the program share the user.
+* The SDK and the agent therefore have to run as the same user, or the agent has to hand its sockets to the
+  SDK's user (`--socket-owner`, above). A program started under a third account cannot talk to this agent. With
+  `sudo tachyon-agent` and a *launched* program, the program also runs as root; prefer `setcap` when the agent
+  launches programs.
 * Without a reachable agent the SDK writes a sidecar file `<exe>-<pid>.tachyon-inst` in the current directory (set
   `TACHYON_SIDECAR=off` to disable it, or a path to choose it). `tachyon-cli merge` adds it to a trace afterwards.
   A capture that shows no scopes while the program was instrumented usually means the SDK never reached the
   agent: look for the sidecar file, and check the socket path both sides use.
+
+## Remote capture (TCP)
+
+```sh
+head -c 24 /dev/urandom | base64 > agent.token && chmod 600 agent.token     # 32 characters
+tachyon-agent --backend perf --listen 0.0.0.0:7331 --token-file agent.token
+```
+
+`--listen HOST:PORT` adds a TCP listener next to the local socket (both serve the same agent). The host has to be
+named: `127.0.0.1`, an IPv4 or `[IPv6]` literal, a host name, or `0.0.0.0` / `[::]` to listen on every interface.
+The startup log prints the bound address (`listening on TCP 0.0.0.0:7331 (unencrypted, ...)`) and warns about
+non-loopback binds. Without `--listen` there is no network listener.
+
+* **Not encrypted.** The channel is plain TCP; the token is the only protection and a bearer secret that anyone
+  who can read the traffic can replay. Use a trusted network, or tunnel it: `ssh -L 7331:localhost:7331 buildbox`
+  and connect to `localhost:7331` (start the agent with `--listen 127.0.0.1:7331`). TLS is not in the dependency
+  list for v1.
+* **Token.** `--token-file PATH` is required with `--listen`. The agent refuses to start the TCP listener when the
+  file is missing, empty, holds fewer than 32 characters in its first line, contains blanks, or (POSIX) is
+  readable or writable by group or others. The first line a TCP client sends must be
+  `{"cmd":"auth","token":"..."}` within 5 seconds; it is compared in constant time. A failure gets an `ENOPRIV`
+  error response and the connection is closed. The peer address of every failure is logged, the token never.
+  More than 5 failures from one address within a minute lock that address out for the rest of the minute. Until a
+  client has authenticated it receives no events, and at most 16 unauthenticated connections are held at once.
+  Local socket / pipe clients never authenticate.
+* **Remote clients are restricted.** `start` with mode launch is refused with `ENOPRIV` unless the agent was
+  started with `--allow-remote-launch` (it lets anyone holding the token run programs as the agent's user).
+  Attach and system captures are allowed. A remote client cannot choose where traces go: `out_path` is reduced to
+  a file name inside `--remote-out-dir` (default: the agent's working directory), existing names get a `-N`
+  suffix. `inst_hello` is accepted from local clients only.
+* **`fetch`.** `{"cmd":"fetch","path","offset","length"}` streams a trace in chunks of at most 512 KiB (base64 in
+  the JSON line), with the SHA-256 of the whole file on the final chunk. Only files the agent produced in this
+  process lifetime are served (capture outputs and flushes). The requested path is canonicalised (`..` and every
+  symlink resolved) and must equal a produced file, so traversal and symlinks out of the output directory get
+  `ENOTFOUND`, the same answer as for a missing file. `tachyon-cli fetch` and the viewer resume from
+  `<name>.part` and verify the checksum.
+* **`processes`** lists the agent machine's processes (pid, name, user, command line capped at 256 characters) for
+  the viewer's Attach dialog.
+* **Symbols stay on the viewer's side.** Modules are identified by GNU build-id (PDB GUID + age on Windows), not by
+  path, so the remote paths in the trace do not matter. Put the debug files where the viewer looks:
+  a `.build-id/xx/rest.debug` tree in a symbol search path or debug directory, `<image>.debug` in a search path, a
+  symbol server (debuginfod). A `.gnu_debuglink` can only be followed when the image itself is on the viewer's
+  machine (the link name lives in the image), so a debug file known only by its debuglink name is not found for a
+  remote trace.
+* **Windows.** The same options work with the ETW backend (`--listen`, `--token-file`); the token file's
+  permissions are not checked there, so keep it in a profile directory. Open the port in the firewall for the
+  workstation only.
 
 ## What `tachyon-cli doctor` reports
 

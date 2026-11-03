@@ -1,5 +1,7 @@
 #include "viewer/capture/agent_session.h"
 
+#include "control/auth.h"
+#include "control/tcp.h"
 #include "core/log.h"
 
 #include <algorithm>
@@ -72,10 +74,11 @@ void AgentSession::post(Command command) {
   m_cv.notify_all();
 }
 
-void AgentSession::connect(std::string address, int retryMs, bool userInitiated) {
+void AgentSession::connect(std::string address, int retryMs, bool userInitiated, std::string tokenFile) {
   Command c;
   c.kind = Command::Kind::Connect;
   c.address = std::move(address);
+  c.tokenFile = std::move(tokenFile);
   c.retryMs = std::max(0, retryMs);
   c.userInitiated = userInitiated;
   {
@@ -83,6 +86,7 @@ void AgentSession::connect(std::string address, int retryMs, bool userInitiated)
     std::lock_guard lock(m_mutex);
     m_snapshot.connection = ConnectionState::Connecting;
     m_snapshot.address = c.address;
+    m_snapshot.remote = control::isTcpAddress(c.address);
   }
   post(std::move(c));
 }
@@ -135,6 +139,12 @@ void AgentSession::flush(std::string name, uint32_t seconds, std::string reason)
 void AgentSession::refreshStatus() {
   Command c;
   c.kind = Command::Kind::Refresh;
+  post(std::move(c));
+}
+
+void AgentSession::listProcesses() {
+  Command c;
+  c.kind = Command::Kind::Processes;
   post(std::move(c));
 }
 
@@ -306,6 +316,7 @@ void AgentSession::doConnect(const Command& command) {
     std::lock_guard lock(m_mutex);
     m_snapshot.connection = ConnectionState::Connecting;
     m_snapshot.address = command.address;
+    m_snapshot.remote = control::isTcpAddress(command.address);
     m_snapshot.phase = AgentPhase::Unknown;
     m_snapshot.lastError.clear();
     m_expectParked = false;
@@ -313,8 +324,31 @@ void AgentSession::doConnect(const Command& command) {
   notify();
   const auto deadline = Clock::now() + std::chrono::milliseconds(command.retryMs);
   std::string lastError;
+  std::string token;
+  if (control::isTcpAddress(command.address)) {
+    // The token file is read here, off the main thread, and only its path is ever stored.
+    auto loaded = control::loadTokenFile(command.tokenFile, 1);
+    if (!loaded.ok()) {
+      lastError = command.tokenFile.empty()
+                      ? "a remote agent needs a token file (Capture > Connect to remote "
+                        "agent...)"
+                      : loaded.error().message;
+      {
+        std::lock_guard lock(m_mutex);
+        m_snapshot.connection = ConnectionState::Disconnected;
+        m_snapshot.lastError = lastError;
+      }
+      AgentEvent e;
+      e.kind = AgentEventKind::ConnectFailed;
+      e.message = lastError;
+      e.userInitiated = command.userInitiated;
+      push(std::move(e));
+      return;
+    }
+    token = std::move(*loaded);
+  }
   for (;;) {
-    auto c = control::Client::connect(command.address);
+    auto c = control::Client::connect(command.address, token);
     if (c.ok()) {
       m_client.emplace(std::move(*c));
       {
@@ -334,6 +368,8 @@ void AgentSession::doConnect(const Command& command) {
       return;
     }
     lastError = c.error().message;
+    // A refused token or a malformed address will not get better by retrying.
+    if (c.error().code == ErrorCode::NoPrivilege || c.error().code == ErrorCode::InvalidArgument) break;
     if (m_quitFlag.load() || Clock::now() >= deadline || commandPending()) break;  // a newer command wins
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
   }
@@ -422,6 +458,21 @@ void AgentSession::handleCommand(const Command& command) {
       case Kind::Stop: doCall("stop", control::StopRequest{}); break;
       case Kind::Cancel: doCall("cancel", control::CancelRequest{}); break;
       case Kind::Flush: doCall("flush", command.flush); break;
+      case Kind::Processes: {
+        AgentEvent e;
+        e.kind = AgentEventKind::ProcessList;
+        auto list = control::fetchProcessList(*m_client, m_options.callTimeoutMs);
+        if (list.ok()) {
+          e.processes = std::move(*list);
+        } else if (list.error().code == ErrorCode::IoError || list.error().code == ErrorCode::Timeout) {
+          lose("lost the connection to the agent during processes: " + list.error().message);
+          break;
+        } else {
+          e.message = list.error().message;
+        }
+        push(std::move(e));
+        break;
+      }
       default: break;
     }
     if (m_client) pollStatus();

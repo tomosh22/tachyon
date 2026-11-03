@@ -17,7 +17,9 @@ namespace tachyon::control {
 
 constexpr uint32_t kProtocolApiVersion = 65536;
 
-enum class Cmd { Status, Start, Stop, Flush, Cancel, InstHello };
+// Auth, Fetch and Processes are WP-61 (remote capture); they are appended so the variant order of the older
+// commands is unchanged.
+enum class Cmd { Status, Start, Stop, Flush, Cancel, InstHello, Auth, Fetch, Processes };
 
 // ---- Requests (client -> agent). Field names mirror the JSON keys. ----
 
@@ -67,8 +69,38 @@ struct InstHelloRequest {
   uint32_t api_version = 0;
 };
 
-using RequestBody =
-    std::variant<StatusRequest, StartRequest, StopRequest, FlushRequest, CancelRequest, InstHelloRequest>;
+// Optional (WP-61). The first line a TCP client sends: {"id":N,"cmd":"auth","token":"..."}. Accepted (and
+// ignored) on local connections and after a successful handshake.
+struct AuthRequest {
+  std::string token;
+};
+
+// Largest chunk of a file one `fetch` response carries (raw bytes; base64 on the wire, so the line stays
+// under kMaxLineBytes).
+constexpr uint64_t kMaxFetchChunkBytes = 512 * 1024;
+
+// Optional (WP-61). {"cmd":"fetch","path":"...","offset":N,"length":M[,"sha256":true]}: reads a trace the
+// agent produced in this process lifetime (capture outputs and flushes; anything else is ENOTFOUND). The
+// response carries up to min(length, kMaxFetchChunkBytes) bytes from `offset`.
+struct FetchRequest {
+  std::string path;
+  uint64_t offset = 0;
+  uint64_t length = kMaxFetchChunkBytes;
+  // Ask for the SHA-256 of the whole file even when this is not the final chunk (the final chunk always
+  // carries it).
+  bool want_sha256 = false;
+};
+
+// Optional (WP-61). {"cmd":"processes"[,"offset":N]}: the processes visible to the agent (pid, name, user,
+// cmdline), for the viewer's Attach dialog when connected remotely. Sorted by pid; the response holds as many
+// as fit in one line and says how many there are in total, so a client repeats with offset += returned until
+// it has them all.
+struct ProcessesRequest {
+  uint32_t offset = 0;
+};
+
+using RequestBody = std::variant<StatusRequest, StartRequest, StopRequest, FlushRequest, CancelRequest,
+                                 InstHelloRequest, AuthRequest, FetchRequest, ProcessesRequest>;
 
 struct Request {
   int64_t id = 0;
@@ -106,7 +138,31 @@ struct InstHelloBody {
   std::string pipe;
 };
 
-using ResponseBody = std::variant<std::monostate, StatusBody, CaptureSummary, InstHelloBody>;
+// Response of `fetch` (WP-61). `data` holds raw bytes (base64 in JSON).
+struct FetchBody {
+  std::string data;
+  uint64_t offset = 0;  // where `data` starts
+  uint64_t size = 0;    // size of the whole file
+  bool eof = false;     // offset + data.size() == size
+  std::string sha256;   // hex SHA-256 of the whole file; set on the final chunk or on request
+};
+
+struct ProcessEntry {
+  uint32_t pid = 0;
+  std::string name;
+  std::string user;
+  std::string cmdline;  // arguments joined by spaces (Windows: the image path); capped by the agent
+};
+
+// Response of `processes` (WP-61).
+struct ProcessesBody {
+  std::vector<ProcessEntry> processes;
+  uint32_t offset = 0;  // index of the first entry in the agent's list
+  uint32_t total = 0;   // entries in the whole list
+};
+
+using ResponseBody =
+    std::variant<std::monostate, StatusBody, CaptureSummary, InstHelloBody, FetchBody, ProcessesBody>;
 
 struct Response {
   std::optional<int64_t> id;  // nullopt is encoded as null (malformed requests without a usable id)

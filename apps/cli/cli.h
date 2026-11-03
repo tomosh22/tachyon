@@ -1,6 +1,11 @@
 // tachyon-cli: client for the agent control protocol (WP-10, extended by WP-13).
 //
-// Usage: tachyon-cli [--socket PATH | --pipe NAME] [--json] [--timeout SECONDS] <command> [options]
+// Usage: tachyon-cli [--socket PATH | --pipe NAME | --agent ADDRESS] [--token-file FILE] [--json]
+//                    [--timeout SECONDS] <command> [options]
+//
+//   ADDRESS: a socket path, a pipe name, or tcp://HOST:PORT for a remote agent (WP-61). A tcp:// agent
+//   needs the token: --token-file FILE or $TACHYON_AGENT_TOKEN_FILE (a file whose first line is the token;
+//   on POSIX it must not be readable by group or others). The channel is not encrypted.
 //
 //   status
 //   start   <target> [start options] [--no-start] [--wait]
@@ -37,8 +42,19 @@
 //             {"schema":1,"platform","ok","exit_code","requested_hz","summary",
 //             "checks":[{"id","title","status","detail","hint"}]}. Exit 0 when nothing FAILed (WARN does not
 //             fail), 1 when any item FAILed, 3 on a usage error. Windows: prints a note, exits 0.
-//   capture <target> [start options] [--duration S]
-//             start + wait for --duration seconds or for the target to exit + stop + wait for capture_done
+//   capture <target> [start options] [--duration S] [--fetch [--fetch-dir DIR]]
+//             start + wait for --duration seconds or for the target to exit + stop + wait for capture_done.
+//             --fetch then copies the finished trace to DIR (default: the current directory) over the
+//             connection, as `fetch` does; use it with a tcp:// agent, whose files are not on this machine.
+//   fetch   PATH [--out FILE]
+//             copies a trace the agent produced (the path capture_done / flushed reported; any other path is
+//             refused) to FILE (default: ./<file name>). The data goes to FILE.part first; an interrupted
+//             transfer resumes from the size of FILE.part on the next call, and the SHA-256 the agent
+//             computed must match before FILE appears. With --json stdout is
+//             {"ok":true,"fetched":{"remote","path","size","sha256","resumed_from","restarted"}}.
+//   processes
+//             lists the processes visible to the agent (pid, name, user, command line; tab separated, or a
+//             JSON array with --json). For remote agents, which have processes of their own.
 //
 //   <target>: --launch EXE | --attach PID | --system | --mode launch|attach|system [--exe E] [--pid N]
 //   start options: --args "A B \"C D\""  (one string, split with the Windows command-line rules)

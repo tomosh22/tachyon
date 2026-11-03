@@ -12,6 +12,7 @@
 #pragma once
 
 #include "control/client.h"
+#include "control/fetch.h"
 #include "control/protocol.h"
 
 #include <atomic>
@@ -38,6 +39,7 @@ struct AgentSnapshot {
   ConnectionState connection = ConnectionState::Disconnected;
   AgentPhase phase = AgentPhase::Unknown;  // Unknown unless Connected
   std::string address;
+  bool remote = false;  // WP-61: address is tcp://host:port, a network connection to another machine
   std::string backend;  // as the agent reports it ("mock", "perf", "etw")
   bool elevated = false;
   double progress = 0.0;        // conversion progress while Stopping
@@ -59,13 +61,15 @@ enum class AgentEventKind : uint8_t {
   AgentError,      // unsolicited error event of the agent (message)
   CommandFailed,   // a command was refused or failed (command, code, message)
   Flushed,         // the agent wrote a flushed trace of a circular capture (flushed), whoever asked
+  ProcessList,     // answer of listProcesses() (processes, or message when the request failed)
 };
 
 struct AgentEvent {
   AgentEventKind kind = AgentEventKind::StateChanged;
   AgentPhase phase = AgentPhase::Unknown;
-  control::CaptureSummary summary;  // CaptureDone
-  control::FlushedEvent flushed;    // Flushed
+  control::CaptureSummary summary;               // CaptureDone
+  control::FlushedEvent flushed;                 // Flushed
+  std::vector<control::ProcessEntry> processes;  // ProcessList
   std::string message;
   std::string command;        // CommandFailed: "start", "stop", ...
   std::string code;           // CommandFailed: protocol code ("EBUSY", ...) or "ETIMEOUT"/"EIO" for transport
@@ -94,8 +98,9 @@ class AgentSession {
 
   // ---- commands (thread-safe, asynchronous; results arrive as snapshot changes and events) ----
   // Connects to `address`, retrying for up to `retryMs` (0 = one attempt). Replaces a current connection.
-  // `userInitiated` false marks the startup attempt (no error toast).
-  void connect(std::string address, int retryMs = 0, bool userInitiated = true);
+  // `userInitiated` false marks the startup attempt (no error toast). A tcp://host:port address (WP-61) needs
+  // `tokenFile`: the file is read on the worker thread at each attempt, so the token itself is never kept.
+  void connect(std::string address, int retryMs = 0, bool userInitiated = true, std::string tokenFile = {});
   // Closes the connection; the state becomes Disconnected.
   void disconnect();
   // Sends `start`; `targetLabel` is shown while the capture runs.
@@ -109,6 +114,9 @@ class AgentSession {
   void flush(std::string name, uint32_t seconds, std::string reason);
   // Asks the agent for its status now.
   void refreshStatus();
+  // WP-61. Asks the agent for its process list; the answer arrives as a ProcessList event (the Attach dialog
+  // of a remote agent: the processes are those of the other machine).
+  void listProcesses();
 
   // ---- observation (thread-safe) ----
   AgentSnapshot snapshot() const;
@@ -129,9 +137,11 @@ class AgentSession {
       Stop,
       Cancel,
       Flush,
-      Refresh
+      Refresh,
+      Processes
     } kind = Kind::Refresh;
     std::string address;
+    std::string tokenFile;
     int retryMs = 0;
     bool userInitiated = true;
     control::StartRequest start;
