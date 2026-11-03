@@ -889,3 +889,57 @@ TEST(InstLifetime, TheTimelineSurvivesADocumentWithAnIndexingJobStillRunning) {
   EXPECT_FALSE(h.widget().hasDocument());
   EXPECT_FALSE(h.widget().plotLanes().ready());
 }
+
+// ---- WP-64 follow-ups
+// ----------------------------------------------------------------------------------------
+
+TEST(InstWidget, AMergedItemIsMarkedWhenALockWaitOrAnUnterminatedScopeIsInsideTheGroup) {
+  Harness h;
+  h.open("scopes.tachyon");
+  h.waitLanes();
+  const ThreadIdx main_ = h.threadOfTid(301);
+  const model::TraceModel& m = h.model();
+  auto paired = std::make_shared<analysis::PairedScopes>();
+  paired->byThread.resize(m.threads.size());
+  const uint64_t t0 = m.header.start_ts;
+  const StringIdx id = m.strings.find("Frame");
+  // 300 tiny depth-0 scopes inside one pixel of the full view; the 150th is a lock wait and the last one never
+  // ends. Before WP-64 only the first scope of the group decided how the merged item was drawn.
+  const uint64_t base = t0 + (m.header.end_ts - m.header.start_ts) / 3;
+  for (uint64_t i = 0; i < 300; ++i) {
+    analysis::ScopeInstance s;
+    s.id = id;
+    s.begin = base + i * 4;
+    s.end = base + i * 4 + 2;
+    if (i == 150) s.color = analysis::kLockColorSentinel;
+    if (i == 299) s.unterminated = true;
+    paired->byThread[main_.get()].push_back(s);
+  }
+  h.widget().scopeLanes().inject(buildScopeLanes(paired, m.threads.size()), false);
+  h.frames(3);
+  const DrawnScopeItem* merged = h.findItem(
+      [&](const DrawnScopeItem& i) { return i.thread == main_ && i.depth == 0 && i.count > 1; });
+  ASSERT_NE(merged, nullptr);
+  EXPECT_TRUE(merged->lock) << "a lock wait in the middle of the group must mark the merged item";
+  EXPECT_TRUE(merged->unterminated) << "an unterminated scope in the group must mark the merged item";
+}
+
+TEST(InstWidget, ThePendingLookOnlyReservesALineForThreadsWithScopeEvents) {
+  Harness h;
+  h.open("scopes.tachyon");
+  h.waitLanes();
+  const model::TraceModel& m = h.model();
+  std::vector<bool> hasEvents(m.threads.size(), false);
+  for (const trace::ScopeEventRec& e : m.scopeEvents) {
+    const auto it = m.tidToThread.find(e.tid);
+    if (it != m.tidToThread.end()) hasEvents[it->second.get()] = true;
+  }
+  ASSERT_GT(std::count(hasEvents.begin(), hasEvents.end(), true), 0);
+  ScopeLanesView view;  // fresh: its set is not ready until the pairing query returns
+  EXPECT_TRUE(view.mayHaveScopes(ThreadIdx(0))) << "before the first update every row may";
+  view.update(h.context(), false);
+  if (!view.pending()) GTEST_SKIP() << "the pairing finished before the pending look could be observed";
+  for (size_t t = 0; t < m.threads.size(); ++t) {
+    EXPECT_EQ(view.mayHaveScopes(ThreadIdx(static_cast<uint32_t>(t))), static_cast<bool>(hasEvents[t])) << t;
+  }
+}

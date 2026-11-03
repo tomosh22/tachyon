@@ -31,8 +31,12 @@ void addInterval(ScopeLane& lane, const analysis::ScopeInstance* inst, uint64_t 
   t.end.push_back(end);
   t.instance.push_back(inst);
   t.fill.push_back(scopeColor(inst->color, inst->id));
-  t.flags.push_back(static_cast<uint8_t>((inst->color == analysis::kLockColorSentinel ? kTrackLock : 0) |
-                                         (inst->unterminated ? kTrackOpen : 0)));
+  const uint8_t f = static_cast<uint8_t>((inst->color == analysis::kLockColorSentinel ? kTrackLock : 0) |
+                                         (inst->unterminated ? kTrackOpen : 0));
+  t.flags.push_back(f);
+  const size_t block = (t.flags.size() - 1) / ScopeTrack::kFlagBlock;
+  if (t.flagBlocks.size() <= block) t.flagBlocks.resize(block + 1, 0);
+  t.flagBlocks[block] = static_cast<uint8_t>(t.flagBlocks[block] | f);
   ++lane.intervalCount;
 }
 
@@ -89,6 +93,21 @@ uint8_t ScopeTrack::flagsOf(size_t i) const {
   if (i < flags.size()) return flags[i];
   return static_cast<uint8_t>((instance[i]->color == analysis::kLockColorSentinel ? kTrackLock : 0) |
                               (instance[i]->unterminated ? kTrackOpen : 0));
+}
+
+uint8_t ScopeTrack::flagsOver(size_t first, size_t count) const {
+  if (count <= 1) return first < size() ? flagsOf(first) : uint8_t{0};
+  const size_t last = std::min(size(), first + count);
+  uint8_t out = 0;
+  size_t i = first;
+  if (flagBlocks.empty()) {  // a hand-built track: visit the intervals (cap the work)
+    for (; i < last && i < first + 4096; ++i) out = static_cast<uint8_t>(out | flagsOf(i));
+    return out;
+  }
+  for (; i < last && i % kFlagBlock != 0; ++i) out = static_cast<uint8_t>(out | flags[i]);
+  for (; i + kFlagBlock <= last; i += kFlagBlock) out = static_cast<uint8_t>(out | flagBlocks[i / kFlagBlock]);
+  for (; i < last; ++i) out = static_cast<uint8_t>(out | flags[i]);
+  return out;
 }
 
 const analysis::LockRow* ScopeLaneSet::lockRow(uint64_t address) const {
@@ -407,6 +426,8 @@ void ScopeLanesView::reset() {
   m_highlightId.reset();
   m_stats = {};
   m_items.clear();
+  m_candidates.clear();
+  m_candidatesDocument = ~0ull;
 }
 
 void ScopeLanesView::inject(std::shared_ptr<const ScopeLaneSet> set, bool grouped) {
@@ -431,6 +452,30 @@ void ScopeLanesView::update(const PanelContext& context, bool grouped) {
     return;
   }
   const Document& doc = *context.document;
+  if (m_candidatesDocument != context.documentGeneration) {
+    // One pass over the raw events (a small direct-mapped cache of tid -> thread keeps it at a few ns each).
+    const model::TraceModel& model = doc.model();
+    m_candidates.assign(model.threads.size(), 0);
+    struct Slot {
+      uint32_t tid = 0;
+      uint32_t thread = kInvalidIdx;
+    };
+    std::vector<Slot> cache(4096);
+    auto mark = [&](uint32_t tid) {
+      Slot& slot = cache[(tid * 2654435761u) >> 20];
+      if (slot.thread == kInvalidIdx || slot.tid != tid) {
+        const auto it = model.tidToThread.find(tid);
+        slot.tid = tid;
+        slot.thread = it == model.tidToThread.end() ? kInvalidIdx - 1 : it->second.get();
+      }
+      if (slot.thread < m_candidates.size()) m_candidates[slot.thread] = 1;
+    };
+    for (const trace::ScopeEventRec& e : model.scopeEvents) mark(e.tid);
+    for (const model::FiberSwitch& e : model.fiberSwitches) {
+      if (e.thread.valid() && e.thread.get() < m_candidates.size()) m_candidates[e.thread.get()] = 1;
+    }
+    m_candidatesDocument = context.documentGeneration;
+  }
   analysis::AggregationOptions options;
   common::EffectiveScopeOptions scope = common::effectiveScopeOptions(context);
   scope.groupByFiber = grouped;
@@ -483,7 +528,11 @@ uint32_t ScopeLanesView::linesFor(ThreadIdx thread, bool expanded) const {
 }
 
 bool ScopeLanesView::mayHaveScopes(ThreadIdx thread) const {
-  return !m_set || !m_set->lanesFor(thread).empty();
+  if (m_set) return !m_set->lanesFor(thread).empty();
+  // Pending: only the threads that have scope or fiber events can get lanes. Before the candidates are known
+  // (no update() yet) every row may.
+  if (m_candidatesDocument == ~0ull) return true;
+  return thread.valid() && thread.get() < m_candidates.size() && m_candidates[thread.get()] != 0;
 }
 
 void ScopeLanesView::beginFrame() {
@@ -545,7 +594,7 @@ void ScopeLanesView::drawRow(ImDrawList* dl, const model::TraceModel& model, con
         batch.add(it.x0, y0, it.x1, y1, toIm(c));
         ++m_stats.items;
         m_stats.merged += merged ? 1 : 0;
-        if (m_record || track.flagsOf(it.first) != 0 || (!merged && it.x1 - it.x0 > labelMinWidth) ||
+        if (m_record || track.flagsOver(it.first, it.count) != 0 || (!merged && it.x1 - it.x0 > labelMinWidth) ||
             (m_highlightId && !merged)) {
           m_decorated.push_back(it);
         }
@@ -554,8 +603,8 @@ void ScopeLanesView::drawRow(ImDrawList* dl, const model::TraceModel& model, con
     // Pass 2: decorations and labels.
     for (const LaneItem& it : m_decorated) {
       const analysis::ScopeInstance& inst = *track.instance[it.first];
-      const uint8_t flags = track.flagsOf(it.first);
       const bool merged = it.count > 1;
+      const uint8_t flags = track.flagsOver(it.first, it.count);
       const bool lock = (flags & kTrackLock) != 0;
       const float w = it.x1 - it.x0;
       DrawnScopeItem drawn;
@@ -587,7 +636,7 @@ void ScopeLanesView::drawRow(ImDrawList* dl, const model::TraceModel& model, con
           dl->AddLine(ImVec2(it.x0, y0), ImVec2(it.x1, y0), IM_COL32(255, 220, 200, 255));
         }
       }
-      if ((flags & kTrackOpen) != 0 && !merged && it.x1 < x1 - 1.0f) {
+      if ((flags & kTrackOpen) != 0 && it.x1 < x1 - 1.0f) {
         ++m_stats.openEnds;
         dl->AddTriangleFilled(ImVec2(it.x1 - 5.0f, y0), ImVec2(it.x1, (y0 + y1) * 0.5f),
                               ImVec2(it.x1 - 5.0f, y1), IM_COL32(255, 255, 255, 230));
