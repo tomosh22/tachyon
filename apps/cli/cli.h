@@ -46,6 +46,12 @@
 //             start + wait for --duration seconds or for the target to exit + stop + wait for capture_done.
 //             --fetch then copies the finished trace to DIR (default: the current directory) over the
 //             connection, as `fetch` does; use it with a tcp:// agent, whose files are not on this machine.
+//   live    <target> [--duration S] [--window S] [--interval S] [start options]   (WP-65a; live_command.h)
+//             starts a live capture (the agent streams decoded events), subscribes and prints a one-line
+//             summary of the last --window seconds (default 30) every --interval seconds (default 1): window
+//             span, samples, the five functions with the most exclusive samples, latency of the newest
+//             sample, gaps; stops after --duration (or when the launched target exits) and prints the trace
+//             path.
 //   fetch   PATH [--out FILE]
 //             copies a trace the agent produced (the path capture_done / flushed reported; any other path is
 //             refused) to FILE (default: ./<file name>). The data goes to FILE.part first; an interrupted

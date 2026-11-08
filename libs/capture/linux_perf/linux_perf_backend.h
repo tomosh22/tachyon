@@ -60,6 +60,7 @@
 #include "capture/capture_backend.h"
 #include "capture/linux_perf/drain.h"
 #include "capture/linux_perf/launch.h"
+#include "capture/linux_perf/live_source.h"
 #include "capture/linux_perf/perf_converter.h"
 #include "capture/linux_perf/perf_system.h"
 #include "capture/linux_perf/retention.h"
@@ -109,6 +110,7 @@ struct LinuxPerfDiagnostics {
   std::vector<uint32_t> targetPids;
   uint32_t flushCount = 0;
   std::filesystem::path spoolDir;
+  perf::LiveSourceStats live;  // WP-65a: the live source of the running (or last) capture
 };
 
 // Thread-safe: all members may be called from any thread. start / stop / flush are serialised through the
@@ -128,6 +130,11 @@ class LinuxPerfBackend final : public ICaptureBackend, public ITargetWatch {
   Result<CaptureResult> flush(std::string name, uint32_t seconds) override;
   CaptureState state() const override;
   void setProgressCallback(std::function<void(CaptureState, float)> callback) override;
+  // WP-65a: with CaptureOptions::live the drain thread's chunks are also decoded by a perf::LiveSource (its
+  // own thread, a bounded queue: it drops live events, never spool data, when it falls behind) and handed to
+  // `sink`.
+  void setLiveSink(std::shared_ptr<ILiveSink> sink) override;
+  bool supportsLive() const override { return true; }
 
   // Thread-safe. A copy of the diagnostics.
   LinuxPerfDiagnostics diagnostics() const;
@@ -171,6 +178,7 @@ class LinuxPerfBackend final : public ICaptureBackend, public ITargetWatch {
   CaptureState m_state = CaptureState::Idle;
   etw::SessionLifecycle m_lifecycle;
   CaptureOptions m_options;
+  std::shared_ptr<ILiveSink> m_liveSink;  // m_mutex
   std::unique_ptr<Session> m_session;
   std::unique_ptr<perf::LaunchedProcess> m_child;              // launched root (parked or running)
   std::vector<std::unique_ptr<perf::LaunchedProcess>> m_reap;  // released targets, reaped when they exit

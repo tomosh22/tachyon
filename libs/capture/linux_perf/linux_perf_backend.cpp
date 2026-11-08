@@ -3,6 +3,7 @@
 #include "capture/linux_perf/proc_snapshot.h"
 #include "capture/windows_etw/session_config.h"
 #include "core/log.h"
+#include "trace/trace_format.h"
 
 #include <sys/resource.h>
 #include <sys/utsname.h>
@@ -61,6 +62,7 @@ struct LinuxPerfBackend::Session {
   std::vector<std::string> warnings;
   std::vector<uint32_t> roots;
   perf::SchedPlan sched;
+  std::unique_ptr<perf::LiveSource> live;  // WP-65a: decodes what the drain reads, for the live sink
 };
 
 LinuxPerfBackend::LinuxPerfBackend(LinuxPerfBackendConfig config)
@@ -93,7 +95,13 @@ LinuxPerfDiagnostics LinuxPerfBackend::diagnostics() const {
   std::lock_guard lock(m_mutex);
   LinuxPerfDiagnostics d = m_diag;
   if (m_session && m_session->drain) d.drain = m_session->drain->stats();
+  if (m_session && m_session->live) d.live = m_session->live->stats();
   return d;
+}
+
+void LinuxPerfBackend::setLiveSink(std::shared_ptr<ILiveSink> sink) {
+  std::lock_guard lock(m_mutex);
+  m_liveSink = std::move(sink);
 }
 
 void LinuxPerfBackend::notify(CaptureState state, float progress) {
@@ -364,6 +372,7 @@ void LinuxPerfBackend::teardown(Session& session) {
     session.enabled = false;
   }
   if (session.drain) (void)session.drain->finish();
+  if (session.live) session.live->finish();
   for (Slot& s : session.slots) s.ring.reset();
   for (Slot& s : session.slots) {
     if (s.fd >= 0) m_system->closeEvent(s.fd);
@@ -516,6 +525,43 @@ Result<void> LinuxPerfBackend::beginRecording(const CaptureOptions& options,
   if (auto r = session->drain->open(); !r.ok()) return fail(r.error());
   session->tracker.setRoots(session->roots, options.followChildren);
 
+  // Live view: a second consumer of what the drain reads. It starts before the events are enabled so that no
+  // chunk is missed; the sink hears the session facts first.
+  if (options.live) {
+    std::shared_ptr<ILiveSink> sink;
+    {
+      std::lock_guard lock(m_mutex);
+      sink = m_liveSink;
+    }
+    if (!sink)
+      return fail(makeError(ErrorCode::InvalidArgument, "a live capture needs a live sink (setLiveSink)"));
+    LiveSessionInfo facts;
+    facts.clockFrequencyHz = 1'000'000'000ull;  // CLOCK_MONOTONIC_RAW nanoseconds
+    facts.platform = trace::kPlatformLinux;
+    facts.samplingHz = options.samplingHz;
+    facts.startTs = info.startTs;
+    sink->onSessionInfo(facts);
+    perf::LiveSourceConfig lc;
+    lc.decoder.sink = sink;
+    lc.decoder.layout = info.layout;
+    lc.decoder.sched = info.sched;
+    lc.decoder.rootPids = session->roots;
+    lc.decoder.followChildren = options.followChildren;
+    lc.decoder.childFilter = options.childFilter;
+    lc.decoder.startTs = info.startTs;
+    if (options.mode == CaptureMode::Launch)
+      lc.decoder.rootCommandLine = joinCommandLine(options.exe, options.args);
+    lc.decoder.procRoot = m_system->procRoot();
+    const std::shared_ptr<perf::IPerfSystem> system = m_system;
+    lc.nowNs = [system] { return system->nowNs(); };
+    session->live = std::make_unique<perf::LiveSource>(std::move(lc));
+    session->live->start();
+    perf::LiveSource* liveSource = session->live.get();
+    session->drain->setTap([liveSource](std::span<const uint8_t> meta, std::span<const uint8_t> data) {
+      liveSource->submit(meta, data);
+    });
+  }
+
   // Enable. The per-thread launch plan enables itself at the child's exec.
   const bool selfEnabling = !systemWide && options.mode == CaptureMode::Launch;
   if (!selfEnabling) {
@@ -546,6 +592,7 @@ Result<void> LinuxPerfBackend::beginRecording(const CaptureOptions& options,
       });
   if (auto r = session->drain->appendMeta(perf::kSpoolRingRundown, rundown.records); !r.ok())
     return fail(r.error());
+  if (session->live) session->live->submit(rundown.records, {}, true);
   session->drain->start();
   info.warnings = session->warnings;
   if (auto r = perf::writeSessionInfo(session->spoolDir, info); !r.ok()) return fail(r.error());
@@ -673,6 +720,11 @@ Result<CaptureResult> LinuxPerfBackend::stop() {
   session->enabled = false;
   const uint64_t endTs = m_system->nowNs();
   auto drained = session->drain->finish();
+  if (session->live) {  // the last chunks are queued: decode them, then the sink has everything
+    session->live->finish();
+    std::lock_guard lock(m_mutex);
+    m_diag.live = session->live->stats();
+  }
   const perf::DrainStats drain = session->drain->stats();
   for (Slot& s : session->slots) s.ring.reset();
   for (Slot& s : session->slots) {

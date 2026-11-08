@@ -32,6 +32,7 @@ std::string Server::remoteAddress() const {
 }
 
 void Server::start() {
+  m_handler.onServerStarted(*this);
   for (auto& l : m_listeners) {
     ListenerEntry* raw = l.get();
     raw->acceptThread = std::thread([this, raw] { acceptLoop(raw); });
@@ -45,6 +46,7 @@ void Server::stop() {
     if (m_stopped) return;
     m_stopped = true;
   }
+  m_handler.onServerStopping();
   for (auto& l : m_listeners) l->listener->close();
   for (auto& l : m_listeners)
     if (l->acceptThread.joinable()) l->acceptThread.join();
@@ -302,6 +304,7 @@ void Server::clientLoop(ClientEntry* entry) {
     resp.id = id;
     // Through the same queue as events, so an event emitted while handling the request precedes its response.
     if (!enqueue(*entry, encodeResponse(resp))) break;
+    if (req.ok()) m_handler.afterResponse(entry->id, *req, resp);
   }
   // Give a rejection written just before this point time to leave before the connection goes away.
   conn.close();
@@ -317,6 +320,23 @@ void Server::broadcast(const Event& event) {
   std::lock_guard lock(m_mutex);
   for (auto& c : m_clients)
     if (!c->finished.load() && c->authed.load()) enqueue(*c, line);
+}
+
+Server::SendStatus Server::trySendLine(ClientId client, std::string line, size_t maxQueuedBytes) {
+  // Same locking as broadcast(): the client list lock is held while queueing, which only appends to a deque.
+  std::lock_guard lock(m_mutex);
+  for (auto& c : m_clients) {
+    if (c->id != client) continue;
+    if (c->finished.load() || !c->authed.load()) return SendStatus::Gone;
+    std::lock_guard out(c->outMutex);
+    if (c->outClosed) return SendStatus::Gone;
+    if (c->outBytes > 0 && c->outBytes + line.size() > maxQueuedBytes) return SendStatus::Full;
+    c->outBytes += line.size();
+    c->outQueue.push_back(std::move(line));
+    c->outCv.notify_one();
+    return SendStatus::Sent;
+  }
+  return SendStatus::Gone;
 }
 
 size_t Server::clientCount() const {

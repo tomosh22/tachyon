@@ -1,7 +1,7 @@
 tachyon_add_library(control
   SOURCES protocol.cpp framed_connection.cpp posix_transport.cpp windows_transport.cpp tcp_transport.cpp
-          server.cpp client.cpp sha256.cpp auth.cpp fetch.cpp process_list.cpp safe_file.cpp
-  PUBLIC_DEPS tachyon::core tachyon::capture
+          server.cpp client.cpp sha256.cpp auth.cpp fetch.cpp process_list.cpp safe_file.cpp live_encoder.cpp
+  PUBLIC_DEPS tachyon::core tachyon::capture tachyon::model tachyon::trace
   PRIVATE_DEPS nlohmann_json::nlohmann_json)
 find_package(Threads REQUIRED)
 target_link_libraries(tachyon_control PUBLIC Threads::Threads)

@@ -38,6 +38,13 @@ class IRequestHandler {
   // Thread-safe requirement: called concurrently from one thread per connected client. The returned
   // response (its id is overwritten with the request id) is written back to that client.
   virtual Response handle(ClientId client, const Request& request) = 0;
+  // WP-65a. Called from the client's thread right after the response to `request` was queued for the client
+  // (so anything sent to the client from here on follows the response). The live subscription starts here.
+  virtual void afterResponse(ClientId, const Request&, const Response&) {}
+  // WP-65a. Server::start() hands the handler the server (to send to a single client); Server::stop() tells
+  // it before anything is closed. After onServerStopping returns the handler must not use the server again.
+  virtual void onServerStarted(class Server&) {}
+  virtual void onServerStopping() {}
 };
 
 // Longest outbound backlog per client (queued responses + events, in bytes). A client that lets more than
@@ -93,6 +100,17 @@ class Server {
   // Thread-safe, never blocks on a client. Queues the event line for every connected (and authenticated)
   // client; clients whose queue overflows or whose connection fails are dropped.
   void broadcast(const Event& event);
+
+  enum class SendStatus {
+    Sent,
+    Full,  // the client's backlog would exceed the limit: nothing was queued
+    Gone,  // no such client (disconnected, dropped, or not authenticated)
+  };
+  // Thread-safe (WP-65a), never blocks on the client. Queues `line` (one encoded message, no newline) for the
+  // client if its backlog after queueing stays within `maxQueuedBytes`; a client with an empty backlog always
+  // accepts one line. Unlike broadcast() a full queue does not drop the client: the caller decides (live
+  // events are dropped first, see docs/specs/live.md).
+  SendStatus trySendLine(ClientId client, std::string line, size_t maxQueuedBytes);
 
   // Thread-safe. Authenticated / local clients.
   size_t clientCount() const;

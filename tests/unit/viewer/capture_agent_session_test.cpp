@@ -71,7 +71,8 @@ TEST(AgentSessionTest, FailedConnectIsReportedWithoutBlockingTheCaller) {
   session.connect(newAddress("nobody"), 0, /*userInitiated=*/false);
   EXPECT_LT(std::chrono::steady_clock::now() - t0, std::chrono::milliseconds(500))
       << "connect() returns at once";
-  EXPECT_EQ(session.snapshot().connection, ConnectionState::Connecting);
+  // The worker may already have failed (nothing listens, so that takes microseconds); it never connects.
+  EXPECT_NE(session.snapshot().connection, ConnectionState::Connected);
   ASSERT_TRUE(waitFor([&] { return log.has(AgentEventKind::ConnectFailed); }));
   const AgentSnapshot s = session.snapshot();
   EXPECT_EQ(s.connection, ConnectionState::Disconnected);

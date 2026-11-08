@@ -110,6 +110,7 @@ Result<StartRequest> decodeStart(const json& j) {
   TACHYON_TRY(getBool(j, "follow_children", r.follow_children, false));
   TACHYON_TRY(getBool(j, "start_immediately", r.start_immediately, false));
   TACHYON_TRY(getBool(j, "kernel_stacks", r.kernel_stacks, false));
+  TACHYON_TRY(getBool(j, "live", r.live, false));
 
   if (const json* args = find(j, "args")) {
     if (!args->is_array()) return bad("field 'args' must be an array of strings");
@@ -157,6 +158,7 @@ json encodeStart(const StartRequest& s) {
                     {"cswitch", s.stackwalk.cswitch},
                     {"readythread", s.stackwalk.readythread}};
   j["kernel_stacks"] = s.kernel_stacks;
+  if (s.live) j["live"] = true;
   return j;
 }
 
@@ -221,6 +223,8 @@ std::string_view cmdName(Cmd cmd) {
     case Cmd::Auth: return "auth";
     case Cmd::Fetch: return "fetch";
     case Cmd::Processes: return "processes";
+    case Cmd::LiveSubscribe: return "live_subscribe";
+    case Cmd::LiveUnsubscribe: return "live_unsubscribe";
   }
   return "unknown";
 }
@@ -283,6 +287,8 @@ std::string encodeRequest(const Request& request) {
     if (fe->want_sha256) j["sha256"] = true;
   } else if (const auto* pr = std::get_if<ProcessesRequest>(&request.body)) {
     if (pr->offset != 0) j["offset"] = pr->offset;
+  } else if (const auto* ls = std::get_if<LiveSubscribeRequest>(&request.body)) {
+    if (ls->has_from_seq) j["from_seq"] = ls->from_seq;
   }
   return dump(j);
 }
@@ -333,6 +339,15 @@ Result<Request> decodeRequest(std::string_view line, std::optional<int64_t>* idO
     ProcessesRequest pr;
     TACHYON_TRY(getU32(j, "offset", pr.offset, false));
     req.body = pr;
+  } else if (cmd == "live_subscribe") {
+    LiveSubscribeRequest ls;
+    if (find(j, "from_seq") != nullptr) {
+      ls.has_from_seq = true;
+      TACHYON_TRY(getU64(j, "from_seq", ls.from_seq, false));
+    }
+    req.body = ls;
+  } else if (cmd == "live_unsubscribe") {
+    req.body = LiveUnsubscribeRequest{};
   } else if (cmd == "inst_hello") {
     InstHelloRequest h;
     TACHYON_TRY(getU32(j, "pid", h.pid, true));
@@ -360,6 +375,10 @@ std::string encodeResponse(const Response& response) {
     j["progress"] = s->progress;
     j["backend"] = s->backend;
     j["elevated"] = s->elevated;
+    if (s->live) {
+      j["live"] = true;
+      j["live_seq"] = s->live_seq;
+    }
   } else if (const auto* c = std::get_if<CaptureSummary>(&response.body)) {
     json sj = summaryToJson(*c);
     for (auto it = sj.begin(); it != sj.end(); ++it) j[it.key()] = it.value();
@@ -371,6 +390,8 @@ std::string encodeResponse(const Response& response) {
     j["size"] = fb->size;
     j["eof"] = fb->eof;
     if (!fb->sha256.empty()) j["sha256"] = fb->sha256;
+  } else if (const auto* lb = std::get_if<LiveSubscribeBody>(&response.body)) {
+    j["seq"] = lb->seq;
   } else if (const auto* pb = std::get_if<ProcessesBody>(&response.body)) {
     json list = json::array();
     for (const ProcessEntry& p : pb->processes)
@@ -383,6 +404,14 @@ std::string encodeResponse(const Response& response) {
 }
 
 std::string encodeEvent(const Event& event) {
+  // The live batch is built by hand: it is the only big line (up to ~700 KB) and has nothing to escape.
+  if (const auto* le = std::get_if<LiveEvent>(&event)) {
+    std::string out = "{\"event\":\"live\",\"seq\":" + std::to_string(le->seq) +
+                      ",\"keyframe\":" + (le->keyframe ? "true" : "false") + ",\"data\":\"";
+    out += base64Encode(le->data.data(), le->data.size());
+    out += "\"}";
+    return out;
+  }
   json j;
   if (const auto* s = std::get_if<StateEvent>(&event)) {
     j["event"] = "state";
@@ -402,6 +431,12 @@ std::string encodeEvent(const Event& event) {
     j["duration_s"] = fl->duration_s;
     j["events_lost"] = fl->events_lost;
     if (fl->coalesced != 0) j["coalesced"] = fl->coalesced;
+  } else if (const auto* gap = std::get_if<LiveGapEvent>(&event)) {
+    j["event"] = "live_gap";
+    j["seq"] = gap->seq;
+  } else if (const auto* end = std::get_if<LiveEndEvent>(&event)) {
+    j["event"] = "live_end";
+    j["seq"] = end->seq;
   }
   return dump(j);
 }
@@ -438,6 +473,25 @@ Result<ServerMessage> decodeServerMessage(std::string_view line, std::optional<C
       TACHYON_TRY(getU32(j, "coalesced", e.coalesced, false));
       return ServerMessage(Event(std::move(e)));
     }
+    if (name == "live") {
+      LiveEvent e;
+      std::string encoded;
+      TACHYON_TRY(getU64(j, "seq", e.seq, true));
+      TACHYON_TRY(getBool(j, "keyframe", e.keyframe, false));
+      TACHYON_TRY(getString(j, "data", encoded, true));
+      TACHYON_TRY_ASSIGN(e.data, base64Decode(encoded));
+      return ServerMessage(Event(std::move(e)));
+    }
+    if (name == "live_gap") {
+      LiveGapEvent e;
+      TACHYON_TRY(getU64(j, "seq", e.seq, false));
+      return ServerMessage(Event(e));
+    }
+    if (name == "live_end") {
+      LiveEndEvent e;
+      TACHYON_TRY(getU64(j, "seq", e.seq, false));
+      return ServerMessage(Event(e));
+    }
     return bad("unknown event '" + name + "'");
   }
 
@@ -462,6 +516,8 @@ Result<ServerMessage> decodeServerMessage(std::string_view line, std::optional<C
         TACHYON_TRY(getDouble(j, "progress", s.progress, false));
         TACHYON_TRY(getString(j, "backend", s.backend, false));
         TACHYON_TRY(getBool(j, "elevated", s.elevated, false));
+        TACHYON_TRY(getBool(j, "live", s.live, false));
+        TACHYON_TRY(getU64(j, "live_seq", s.live_seq, false));
         r.body = std::move(s);
         break;
       }
@@ -507,10 +563,17 @@ Result<ServerMessage> decodeServerMessage(std::string_view line, std::optional<C
         r.body = std::move(pb);
         break;
       }
+      case Cmd::LiveSubscribe: {
+        LiveSubscribeBody lb;
+        TACHYON_TRY(getU64(j, "seq", lb.seq, false));
+        r.body = lb;
+        break;
+      }
       case Cmd::Start:
       case Cmd::Stop:
       case Cmd::Cancel:
-      case Cmd::Auth: break;
+      case Cmd::Auth:
+      case Cmd::LiveUnsubscribe: break;
     }
   }
   return ServerMessage(std::move(r));

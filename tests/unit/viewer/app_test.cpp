@@ -25,6 +25,9 @@ AppOptions headlessOptions() {
   o.pacing = false;
   // Never read the developer's real settings.
   o.configPath = fs::path(TACHYON_BINARY_DIR) / "viewer_app_test_no_such_settings.json";
+  // Never connect to an agent another test (run in parallel) has on the default address: its events wake the
+  // loop.
+  o.autoConnectAgent = false;
   return o;
 }
 

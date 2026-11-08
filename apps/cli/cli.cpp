@@ -3,6 +3,7 @@
 #include "capture/windows_etw/launch.h"
 #include "cli/doctor.h"
 #include "cli/export_command.h"
+#include "cli/live_command.h"
 #include "control/auth.h"
 #include "control/client.h"
 #include "control/fetch.h"
@@ -276,6 +277,10 @@ void printUsage(std::ostream& err) {
          "          [--from-ms X] [--to-ms Y] [--symbols PATH]... [--symbol-server URL]...\n"
          "                               writes a speedscope or Chrome trace JSON file; needs no agent\n"
          "  capture <target> [start options] [--duration S] [--fetch [--fetch-dir DIR]]\n"
+         "  live    <target> [--duration S] [--window S] [--interval S] [start options]\n"
+         "                               live capture: prints a one-line summary of the last --window "
+         "seconds (default 30)\n"
+         "                               once per --interval (default 1 s); stops after --duration\n"
          "  fetch   PATH [--out FILE]    copies a trace the agent produced to this machine (resumes, "
          "verifies)\n"
          "  processes                    lists the processes visible to the agent\n"
@@ -611,6 +616,12 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
     std::vector<std::string> rest(args.begin(), args.begin() + static_cast<std::ptrdiff_t>(at));
     rest.insert(rest.end(), args.begin() + static_cast<std::ptrdiff_t>(at) + 1, args.end());
     return runDoctor(rest, json, out, err);
+  }
+  if (const size_t at = commandIndex(args); at != std::string::npos && args[at] == "live") {
+    const bool json = std::find(args.begin(), args.end(), "--json") != args.end();
+    std::vector<std::string> rest(args.begin(), args.begin() + static_cast<std::ptrdiff_t>(at));
+    rest.insert(rest.end(), args.begin() + static_cast<std::ptrdiff_t>(at) + 1, args.end());
+    return runLive(rest, json, out, err);
   }
   if (const size_t at = commandIndex(args); at != std::string::npos && args[at] == "merge") {
     const bool json = std::find(args.begin(), args.end(), "--json") != args.end();

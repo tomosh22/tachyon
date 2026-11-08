@@ -1,1 +1,2 @@
-tachyon_add_perf_test(model_perf_tests SOURCES model_load_perf_test.cpp DEPS tachyon::model tachyon::trace)
+tachyon_add_perf_test(model_perf_tests SOURCES model_load_perf_test.cpp live_snapshot_perf_test.cpp live_encoder_perf_test.cpp
+  DEPS tachyon::model tachyon::control tachyon::trace)

@@ -2,7 +2,7 @@
 # frame spool, wire decoder, clock mapping and the merge of decoded records into a .tachyon trace.
 # The wire definitions come from the SDK's inst_wire.h (header-only, namespace tachyon::inst).
 tachyon_add_library(inst
-  SOURCES clock_mapper.cpp decoder.cpp frame_stream.cpp ingest.cpp merge.cpp raw_stream_server.cpp
+  SOURCES clock_mapper.cpp decoder.cpp frame_stream.cpp ingest.cpp live_forward.cpp merge.cpp raw_stream_server.cpp
           sidecar_paths.cpp spool.cpp
   PUBLIC_DEPS tachyon::core tachyon::trace
   PRIVATE_DEPS nlohmann_json::nlohmann_json)
