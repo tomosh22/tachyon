@@ -43,13 +43,13 @@
 //
 // Live view (WP-65a, docs/specs/live.md): a start with live=true gives the backend a LiveEncoder as its
 // ILiveSink (and the instrumentation ingest forwards the SDK's scopes, frame marks, markers and plots to it).
-// The encoder interns the raw events into live indices, cuts a batch every 250 ms (or 256 KiB) and retains the
-// last AgentConfig::liveWindowSeconds of them. A client that sends `live_subscribe` gets a keyframe (every
-// table definition plus the retained batches, in pieces) and then every new batch as `live` events, sent by a
-// thread of its own that never blocks the others: when the client's outbound queue is full the thread waits,
-// and a client that falls behind the retained window (or stalls for kLiveStallMs) gets `live_gap` and must
-// resubscribe. `live_end` follows the last batch when the capture ends. `status` carries live / live_seq while
-// a live capture runs. Local and authenticated remote clients alike may subscribe.
+// The encoder interns the raw events into live indices, cuts a batch every 250 ms (or 256 KiB) and retains
+// the last AgentConfig::liveWindowSeconds of them. A client that sends `live_subscribe` gets a keyframe
+// (every table definition plus the retained batches, in pieces) and then every new batch as `live` events,
+// sent by a thread of its own that never blocks the others: when the client's outbound queue is full the
+// thread waits, and a client that falls behind the retained window (or stalls for kLiveStallMs) gets
+// `live_gap` and must resubscribe. `live_end` follows the last batch when the capture ends. `status` carries
+// live / live_seq while a live capture runs. Local and authenticated remote clients alike may subscribe.
 //
 // Flight recorder (WP-60): a start with circular_mb > 0 is a circular capture. The backend keeps the newest
 // samples; the instrumentation spools become rings (inst/spool.h) that keep the newest max(circular_mb, 64)
@@ -294,7 +294,7 @@ class Agent final : public control::IRequestHandler {
   std::filesystem::path m_outReservedPath;             // where it is; m_mutex
   uint32_t m_coalesced = 0;                            // guarded by m_mutex: since the last flushed event
   std::shared_ptr<inst::Ingest> m_ingest;              // guarded by m_mutex
-  std::shared_ptr<control::LiveEncoder> m_live;        // the live capture's encoder (or the last one); m_mutex
+  std::shared_ptr<control::LiveEncoder> m_live;  // the live capture's encoder (or the last one); m_mutex
 
   // Live subscribers (WP-65a).
   struct LiveSubscriber {
@@ -306,15 +306,15 @@ class Agent final : public control::IRequestHandler {
     std::thread thread;
   };
   void liveSubscriberLoop(LiveSubscriber& sub);
-  // Queues one line for the subscriber, waiting while its queue is full. False: stop (gone, stopped, stalled);
-  // `stalled` says it was the stall limit.
+  // Queues one line for the subscriber, waiting while its queue is full. False: stop (gone, stopped,
+  // stalled); `stalled` says it was the stall limit.
   bool sendLiveLine(LiveSubscriber& sub, std::string line, bool& stalled);
   std::mutex m_subMutex;  // guards m_subscribers and m_pendingSubs
   std::map<control::ClientId, std::unique_ptr<LiveSubscriber>> m_subscribers;
   std::map<control::ClientId, std::unique_ptr<LiveSubscriber>> m_pendingSubs;  // responded to, not started
-  std::mutex m_serverMutex;                // guards m_server
-  control::Server* m_server = nullptr;     // set between onServerStarted and onServerStopping
-  bool m_circular = false;  // guarded by m_mutex: the running capture is a flight recorder
+  std::mutex m_serverMutex;                                                    // guards m_server
+  control::Server* m_server = nullptr;  // set between onServerStarted and onServerStopping
+  bool m_circular = false;              // guarded by m_mutex: the running capture is a flight recorder
   capture::CaptureMode m_sessionMode = capture::CaptureMode::System;  // guarded by m_mutex
   uint32_t m_sessionPid = 0;                                          // attach target; guarded by m_mutex
   bool m_sessionFollow = false;                                       // follow_children; guarded by m_mutex

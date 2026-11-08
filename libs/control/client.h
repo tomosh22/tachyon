@@ -35,10 +35,10 @@ class Client {
   // Waits for an event satisfying pred (earlier events are discarded). Fails with Timeout.
   Result<Event> waitForEvent(const std::function<bool(const Event&)>& pred, int timeoutMs);
 
-  // WP-65a. Live events (`live`, `live_gap`, `live_end`) are handed to `handler` as they are read, by whatever
-  // call is reading (call, nextEvent, waitForEvent), instead of being queued; a client that streams a live
-  // capture can therefore keep waiting in call() without letting batches pile up. The handler runs on the
-  // calling thread and must not call back into this Client. An empty handler restores queueing.
+  // WP-65a. Live events (`live`, `live_gap`, `live_end`) are handed to `handler` as they are read, by
+  // whatever call is reading (call, nextEvent, waitForEvent), instead of being queued; a client that streams
+  // a live capture can therefore keep waiting in call() without letting batches pile up. The handler runs on
+  // the calling thread and must not call back into this Client. An empty handler restores queueing.
   using LiveHandler = std::function<void(const Event&)>;
   void setLiveHandler(LiveHandler handler) { m_liveHandler = std::move(handler); }
 

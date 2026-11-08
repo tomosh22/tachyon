@@ -41,8 +41,8 @@ class IRequestHandler {
   // WP-65a. Called from the client's thread right after the response to `request` was queued for the client
   // (so anything sent to the client from here on follows the response). The live subscription starts here.
   virtual void afterResponse(ClientId, const Request&, const Response&) {}
-  // WP-65a. Server::start() hands the handler the server (to send to a single client); Server::stop() tells it
-  // before anything is closed. After onServerStopping returns the handler must not use the server again.
+  // WP-65a. Server::start() hands the handler the server (to send to a single client); Server::stop() tells
+  // it before anything is closed. After onServerStopping returns the handler must not use the server again.
   virtual void onServerStarted(class Server&) {}
   virtual void onServerStopping() {}
 };

@@ -130,8 +130,9 @@ class LinuxPerfBackend final : public ICaptureBackend, public ITargetWatch {
   Result<CaptureResult> flush(std::string name, uint32_t seconds) override;
   CaptureState state() const override;
   void setProgressCallback(std::function<void(CaptureState, float)> callback) override;
-  // WP-65a: with CaptureOptions::live the drain thread's chunks are also decoded by a perf::LiveSource (its own
-  // thread, a bounded queue: it drops live events, never spool data, when it falls behind) and handed to `sink`.
+  // WP-65a: with CaptureOptions::live the drain thread's chunks are also decoded by a perf::LiveSource (its
+  // own thread, a bounded queue: it drops live events, never spool data, when it falls behind) and handed to
+  // `sink`.
   void setLiveSink(std::shared_ptr<ILiveSink> sink) override;
   bool supportsLive() const override { return true; }
 

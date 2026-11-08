@@ -99,7 +99,7 @@ struct LiveSessionInfo {
   uint64_t clockFrequencyHz = 0;  // the trace clock (header.clock_frequency_hz)
   uint32_t platform = 0;          // trace::kPlatformWindows / kPlatformLinux
   uint32_t samplingHz = 0;
-  uint64_t startTs = 0;           // trace clock when the capture started
+  uint64_t startTs = 0;  // trace clock when the capture started
 };
 
 struct LiveProcess {
@@ -116,9 +116,9 @@ struct LiveThread {
   bool isTarget = false;  // belongs to the capture's target process(es)
 };
 
-// An executable image of a process. Reported when it first matters (load) and again with unloadTs != 0 when it
-// goes away. A module is identified by (pid, base, size, path). `base` follows the trace-format rule
-// (ELF: lowest PT_LOAD, PE: image base); a frame's RVA is address - base.
+// An executable image of a process. Reported when it first matters (load) and again with unloadTs != 0 when
+// it goes away. A module is identified by (pid, base, size, path). `base` follows the trace-format rule (ELF:
+// lowest PT_LOAD, PE: image base); a frame's RVA is address - base.
 struct LiveModule {
   uint32_t pid = 0;
   uint64_t base = 0, size = 0;
@@ -130,8 +130,8 @@ struct LiveModule {
   uint64_t loadTs = 0, unloadTs = 0;
 };
 
-// A context switch (trace::ContextSwitchRec with raw ids). `oldStack` is the blocking stack of the thread that
-// switched out (leaf first), resolved in the address space of `oldPid`; it may be empty.
+// A context switch (trace::ContextSwitchRec with raw ids). `oldStack` is the blocking stack of the thread
+// that switched out (leaf first), resolved in the address space of `oldPid`; it may be empty.
 struct LiveContextSwitch {
   uint64_t ts = 0;
   uint32_t cpu = 0;

@@ -87,9 +87,9 @@ class Drain {
   Result<void> open();
   // Thread-safe after open(). Appends already-formed records (the /proc rundown) to meta.bin.
   Result<void> appendMeta(uint32_t ringId, std::span<const uint8_t> records);
-  // Receives, for every chunk the drain thread read from a ring and wrote to the spool, the non-sample records
-  // (FORK, COMM, MMAP2, ...) and the sample / switch records separately (WP-65a live view). Called on the drain
-  // thread with no lock held, after the spool write; it must not block (copy and return).
+  // Receives, for every chunk the drain thread read from a ring and wrote to the spool, the non-sample
+  // records (FORK, COMM, MMAP2, ...) and the sample / switch records separately (WP-65a live view). Called on
+  // the drain thread with no lock held, after the spool write; it must not block (copy and return).
   using Tap = std::function<void(std::span<const uint8_t> meta, std::span<const uint8_t> data)>;
   // Not thread-safe. Call before start().
   void setTap(Tap tap) { m_tap = std::move(tap); }

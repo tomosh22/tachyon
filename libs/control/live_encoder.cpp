@@ -126,6 +126,11 @@ bool LiveKeyframe::next(std::string& chunk) {
   return false;
 }
 
+#if defined(_MSC_VER)
+// C4324 (padded because of alignas) is intended: packed records need an 8-aligned holder.
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
 struct LiveEncoder::Impl {
   LiveEncoderConfig config;
   mutable std::mutex mutex;
@@ -504,6 +509,9 @@ struct LiveEncoder::Impl {
     }
   }
 };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 // ---------------------------------------------------------------------------------------------------------
 

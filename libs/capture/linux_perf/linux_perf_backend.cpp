@@ -533,7 +533,8 @@ Result<void> LinuxPerfBackend::beginRecording(const CaptureOptions& options,
       std::lock_guard lock(m_mutex);
       sink = m_liveSink;
     }
-    if (!sink) return fail(makeError(ErrorCode::InvalidArgument, "a live capture needs a live sink (setLiveSink)"));
+    if (!sink)
+      return fail(makeError(ErrorCode::InvalidArgument, "a live capture needs a live sink (setLiveSink)"));
     LiveSessionInfo facts;
     facts.clockFrequencyHz = 1'000'000'000ull;  // CLOCK_MONOTONIC_RAW nanoseconds
     facts.platform = trace::kPlatformLinux;
@@ -548,7 +549,8 @@ Result<void> LinuxPerfBackend::beginRecording(const CaptureOptions& options,
     lc.decoder.followChildren = options.followChildren;
     lc.decoder.childFilter = options.childFilter;
     lc.decoder.startTs = info.startTs;
-    if (options.mode == CaptureMode::Launch) lc.decoder.rootCommandLine = joinCommandLine(options.exe, options.args);
+    if (options.mode == CaptureMode::Launch)
+      lc.decoder.rootCommandLine = joinCommandLine(options.exe, options.args);
     lc.decoder.procRoot = m_system->procRoot();
     const std::shared_ptr<perf::IPerfSystem> system = m_system;
     lc.nowNs = [system] { return system->nowNs(); };

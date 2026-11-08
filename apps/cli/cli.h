@@ -49,8 +49,9 @@
 //   live    <target> [--duration S] [--window S] [--interval S] [start options]   (WP-65a; live_command.h)
 //             starts a live capture (the agent streams decoded events), subscribes and prints a one-line
 //             summary of the last --window seconds (default 30) every --interval seconds (default 1): window
-//             span, samples, the five functions with the most exclusive samples, latency of the newest sample,
-//             gaps; stops after --duration (or when the launched target exits) and prints the trace path.
+//             span, samples, the five functions with the most exclusive samples, latency of the newest
+//             sample, gaps; stops after --duration (or when the launched target exits) and prints the trace
+//             path.
 //   fetch   PATH [--out FILE]
 //             copies a trace the agent produced (the path capture_done / flushed reported; any other path is
 //             refused) to FILE (default: ./<file name>). The data goes to FILE.part first; an interrupted

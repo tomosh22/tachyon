@@ -12,8 +12,8 @@
 
 namespace tachyon::capture {
 
-// The mock's live source (WP-65a). With CaptureOptions::live the mock replays the events of a trace file to the
-// ILiveSink as if they were being captured: first the session facts and the tables (processes, threads,
+// The mock's live source (WP-65a). With CaptureOptions::live the mock replays the events of a trace file to
+// the ILiveSink as if they were being captured: first the session facts and the tables (processes, threads,
 // modules), then every sample / context switch / ready / scope / frame mark / marker / plot in timestamp
 // order as the replay clock advances, each stretch of the clock ending with onTimeAdvance. The events are
 // those of the capture's fixture, so a live model of the whole replay equals the final trace (the mock copies

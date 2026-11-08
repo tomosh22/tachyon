@@ -25,6 +25,11 @@ uint64_t tsOf(const T& rec) {
 // Aligned local copy of a packed record (see the ALIGNMENT RULE in docs/specs/trace-format.md): a member of a
 // packed struct that sits at an arbitrary address must not have a method called on it or a reference bound to
 // it, so records are read through this holder, whose storage is 8-aligned.
+#if defined(_MSC_VER)
+// C4324 (padded because of alignas) is intended.
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
 template <typename T>
 struct Aligned {
   alignas(8) T v;
@@ -33,6 +38,9 @@ struct Aligned {
     std::memcpy(static_cast<void*>(&v), static_cast<const void*>(&src), sizeof(T));
   }
 };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 template <typename T>
 size_t vecBytes(const std::vector<T>& v) {

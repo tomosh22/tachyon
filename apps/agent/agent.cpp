@@ -318,9 +318,9 @@ bool Agent::armedLocked() const {
 
 Response Agent::handleStart(const StartRequest& req, bool remote) {
   if (req.live && !m_backend->supportsLive())
-    return makeErrorResponse(std::nullopt,
-                             makeError(ErrorCode::Unsupported,
-                                       "the '" + m_config.backendName + "' backend has no live source"));
+    return makeErrorResponse(
+        std::nullopt,
+        makeError(ErrorCode::Unsupported, "the '" + m_config.backendName + "' backend has no live source"));
   if (remote && req.mode == capture::CaptureMode::Launch && !m_config.allowRemoteLaunch)
     return makeErrorResponse(std::nullopt,
                              makeError(ErrorCode::NoPrivilege,

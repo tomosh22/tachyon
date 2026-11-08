@@ -95,14 +95,13 @@ Result<void> Ingest::attach(uint32_t pid, const std::string& address) {
   RawServerOptions serverOptions;
   serverOptions.maxConnections = m_config.maxConnectionsPerProcess;
   serverOptions.expectedPeerPid = m_config.verifyPeerPid ? pid : 0;
-  TACHYON_TRY_ASSIGN(
-      std::unique_ptr<RawStreamServer> server,
-      RawStreamServer::listen(
-          address,
-          [raw, forwarder]() -> std::unique_ptr<IStreamSink> {
-            return std::make_unique<SpoolSink>(*raw, forwarder);
-          },
-          serverOptions));
+  TACHYON_TRY_ASSIGN(std::unique_ptr<RawStreamServer> server,
+                     RawStreamServer::listen(
+                         address,
+                         [raw, forwarder]() -> std::unique_ptr<IStreamSink> {
+                           return std::make_unique<SpoolSink>(*raw, forwarder);
+                         },
+                         serverOptions));
   Process p;
   p.pid = pid;
   p.spool = std::move(spool);

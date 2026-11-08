@@ -20,7 +20,19 @@ constexpr uint32_t kProtocolApiVersion = 65536;
 // Auth, Fetch and Processes are WP-61 (remote capture); they are appended so the variant order of the older
 // commands is unchanged.
 // LiveSubscribe and LiveUnsubscribe are WP-65a (live view), appended after Processes.
-enum class Cmd { Status, Start, Stop, Flush, Cancel, InstHello, Auth, Fetch, Processes, LiveSubscribe, LiveUnsubscribe };
+enum class Cmd {
+  Status,
+  Start,
+  Stop,
+  Flush,
+  Cancel,
+  InstHello,
+  Auth,
+  Fetch,
+  Processes,
+  LiveSubscribe,
+  LiveUnsubscribe
+};
 
 // ---- Requests (client -> agent). Field names mirror the JSON keys. ----
 
@@ -104,19 +116,20 @@ struct ProcessesRequest {
   uint32_t offset = 0;
 };
 
-// Optional (WP-65a). {"cmd":"live_subscribe"[,"from_seq":N]}: from now on `live` events are sent to this client
-// (until live_unsubscribe, live_end, or the connection ends). Without from_seq, or when from_seq is no longer
-// retained, the first event is a keyframe. ENOTFOUND outside a live capture.
+// Optional (WP-65a). {"cmd":"live_subscribe"[,"from_seq":N]}: from now on `live` events are sent to this
+// client (until live_unsubscribe, live_end, or the connection ends). Without from_seq, or when from_seq is no
+// longer retained, the first event is a keyframe. ENOTFOUND outside a live capture.
 struct LiveSubscribeRequest {
   bool has_from_seq = false;
-  uint64_t from_seq = 0;  // the first batch sequence number the client wants (it already has everything before)
+  uint64_t from_seq =
+      0;  // the first batch sequence number the client wants (it already has everything before)
 };
 // Optional (WP-65a). {"cmd":"live_unsubscribe"}: stops the live events of this client. Always ok.
 struct LiveUnsubscribeRequest {};
 
-using RequestBody = std::variant<StatusRequest, StartRequest, StopRequest, FlushRequest, CancelRequest,
-                                 InstHelloRequest, AuthRequest, FetchRequest, ProcessesRequest,
-                                 LiveSubscribeRequest, LiveUnsubscribeRequest>;
+using RequestBody =
+    std::variant<StatusRequest, StartRequest, StopRequest, FlushRequest, CancelRequest, InstHelloRequest,
+                 AuthRequest, FetchRequest, ProcessesRequest, LiveSubscribeRequest, LiveUnsubscribeRequest>;
 
 struct Request {
   int64_t id = 0;
@@ -182,8 +195,8 @@ struct ProcessesBody {
 };
 
 // Response of `live_subscribe` (WP-65a): the events that follow are batches with sequence numbers above `seq`
-// (a keyframe event carries `seq` itself: it is the state after batch `seq`). With from_seq the first event is
-// batch `seq` == from_seq.
+// (a keyframe event carries `seq` itself: it is the state after batch `seq`). With from_seq the first event
+// is batch `seq` == from_seq.
 struct LiveSubscribeBody {
   uint64_t seq = 0;
 };
@@ -225,10 +238,10 @@ struct FlushedEvent {
 };
 
 // WP-65a (live view). One live batch, or a part of a keyframe: {"event":"live","seq":N,"keyframe":bool,
-// "data":"<base64>"}. `data` holds the decoded bytes (at most model::live_wire::kMaxEventBytes). A keyframe is
-// delivered as several events carrying the same seq; only the first of them has keyframe = true (the client
-// resets its window with it) and the following parts have keyframe = false. Regular batches have seq = the
-// previous seq + 1.
+// "data":"<base64>"}. `data` holds the decoded bytes (at most model::live_wire::kMaxEventBytes). A keyframe
+// is delivered as several events carrying the same seq; only the first of them has keyframe = true (the
+// client resets its window with it) and the following parts have keyframe = false. Regular batches have seq =
+// the previous seq + 1.
 struct LiveEvent {
   uint64_t seq = 0;
   bool keyframe = false;

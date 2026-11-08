@@ -276,7 +276,8 @@ struct MockBackend::LiveReplay {
         case kMarker: {
           const model::Marker& r = model.markers[it.b];
           const uint32_t tid = r.thread.valid() ? model.threads[r.thread.get()].tid : 0;
-          sink->onMarker({r.ts, pidOf(tid), tid, model.strings.get(r.name), model.strings.get(r.data), r.color});
+          sink->onMarker(
+              {r.ts, pidOf(tid), tid, model.strings.get(r.name), model.strings.get(r.data), r.color});
           break;
         }
         case kPlot: {
@@ -321,7 +322,8 @@ Result<void> MockBackend::startLive(const CaptureOptions&) {
   auto& items = replay->items;
   for (size_t t = 0; t < m.samplesByThread.size(); ++t)
     for (size_t i = 0; i < m.samplesByThread[t].ts.size(); ++i)
-      items.push_back({m.samplesByThread[t].ts[i], LiveReplay::kSample, static_cast<uint32_t>(t), static_cast<uint32_t>(i)});
+      items.push_back({m.samplesByThread[t].ts[i], LiveReplay::kSample, static_cast<uint32_t>(t),
+                       static_cast<uint32_t>(i)});
   auto tsOf = [](const auto& rec) {
     uint64_t ts;
     std::memcpy(&ts, &rec, sizeof ts);
@@ -339,7 +341,8 @@ Result<void> MockBackend::startLive(const CaptureOptions&) {
     items.push_back({m.markers[i].ts, LiveReplay::kMarker, 0, static_cast<uint32_t>(i)});
   for (size_t s = 0; s < m.plots.size(); ++s)
     for (size_t i = 0; i < m.plots[s].ts.size(); ++i)
-      items.push_back({m.plots[s].ts[i], LiveReplay::kPlot, static_cast<uint32_t>(s), static_cast<uint32_t>(i)});
+      items.push_back(
+          {m.plots[s].ts[i], LiveReplay::kPlot, static_cast<uint32_t>(s), static_cast<uint32_t>(i)});
   std::stable_sort(items.begin(), items.end(),
                    [](const LiveReplay::Item& a, const LiveReplay::Item& b) { return a.ts < b.ts; });
 
