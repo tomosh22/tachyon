@@ -54,6 +54,7 @@ struct TimelineWidget::DocState {
   JobQueue* jobs = nullptr;
   JobQueue::JobId job = 0;
   bool buildStarted = false;
+  bool live = false;              // WP-65b: the document is a snapshot of a live capture
   uint64_t symbolGeneration = 0;  // PanelContext::symbolGeneration the caches were built for
 
   TimeLimits limits;
@@ -124,7 +125,18 @@ TimeView TimelineWidget::view() const {
 }
 
 void TimelineWidget::setView(TimeView view) {
-  if (m_doc) m_doc->view = clampView(view, m_doc->limits);
+  if (!m_doc) return;
+  m_doc->view = clampView(view, m_doc->limits);
+  if (m_doc->live) m_follow = false;
+}
+
+bool TimelineWidget::isLive() const {
+  return m_doc && m_doc->live;
+}
+
+void TimelineWidget::setFollow(bool follow) {
+  m_follow = follow;
+  if (follow && m_doc && m_doc->live) m_doc->view = fitView(m_doc->limits);
 }
 
 void TimelineWidget::fit() {
@@ -244,6 +256,8 @@ void TimelineWidget::onDocumentChanged(const Document* document) {
     if (document && m_doc && m_streamId != 0 && document->streamId() == m_streamId) {
       Carry carry;
       carry.view = m_doc->view;
+      carry.traceStart = m_doc->limits.traceStart;
+      if (m_doc->live) carry.selection = m_selection;
       carry.wasFit = m_doc->view == fitView(m_doc->limits);
       carry.flags = m_doc->flags;
       for (const model::Thread& t : m_doc->model->threads) carry.threadIds.emplace_back(t.pid, t.tid);
@@ -278,7 +292,16 @@ void TimelineWidget::startDocument(const PanelContext& context) {
   m_documentPtr = context.document;
   m_streamId = context.document->streamId();
   auto doc = std::make_unique<DocState>();
-  doc->shared = std::make_shared<LodShared>(context.document->sharedModel());
+  doc->live = context.document->isLive();
+  // WP-65b: a live snapshot arrives with its timeline index already built (off the UI thread), so the swap
+  // never shows rows without one.
+  const std::shared_ptr<LodShared>& prebuilt = context.document->prebuiltLod();
+  if (prebuilt && prebuilt->model == context.document->sharedModel()) {
+    doc->shared = prebuilt;
+    doc->buildStarted = true;
+  } else {
+    doc->shared = std::make_shared<LodShared>(context.document->sharedModel());
+  }
   const model::TraceModel& model = *doc->shared->model;
   doc->model = &model;
   doc->limits.traceStart = model.header.start_ts;
@@ -290,7 +313,18 @@ void TimelineWidget::startDocument(const PanelContext& context) {
   doc->frameTicks = buildFrameTicks(model);
   doc->flags.assign(model.threads.size(), RowFlags{});
   if (m_carry) {  // the preview of this stream was replaced: keep the user's place
-    if (!m_carry->wasFit) doc->view = clampView(m_carry->view, doc->limits);
+    if (doc->live) {
+      // The window moves on with every snapshot: a view the user placed keeps its absolute position (and
+      // slides out at the left edge); Follow shows the whole newest window.
+      if (!m_follow) {
+        TimeView v = m_carry->view;
+        v.start += static_cast<double>(m_carry->traceStart) - static_cast<double>(doc->limits.traceStart);
+        doc->view = clampView(v, doc->limits);
+      }
+      m_selection = m_carry->selection;
+    } else if (!m_carry->wasFit) {
+      doc->view = clampView(m_carry->view, doc->limits);
+    }
     // WP-67: the complete model may number the threads differently (a thread without a ThreadRec that only
     // later chunks mention): the row flags follow the (pid, tid) of their thread.
     bool sameThreads =
@@ -508,6 +542,7 @@ void TimelineWidget::draw(const PanelContext& context) {
   if (!m_doc || context.documentGeneration != m_generation || context.document != m_documentPtr) {
     startDocument(context);
   }
+  m_viewBaseline = m_doc->view;  // WP-65b: a change during this frame is the user's: Follow ends
   const float ui = std::max(0.5f, ImGui::GetFontSize() / kBaseUi);
   m_rowGeometry = RowGeometry{};
   m_rowGeometry.bandHeight *= ui;
@@ -560,10 +595,20 @@ void TimelineWidget::draw(const PanelContext& context) {
   drawFrameGraphStrip(context);
   drawRows(context);
   handleKeys(context);
+  if (m_doc && m_doc->live && m_follow && m_doc->view != m_viewBaseline) m_follow = false;
 }
 
 void TimelineWidget::drawToolbar(const PanelContext& context) {
   DocState& d = *m_doc;
+  if (d.live) {  // WP-65b
+    if (ImGui::Checkbox("Follow", &m_follow) && m_follow) {
+      d.view = fitView(d.limits);
+      m_viewBaseline = d.view;  // jumping to the newest window is not a user pan
+    }
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("Show the newest window and scroll with it. Panning or zooming turns it off.");
+    ImGui::SameLine();
+  }
   ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
   if (ImGui::BeginCombo("Sort", sortKeyName(m_options.sortKey))) {
     for (const SortKey k :

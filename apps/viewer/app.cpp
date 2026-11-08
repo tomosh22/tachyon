@@ -59,6 +59,7 @@ App::App(std::unique_ptr<IRenderer> renderer, AppOptions options)
 App::~App() {
   m_jobs.cancelAll();
   m_capture.reset();  // joins the agent worker (it wakes the renderer) before the renderer is shut down
+  m_live.reset();     // joins the live snapshot worker and the symbol workers of the live services
   m_symbolSetup.reset();
   m_document.reset();  // joins the symbol workers (they wake the renderer) before the renderer is shut down
   if (m_selectionSub != SelectionBus::kNoSubscription) m_selection.unsubscribe(m_selectionSub);
@@ -154,9 +155,30 @@ bool App::init(std::string& error) {
         if (auto* explorer = dynamic_cast<SessionExplorerPanel*>(p->panel.get())) explorer->refresh();
       }
     };
+    host.liveBegin = [this](const control::StartRequest& request) { return beginLive(request); };
+    host.liveEvent = [this](const AgentEvent& event) { onLiveAgentEvent(event); };
+    {
+      LiveSessionOptions live;
+      live.refreshMs = m_options.liveRefreshMs;
+      live.windowNs =
+          static_cast<uint64_t>(std::max<uint32_t>(m_options.liveWindowSeconds, 1)) * 1'000'000'000ull;
+      live.beforeSnapshot = m_options.liveBeforeSnapshot;
+      live.wake = [renderer] { renderer->wake(); };
+      m_live = std::make_unique<LiveSession>(std::move(live));
+    }
     m_capture = std::make_unique<CaptureController>(std::move(host), m_options.processLauncher);
+    m_capture->session().setLiveNotify([this] { m_live->notify(); });
     m_panels.add(makeCapturePanel(*m_capture), false);  // opened when a capture starts or from the menu
     m_panels.add(makeFlightRecorderPanel(*m_capture), false);  // opened when a circular capture starts
+    {
+      LivePanelHost liveHost;
+      liveHost.state = [this] { return liveUiState(); };
+      liveHost.setPaused = [this](bool paused) { setLivePaused(paused); };
+      liveHost.setFollow = [this](bool follow) { setLiveFollow(follow); };
+      liveHost.saveLast = [this] { liveSaveLast(); };
+      liveHost.stop = [this] { liveStop(); };
+      m_panels.add(makeLivePanel(std::move(liveHost)), false);  // opened when a Live capture starts
+    }
     SessionExplorerHost explorer;
     explorer.settings = &m_settings;
     explorer.saveSettings = [this] {
@@ -239,6 +261,12 @@ void App::registerCommands() {
                   [this] { m_capture->openDialog(capture::CaptureMode::Attach); }});
   m_commands.add({"capture.system", "Capture: System Capture...", "",
                   [this] { m_capture->openDialog(capture::CaptureMode::System); }});
+  m_commands.add({"capture.live", "Capture: Live...", "",
+                  [this] { m_capture->openDialog(capture::CaptureMode::Launch, true); }});
+  m_commands.add({"live.pause", "Live: Pause / Resume", "", [this] { setLivePaused(!m_live->paused()); }});
+  m_commands.add({"live.follow", "Live: Follow", "", [this] { setLiveFollow(true); }});
+  m_commands.add({"live.save", "Live: Save Last 30 s", "", [this] { liveSaveLast(); }});
+  m_commands.add({"live.stop", "Live: Stop and Open Trace", "", [this] { liveStop(); }});
   m_commands.add({"capture.stop", "Capture: Stop", "", [this] { m_capture->stopCapture(); }});
   m_commands.add({"capture.cancel", "Capture: Cancel", "", [this] { m_capture->cancelCapture(); }});
   m_commands.add(
@@ -444,7 +472,10 @@ void App::checkMemory() {
   if (m_memoryGeneration != m_documentGeneration) {  // a new document: new numbers, nothing degraded yet
     m_memoryGeneration = m_documentGeneration;
     m_memoryModelBytes = m_document->model().residentBytes();
-    m_memory.reset();
+    // WP-65b: the next snapshot of a live capture is the same document to the user: keep what was degraded
+    // (resetting it every 500 ms would repeat the toasts).
+    if (!(m_document->isLive() && m_memoryWasLive)) m_memory.reset();
+    m_memoryWasLive = m_document->isLive();
   }
   timeline::TimelineWidget* widget = nullptr;
   if (PanelEntry* entry = m_panels.find(ThreadsTimelinePanel::kName)) {
@@ -476,6 +507,12 @@ void App::toast(ToastLevel level, std::string text) {
 
 void App::rerunSymbolResolution() {
   if (!m_document) return;
+  if (m_document->isLive()) {  // WP-65b: the live worker starts a new symbol service at its next snapshot
+    m_live->reconfigureSymbols(liveSymbolsConfig());
+    ++m_symbolGeneration;
+    requestRedraw();
+    return;
+  }
   m_symbolSetup.reset();  // WP-67: joins the search-path worker (cancel() below must not overlap it)
   m_adoptSource.reset();  // a rerun (new search path, Retry) resolves everything again
   // Stop the old run first: snapshots and in-flight queries may keep the old service alive, and its workers
@@ -525,6 +562,8 @@ std::function<ThreadIdx(ThreadIdx)> threadMapBetween(const model::TraceModel& fr
 }
 
 void App::onDocumentLoaded(std::shared_ptr<Document> document) {
+  // Another trace opened (typically the final trace of the live capture): leave live mode.
+  if (m_livePhase != LivePhase::None && !document->isLive()) closeLive();
   // The complete document of a stream replaces its preview: the user's selection stays.
   const bool continuation =
       m_document && document->streamId() != 0 && m_document->streamId() == document->streamId();
@@ -562,6 +601,7 @@ void App::onDocumentLoaded(std::shared_ptr<Document> document) {
 
 void App::closeDocument() {
   if (!m_document) return;
+  if (m_document->isLive()) closeLive();
   // Closing the preview of a trace that is still loading abandons the load.
   if (m_openJob != 0 && m_document->streamId() != 0 && m_document->streamId() == m_openStream)
     m_jobs.cancel(m_openJob);
@@ -680,6 +720,211 @@ void App::pumpStream() {
   toast(ToastLevel::Info, text);
 }
 
+// ---- WP-65b: live view ----
+
+timeline::TimelineWidget* App::timelineWidget() {
+  if (PanelEntry* entry = m_panels.find(ThreadsTimelinePanel::kName)) {
+    if (auto* panel = dynamic_cast<ThreadsTimelinePanel*>(entry->panel.get())) return &panel->widget();
+  }
+  return nullptr;
+}
+
+LiveSymbolsConfig App::liveSymbolsConfig() {
+  LiveSymbolsConfig config;
+  config.servers = m_settings.symbolServers;
+  config.cacheDir = pathFromUtf8(m_settings.cacheDir);
+  if (config.cacheDir.empty()) config.cacheDir = defaultSymbolCacheDir();
+  config.searchPaths = m_settings.symbolSearchPaths;
+  config.configure = m_options.configureSymbols;
+  // Module results reach the UI the way a file document's do: through the symbol mailbox, which bumps the
+  // symbol generation (panels re-query with the new function keys).
+  auto mailbox = m_symbolMailbox;
+  IRenderer* renderer = m_renderer.get();
+  config.onModule = [mailbox, renderer](ModuleIdx module, symbols::SymbolState state) {
+    {
+      const std::lock_guard<std::mutex> lock(mailbox->mutex);
+      mailbox->events.emplace_back(module, state);
+    }
+    mailbox->dirty.store(true);
+    renderer->wake();
+  };
+  return config;
+}
+
+std::shared_ptr<model::LiveModel> App::beginLive(const control::StartRequest&) {
+  closeLive();
+  m_liveSwaps = 0;
+  m_liveError.clear();
+  m_livePhase = LivePhase::Waiting;
+  m_liveStream = ++m_streamCounter;
+  m_live->setStreamId(m_liveStream);
+  m_symbolMailbox = std::make_shared<SymbolMailbox>();
+  if (timeline::TimelineWidget* widget = timelineWidget()) widget->setFollow(true);
+  if (PanelEntry* p = m_panels.find(kLivePanelName)) p->open = true;
+  requestRedraw();
+  return m_live->begin(liveSymbolsConfig());
+}
+
+void App::onLiveAgentEvent(const AgentEvent& event) {
+  if (m_livePhase == LivePhase::None) return;
+  switch (event.kind) {
+    case AgentEventKind::LiveEnded:
+      if (m_livePhase == LivePhase::Waiting || m_livePhase == LivePhase::Running)
+        m_livePhase = LivePhase::Ended;
+      m_live->markEnded();
+      break;
+    case AgentEventKind::LiveFailed:
+      m_livePhase = LivePhase::Failed;
+      m_liveError = event.message;
+      m_live->markEnded();
+      break;
+    case AgentEventKind::CommandFailed:
+      // The agent refused the start: there will be no live capture.
+      if (event.command == "start" && m_livePhase == LivePhase::Waiting && m_liveSwaps == 0) closeLive();
+      break;
+    default: break;
+  }
+}
+
+void App::closeLive() {
+  if (m_livePhase == LivePhase::None && !m_live->active()) return;
+  m_capture->session().stopLiveFeed();
+  m_capture->session().setLiveModel(nullptr);
+  m_live->close();
+  m_livePhase = LivePhase::None;
+  m_liveError.clear();
+}
+
+void App::swapLiveDocument(std::shared_ptr<Document> document) {
+  const bool continuation =
+      m_document && m_document->isLive() && m_document->streamId() == document->streamId();
+  if (!continuation) {
+    m_symbolSetup.reset();
+    m_adoptSource.reset();
+  }
+  // The new document replaces the old one; the old one's queries are cancelled when it is destroyed. Threads
+  // with nothing in the window are left out of a snapshot (pruneIdleThreads), so a thread's index can differ
+  // from the previous snapshot's: the selection follows its threads by (pid, tid).
+  std::function<ThreadIdx(ThreadIdx)> threadMap;
+  if (continuation) threadMap = threadMapBetween(m_document->model(), document->model());
+  m_document = std::move(document);
+  ++m_documentGeneration;
+  if (!continuation) {
+    ++m_symbolGeneration;
+    m_selection.clear();
+  } else if (threadMap) {
+    m_selection.remapThreads(threadMap);
+  }
+  m_lastError.clear();
+  notifyDocumentChanged();
+  requestRedraw();
+}
+
+void App::pumpLive() {
+  if (m_livePhase == LivePhase::None || !m_live->active()) return;
+  std::shared_ptr<LivePublished> bundle = m_live->take();
+  if (!bundle) return;
+  auto document = std::make_shared<Document>(std::filesystem::path("Live capture"), bundle->model);
+  document->setStreamId(m_liveStream);
+  document->setLive(bundle->info);
+  document->setPrebuiltLod(bundle->lod);
+  document->setSymbols(bundle->symbols);
+  swapLiveDocument(std::move(document));
+  ++m_liveSwaps;
+  if (m_livePhase == LivePhase::Waiting) m_livePhase = LivePhase::Running;
+  if (bundle->info.ended) {
+    // The last snapshot of the capture: from here on the document is static. Free the LiveModel (its window
+    // and tables) and stop the worker; the document keeps what it needs.
+    m_capture->session().setLiveModel(nullptr);
+    m_live->close();
+  }
+}
+
+void App::setLivePaused(bool paused) {
+  if (m_livePhase == LivePhase::None) return;
+  m_live->setPaused(paused);
+  requestRedraw();
+}
+
+void App::setLiveFollow(bool follow) {
+  if (timeline::TimelineWidget* widget = timelineWidget()) widget->setFollow(follow);
+  requestRedraw();
+}
+
+void App::liveSaveLast() {
+  m_capture->flushSeconds(static_cast<int>(m_options.liveWindowSeconds));
+}
+
+void App::liveStop() {
+  m_capture->stopCaptureAndOpen();
+}
+
+LiveUiState App::liveUiState() {
+  LiveUiState s;
+  using Phase = LiveUiState::Phase;
+  switch (m_livePhase) {
+    case LivePhase::None: return s;
+    case LivePhase::Waiting: s.phase = Phase::Waiting; break;
+    case LivePhase::Running: s.phase = Phase::Running; break;
+    case LivePhase::Ended: s.phase = Phase::Ended; break;
+    case LivePhase::Failed: s.phase = Phase::Failed; break;
+  }
+  s.paused = m_live->paused();
+  const LiveFeedStatus feed = m_capture->session().liveStatus();
+  s.gaps = feed.gaps;
+  s.resubscribes = feed.resubscribes;
+  s.corruptBatches = feed.corruptBatches;
+  switch (feed.state) {
+    case LiveFeedStatus::State::Off: s.feedState = "off"; break;
+    case LiveFeedStatus::State::Subscribing: s.feedState = "subscribing"; break;
+    case LiveFeedStatus::State::Streaming: s.feedState = "streaming"; break;
+    case LiveFeedStatus::State::Resyncing: s.feedState = "resynchronising"; break;
+    case LiveFeedStatus::State::Ended: s.feedState = "ended"; break;
+    case LiveFeedStatus::State::Failed: s.feedState = "failed"; break;
+  }
+  s.error = m_liveError.empty() ? feed.error : m_liveError;
+  const AgentSnapshot agent = m_capture->session().snapshot();
+  const bool capturing =
+      agent.connection == ConnectionState::Connected && agent.phase == AgentPhase::Capturing;
+  s.canStop = capturing;
+  s.canSave = capturing && agent.circularMb > 0;
+  if (!s.canSave) {
+    s.saveHint = !capturing
+                     ? "The capture is not running."
+                     : "Only a circular capture can save its last 30 s: start it with a circular buffer "
+                       "(Capture > Live... > Circular buffer).";
+  }
+  if (m_document && m_document->isLive()) {
+    const model::TraceModel& model = m_document->model();
+    const LiveSnapshotInfo& info = m_document->live();
+    const double hz = static_cast<double>(std::max<uint64_t>(model.header.clock_frequency_hz, 1));
+    s.windowSeconds = static_cast<double>(model.header.end_ts - model.header.start_ts) / hz;
+    s.samples = info.samplesInWindow;
+    s.threads = static_cast<uint32_t>(model.threads.size());
+    s.droppedLive = info.droppedLive;
+    s.shownGeneration = info.generation;
+    if (!agent.remote && info.newestSampleTs != 0) {
+      if (const auto now = LiveSession::localTraceTicks(model); now && *now >= info.newestSampleTs) {
+        const double latency = static_cast<double>(*now - info.newestSampleTs) / hz;
+        if (latency < 3600.0) s.latencyS = latency;
+      }
+    }
+    if (timeline::TimelineWidget* widget = timelineWidget()) {
+      s.followAvailable = widget->hasDocument();
+      s.following = widget->following();
+    }
+  }
+  s.receivedGeneration = s.shownGeneration;
+  if (const std::shared_ptr<model::LiveModel> model = m_live->model())
+    s.receivedGeneration = model->generation();
+  const LiveSessionStats stats = m_live->stats();
+  s.swaps = m_liveSwaps;
+  s.buildMs = stats.lastTotalMs;
+  s.symbolEpochs = stats.symbols.epochs;
+  s.symbolModulesLoaded = stats.symbols.modulesLoaded;
+  return s;
+}
+
 bool App::frame(int waitMs) {
   const PlatformEvents events = m_renderer->pollEvents(waitMs);
   if (events.quit) m_quit = true;
@@ -689,6 +934,7 @@ bool App::frame(int waitMs) {
   pumpStream();
   pumpSymbolEvents();
   m_capture->pump();
+  pumpLive();
   if (m_document && (m_options.memoryCheckMs <= 0 || m_memoryGeneration != m_documentGeneration ||
                      Clock::now() - m_lastMemoryCheck >= std::chrono::milliseconds(m_options.memoryCheckMs)))
     checkMemory();
@@ -711,7 +957,8 @@ int App::run() {
   const auto framePeriod = std::chrono::microseconds(1000000 / std::max(1, m_options.targetFps));
   while (!m_quit) {
     const auto start = Clock::now();
-    const bool busy = m_jobs.activeCount() > 0 || m_redrawFrames > 0 || m_capture->hasPending();
+    const bool busy =
+        m_jobs.activeCount() > 0 || m_redrawFrames > 0 || m_capture->hasPending() || m_live->hasPublished();
     if (busy || !m_options.pacing) {
       frame(0);
     } else {
@@ -719,7 +966,7 @@ int App::run() {
       const PlatformEvents events = m_renderer->pollEvents(m_options.idleTimeoutMs);
       if (events.quit) m_quit = true;
       // The agent's events wake the loop; a running capture redraws its timer every idle timeout.
-      const bool captureWork = m_capture->hasPending() || m_capture->active();
+      const bool captureWork = m_capture->hasPending() || m_capture->active() || m_live->hasPublished();
       if (pumpSymbolEvents() || captureWork) frame(0);
       if (events.hadInput || !events.droppedFiles.empty()) {
         m_redrawFrames = 3;
@@ -883,6 +1130,22 @@ void App::drawStatusBar() {
       m_statusBar.draw(m_document.get(), m_selection.state(), m_lastError);
       if (m_statusBar.symbolsClicked()) m_selection.requestPanel(SymbolsPanel::kName);
       m_capture->drawStatusSegment();
+      if (m_livePhase != LivePhase::None) {
+        const LiveUiState live = liveUiState();
+        m_liveStatusLine = liveStatusText(live);
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        const ImVec4 red(1.0f, 0.4f, 0.4f, 1.0f), amber(1.0f, 0.75f, 0.2f, 1.0f);
+        const bool hot = (live.phase == LiveUiState::Phase::Running && !live.paused) ||
+                         live.phase == LiveUiState::Phase::Failed;
+        ImGui::TextColored(hot ? red : amber, "%s", m_liveStatusLine.c_str());
+        if (ImGui::IsItemClicked()) {
+          if (PanelEntry* p = m_panels.find(kLivePanelName)) p->open = true;
+        }
+      } else {
+        m_liveStatusLine.clear();
+      }
       const std::vector<JobQueue::Info> jobs = m_jobs.active();
       if (!jobs.empty()) {
         const JobQueue::Info& job = jobs.front();

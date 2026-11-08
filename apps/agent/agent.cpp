@@ -754,8 +754,12 @@ Result<CaptureSummary> Agent::performFlush(const FlushJob& job) {
     event.coalesced = m_coalesced;
     m_coalesced = 0;
     m_lastFlushPath = summary.path;
+    // The flush is over before anyone hears it is: a client that flushes again on this event is not refused
+    // as "already in progress". (Cleared under the same lock as the emit; see the worker in handleFlush.)
+    m_flushing = false;
     emit(event);
   }
+  m_flushDone.notify_all();
   TACHYON_LOG_INFO("agent: flushed '{}' ({} s window) -> {}", job.reason, job.seconds, summary.path);
   return summary;
 }
@@ -836,20 +840,30 @@ Response Agent::handleFlush(const FlushRequest& req) {
         auto flushed = performFlush(job);
         if (!flushed.ok()) {
           TACHYON_LOG_ERROR("agent: flush '{}' failed: {}", job.name, flushed.error().toString());
-          std::lock_guard lock(m_mutex);
-          emit(ErrorEvent{"flush '" + job.name + "' failed: " + flushed.error().message});
+          {
+            std::lock_guard lock(m_mutex);
+            emit(ErrorEvent{"flush '" + job.name + "' failed: " + flushed.error().message});
+            m_flushing = false;
+          }
+          m_flushDone.notify_all();
         }
-        endFlush();
+        // Never take m_mutex once m_flushing is false: the next trigger joins this thread while holding it.
       });
       return makeOkResponse(std::nullopt, planned);
     }
   }
+  // A successful performFlush ends the flush itself (before its event); only a failed one is ended here, so a
+  // flush another request started meanwhile is never marked finished by this one.
   struct FlushGuard {
     Agent& agent;
-    ~FlushGuard() { agent.endFlush(); }
+    bool dismissed = false;
+    ~FlushGuard() {
+      if (!dismissed) agent.endFlush();
+    }
   } flushGuard{*this};
   auto summary = performFlush(job);
   if (!summary.ok()) return makeErrorResponse(std::nullopt, summary.error());
+  flushGuard.dismissed = true;
   return makeOkResponse(std::nullopt, *summary);
 }
 

@@ -129,6 +129,14 @@ class TimelineWidget {
   TimeView view() const;
   void setView(TimeView view);
   void fit();
+  // ---- WP-65b: live view ----
+  // True once the document is a Live document (a snapshot of a running capture's window).
+  bool isLive() const;
+  // Follow (Live documents): the view is the whole window, ending at "now", and scrolls with each new
+  // snapshot. Any pan, zoom or navigation turns it off; setFollow(true) jumps back to the newest window. The
+  // flag survives the swap from one snapshot to the next; it only has an effect on Live documents.
+  bool following() const { return m_follow; }
+  void setFollow(bool follow);
   const std::optional<TickRange>& selectionRange() const { return m_selection; }
   void setSelectionRange(std::optional<TickRange> range) { m_selection = range; }
   // Applies the selection as the SelectionBus time filter (the F key). Returns false without a selection.
@@ -246,9 +254,13 @@ class TimelineWidget {
   // WP-64: when a streaming preview is replaced by the complete document of the same stream, the user's place
   // (view, row flags, scroll) carries over.
   uint64_t m_streamId = 0;
+  bool m_follow = true;     // WP-65b
+  TimeView m_viewBaseline;  // the view as this frame began (a change is the user's pan / zoom)
   struct Carry {
     TimeView view;
-    bool wasFit = false;  // the view showed the whole preview: show the whole trace now
+    uint64_t traceStart = 0;  // WP-65b: the view is relative to this tick (it moves with the window)
+    std::optional<TickRange> selection;  // WP-65b: kept across live snapshots
+    bool wasFit = false;                 // the view showed the whole preview: show the whole trace now
     std::vector<RowFlags> flags;
     std::vector<std::pair<uint32_t, uint32_t>> threadIds;  // (pid, tid) of `flags` (WP-67: map by id)
     float rowsScrollY = 0;

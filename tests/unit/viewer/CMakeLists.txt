@@ -16,7 +16,7 @@ tachyon_add_test(viewer_tests
           source_model_test.cpp source_widget_test.cpp
           capture_model_test.cpp session_explorer_catalog_test.cpp session_explorer_panel_test.cpp
           capture_agent_session_test.cpp capture_app_test.cpp capture_flight_recorder_test.cpp
-          capture_remote_test.cpp
+          capture_remote_test.cpp live_app_test.cpp live_session_test.cpp
           polish_banner_test.cpp polish_symbols_test.cpp polish_run_test.cpp polish_stream_test.cpp
           polish_functions_test.cpp
           ../agent/process_util.cpp

@@ -39,6 +39,9 @@ add_library(tachyon_viewer_core STATIC
   interaction/interaction_panel.cpp
   interaction/longest_waits_runner.cpp
   job_queue.cpp
+  live/live_panel.cpp
+  live/live_session.cpp
+  live/live_symbols.cpp
   null_renderer.cpp
   panel_registry.cpp
   paths.cpp

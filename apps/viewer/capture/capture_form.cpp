@@ -98,6 +98,7 @@ Result<control::StartRequest> buildStartRequest(const CaptureForm& f, const std:
   r.follow_children = f.followChildren;
   r.child_filter = f.childFilter;
   r.kernel_stacks = f.kernelStacks;
+  r.live = f.live;
   std::string stem = "system";
   if (f.mode == capture::CaptureMode::Launch) {
     r.exe = f.exe;

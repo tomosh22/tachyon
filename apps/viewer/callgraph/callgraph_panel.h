@@ -18,6 +18,7 @@
 #include "viewer/analysis_context.h"
 #include "viewer/callgraph/callgraph_model.h"
 #include "viewer/common/function_names.h"
+#include "viewer/common/live_stream.h"
 #include "viewer/panel.h"
 
 #include <chrono>
@@ -155,6 +156,7 @@ class CallGraphPanel final : public IPanel {
   void resolveExternalSelection();
   void dropStaleSubtreePath(const PanelContext& context);
   void resetDocumentState();
+  void refreshForLiveSnapshot();  // WP-65b
   void selectLocated(const callgraph::Located& at);
 
   void drawToolbar(const PanelContext& context);
@@ -171,6 +173,7 @@ class CallGraphPanel final : public IPanel {
   uint64_t m_delivered = 0;
   uint64_t m_documentGeneration = 0;
   bool m_haveDocument = false;
+  common::LiveStreamTracker m_live;  // WP-65b
   double m_pendingClockHz = 1e9;
   std::string m_message;
   std::string m_notice;        // shown instead of an empty message until the next filter change

@@ -46,8 +46,19 @@ void ButterflyPanel::resetDocumentState() {
   m_haveDocument = false;
 }
 
-void ButterflyPanel::onDocumentChanged(const Document*) {
+void ButterflyPanel::onDocumentChanged(const Document* document) {
+  // WP-65b: the next snapshot of a live capture keeps the butterfly on screen; only the query is redone.
+  if (m_live.onDocument(document) && m_haveDocument) {
+    refreshForLiveSnapshot();
+    return;
+  }
   resetDocumentState();
+}
+
+void ButterflyPanel::refreshForLiveSnapshot() {
+  m_query.cancel();
+  m_haveRequested = false;
+  m_requested = {};
 }
 
 void ButterflyPanel::onSelectionChanged(const PanelContext& context, const SelectionState& state,
@@ -128,8 +139,10 @@ void ButterflyPanel::update(const PanelContext& context) {
     return;
   }
   if (!m_haveDocument || context.documentGeneration != m_documentGeneration) {
-    resetDocumentState();
-    m_haveDocument = true;
+    if (!(m_haveDocument && m_live.consumeKeep())) {
+      resetDocumentState();
+      m_haveDocument = true;
+    }
     m_documentGeneration = context.documentGeneration;
   }
   if (!context.queryExecutor || !context.selection) return;
