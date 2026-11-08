@@ -146,7 +146,7 @@ struct LiveEncoder::Impl {
   uint64_t stringBytes = 0;
   size_t stringsEmitted = 0;
 
-  struct ProcEntry {
+  struct alignas(8) ProcEntry {
     trace::ProcessRec rec{};
     bool dirty = false;
   };
@@ -154,7 +154,7 @@ struct LiveEncoder::Impl {
   std::unordered_map<uint32_t, uint32_t> procByPid;
   std::vector<uint32_t> dirtyProcs;
 
-  struct ThreadEntry {
+  struct alignas(8) ThreadEntry {
     trace::ThreadRec rec{};
     bool emitted = false;
     bool dirty = false;  // needs a full ThreadDef
@@ -168,7 +168,7 @@ struct LiveEncoder::Impl {
   uint32_t lastThreadIdx = kInvalidIdx;
   uint64_t lastThreadKey = 0;
 
-  struct ModEntry {
+  struct alignas(8) ModEntry {
     trace::ModuleRec rec{};
     bool dirty = false;
     bool loaded = false;
@@ -682,7 +682,7 @@ void LiveEncoder::onContextSwitch(const capture::LiveContextSwitch& c) {
   if (m.ended) return;
   if (c.oldTid != 0 && c.oldPid != 0) (void)m.internThreadLocked(c.oldPid, c.oldTid);
   if (c.newTid != 0 && c.newPid != 0) (void)m.internThreadLocked(c.newPid, c.newTid);
-  trace::ContextSwitchRec r{};
+  alignas(8) trace::ContextSwitchRec r{};
   r.ts = c.ts;
   r.cpu = c.cpu;
   r.old_tid = c.oldTid;
@@ -705,7 +705,7 @@ void LiveEncoder::onReady(const capture::LiveReady& rd) {
   if (m.ended) return;
   if (rd.readiedTid != 0 && rd.readiedPid != 0) (void)m.internThreadLocked(rd.readiedPid, rd.readiedTid);
   if (rd.readyingTid != 0 && rd.readyingPid != 0) (void)m.internThreadLocked(rd.readyingPid, rd.readyingTid);
-  trace::ReadyRec r{};
+  alignas(8) trace::ReadyRec r{};
   r.ts = rd.ts;
   r.cpu = rd.cpu;
   r.readied_tid = rd.readiedTid;
@@ -725,7 +725,7 @@ void LiveEncoder::onScopeEvent(const capture::LiveScopeEvent& e) {
   Impl& m = *m_impl;
   if (m.ended) return;
   if (e.tid != 0 && e.pid != 0) (void)m.internThreadLocked(e.pid, e.tid);
-  trace::ScopeEventRec r{};
+  alignas(8) trace::ScopeEventRec r{};
   r.ts = e.ts;
   r.tid = e.tid;
   r.kind = e.kind;
@@ -744,7 +744,7 @@ void LiveEncoder::onFrameMark(const capture::LiveFrameMark& f) {
   Impl& m = *m_impl;
   if (m.ended) return;
   if (f.tid != 0 && f.pid != 0) (void)m.internThreadLocked(f.pid, f.tid);
-  trace::FrameMarkRec r{};
+  alignas(8) trace::FrameMarkRec r{};
   r.ts = f.ts;
   r.tid = f.tid;
   r.name = StringIdx(m.internStringLocked(f.name));
@@ -760,7 +760,7 @@ void LiveEncoder::onMarker(const capture::LiveMarker& mk) {
   Impl& m = *m_impl;
   if (m.ended) return;
   if (mk.tid != 0 && mk.pid != 0) (void)m.internThreadLocked(mk.pid, mk.tid);
-  trace::MarkerRec r{};
+  alignas(8) trace::MarkerRec r{};
   r.ts = mk.ts;
   r.tid = mk.tid;
   r.name = StringIdx(m.internStringLocked(mk.name));
@@ -776,7 +776,7 @@ void LiveEncoder::onPlot(const capture::LivePlot& p) {
   std::lock_guard lock(m_impl->mutex);
   Impl& m = *m_impl;
   if (m.ended) return;
-  trace::PlotSampleRec r{};
+  alignas(8) trace::PlotSampleRec r{};
   r.ts = p.ts;
   r.name = StringIdx(m.internStringLocked(p.name));
   r.value = p.value;

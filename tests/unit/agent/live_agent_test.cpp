@@ -2,6 +2,8 @@
 // subscribe / keyframe / batches / from_seq / unsubscribe / live_end / live_gap, status fields, remote
 // clients, and a live model of a whole replay that matches the final trace.
 #include "../control/test_util.h"
+#include "../inst/raw_client.h"
+#include "../inst/wire_builder.h"
 #include "agent/agent.h"
 #include "agent/stub_backend.h"
 #include "analysis/query.h"
@@ -497,6 +499,70 @@ TEST(LiveAgent, AClientThatDoesNotReadGetsALiveGapAndCanResubscribe) {
   ASSERT_TRUE(lc.until([&] { return lc.seqs.size() > before; }));
   EXPECT_TRUE(lc.keyframes[before]);
   EXPECT_TRUE(callOk(driver, CancelRequest{}));
+}
+
+TEST(LiveAgent, InstrumentationFromTheSdkIsForwardedLiveAndStillMergedIntoTheTrace) {
+  LiveHarness h(/*ms=*/100);
+  Client driver = h.connect();
+  ASSERT_TRUE(callOk(driver, h.liveStart("inst.tachyon")));
+  LiveClient lc(h.connect());
+  ASSERT_TRUE(callOk(lc.client, LiveSubscribeRequest{}));
+
+  auto hello = driver.call(InstHelloRequest{kPid, kProtocolApiVersion}, 10000);
+  ASSERT_TRUE(hello.ok());
+  ASSERT_TRUE(hello->ok) << hello->error;
+  const std::string address = std::get<InstHelloBody>(hello->body).pipe;
+  inst::testing_util::StreamBuilder b;
+  b.header(kPid, 1'000'000'000, kStart);
+  const uint64_t frameKey = b.string("RenderFrame");
+  const uint64_t updateKey = b.string("Update");
+  const uint64_t hitchKey = b.string("Hitch");
+  const uint64_t fpsKey = b.string("fps");
+  b.threadName(kStart + 10, kPid, "sdk-main");
+  b.scopeBegin(kStart + 1'000'000, kPid, frameKey);
+  b.scopeBegin(kStart + 1'100'000, kPid, updateKey, "dt=16");
+  b.scopeEnd(kStart + 1'400'000, kPid);
+  b.scopeEnd(kStart + 1'900'000, kPid);
+  b.frameMark(kStart + 2'000'000, kPid, frameKey, 7);
+  b.marker(kStart + 2'100'000, kPid, hitchKey, "slow");
+  b.plot(kStart + 2'200'000, fpsKey, 58.5);
+  b.dropped(kStart + 2'300'000, kPid, 3);
+  inst::testing_util::RawClient sdk;
+  ASSERT_TRUE(sdk.connect(address));
+  ASSERT_TRUE(sdk.send(b.bytes().data(), b.bytes().size()));
+
+  // The events reach the live model without any capture stop, scopes first.
+  ASSERT_TRUE(lc.until([&] {
+    auto snap = lc.model.snapshot();
+    return snap->scopeEvents.size() >= 4 && !snap->plots.empty();
+  }));
+  auto snap = lc.model.snapshot();
+  ASSERT_EQ(snap->scopeEvents.size(), 4u);
+  EXPECT_EQ(snap->strings.get(snap->scopeEvents[0].id), "RenderFrame");
+  EXPECT_EQ(snap->strings.get(snap->scopeEvents[1].id), "Update");
+  EXPECT_EQ(snap->strings.get(snap->scopeEvents[1].data), "dt=16");
+  EXPECT_EQ(snap->scopeEvents[0].kind, trace::kScopeBegin);
+  EXPECT_EQ(snap->scopeEvents[3].kind, trace::kScopeEnd);
+  ASSERT_EQ(snap->frameMarks.size(), 1u);
+  EXPECT_EQ(snap->frameMarks[0].frame_number, 7u);
+  ASSERT_EQ(snap->markers.size(), 1u);
+  EXPECT_EQ(snap->strings.get(snap->markers[0].data), "slow");
+  ASSERT_EQ(snap->plots.size(), 1u);
+  EXPECT_EQ(snap->plots[0].value[0], 58.5);
+  EXPECT_EQ(lc.model.stats().droppedLive, 3u);
+  // The thread name travelled as a rename of the (replayed) thread.
+  ASSERT_TRUE(snap->tidToThread.count(kPid));
+  EXPECT_EQ(snap->threads[snap->tidToThread.at(kPid).get()].name, "sdk-main");
+
+  // ... and the final trace has them too (the spool merge is unchanged).
+  h.pumpAll();
+  ASSERT_TRUE(callOk(driver, StopRequest{}));
+  auto done =
+      driver.waitForEvent([](const Event& e) { return std::holds_alternative<CaptureDoneEvent>(e); }, 20000);
+  ASSERT_TRUE(done.ok());
+  auto finalModel = model::TraceModel::load(std::get<CaptureDoneEvent>(*done).summary.path);
+  ASSERT_TRUE(finalModel.ok());
+  EXPECT_GE(finalModel->scopeEvents.size(), 4u);
 }
 
 TEST(LiveAgent, AuthenticatedRemoteClientsCanSubscribe) {

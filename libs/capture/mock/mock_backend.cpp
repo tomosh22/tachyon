@@ -212,7 +212,8 @@ struct MockBackend::LiveReplay {
           break;
         }
         case kSwitch: {
-          const trace::ContextSwitchRec r = model.contextSwitches[it.b];
+          alignas(8) trace::ContextSwitchRec r;
+          std::memcpy(static_cast<void*>(&r), &model.contextSwitches[it.b], sizeof r);
           LiveContextSwitch cs;
           cs.ts = r.ts;
           cs.cpu = r.cpu;
@@ -233,7 +234,8 @@ struct MockBackend::LiveReplay {
           break;
         }
         case kReady: {
-          const trace::ReadyRec r = model.readyEvents[it.b];
+          alignas(8) trace::ReadyRec r;
+          std::memcpy(static_cast<void*>(&r), &model.readyEvents[it.b], sizeof r);
           LiveReady rd;
           rd.ts = r.ts;
           rd.cpu = r.cpu;
@@ -251,7 +253,8 @@ struct MockBackend::LiveReplay {
           break;
         }
         case kScope: {
-          const trace::ScopeEventRec r = model.scopeEvents[it.b];
+          alignas(8) trace::ScopeEventRec r;
+          std::memcpy(static_cast<void*>(&r), &model.scopeEvents[it.b], sizeof r);
           LiveScopeEvent e;
           e.ts = r.ts;
           e.tid = r.tid;

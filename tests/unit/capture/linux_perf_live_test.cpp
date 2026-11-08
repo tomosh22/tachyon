@@ -515,5 +515,31 @@ TEST(LiveSource, DropsSamplesNotMetadataWhenTheQueueIsFullAndSaysSo) {
   EXPECT_FALSE(f.sink->processes.empty());  // the metadata made it
 }
 
+TEST(LiveSource, SampleChunksThatWaitedTooLongAreDroppedNotDecoded) {
+  Fixture f;
+  f.config.rootPids = {kProg};
+  LiveSourceConfig lc;
+  lc.decoder = f.config;
+  lc.maxLag = std::chrono::milliseconds(150);
+  lc.period = std::chrono::milliseconds(5);
+  LiveSource source(lc);
+  RecordBuilder meta;
+  f.program(meta);
+  source.submit(meta.bytes(), {});
+  RecordBuilder stale;
+  for (int i = 0; i < 8; ++i) Fixture::sample(stale, kProg, kProg, kStart + 1000 + i, {0x400100});
+  source.submit({}, stale.bytes());
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));  // the decoder has not started: they go stale
+  RecordBuilder fresh;
+  for (int i = 0; i < 3; ++i) Fixture::sample(fresh, kProg, kProg, kStart + 2000 + i, {0x400100});
+  source.start();
+  source.submit({}, fresh.bytes());
+  source.finish();
+  const LiveSourceStats st = source.stats();
+  EXPECT_EQ(st.droppedRecords, 8u);
+  EXPECT_EQ(f.sink->dropped, 8u);
+  EXPECT_EQ(f.sink->sampleCount(), 3u);  // the fresh ones were decoded
+}
+
 }  // namespace
 }  // namespace tachyon::capture::perf

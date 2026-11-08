@@ -31,6 +31,7 @@ constexpr uint32_t kBadTid = 0xFFFFFFFFu;  // the kernel's (pid_t)-1: a task tha
 constexpr int kMaxAncestors = 64;
 constexpr size_t kMaxForkSeen = 8192;
 constexpr size_t kMaxDeadThreads = 100000;
+constexpr size_t kMaxProcesses = 20000;
 constexpr uint64_t kKernelBase = 0xFFFF800000000000ull;
 
 uint64_t alignDown(uint64_t v) {
@@ -185,6 +186,10 @@ struct LiveDecoder::Impl {
     if (auto old = procs.find(pid); old != procs.end()) {
       retireProc(old->second, ts);
       procs.erase(old);
+    }
+    if (procs.size() > kMaxProcesses) {  // a long system-wide capture: forget the processes that are gone
+      for (auto it = procs.begin(); it != procs.end();)
+        it = (it->second.exited && !it->second.isRoot) ? procs.erase(it) : std::next(it);
     }
     Proc p;
     p.pid = pid;
@@ -879,7 +884,8 @@ void LiveSource::submit(std::span<const uint8_t> meta, std::span<const uint8_t> 
     if (m_queuedBytes + meta.size() > m_config.queueBytes + m_config.metaQueueBytes) {
       ++m_stats.metaLost;
     } else {
-      m_queue.push_back(Chunk{std::vector<uint8_t>(meta.begin(), meta.end()), rundown});
+      m_queue.push_back(Chunk{std::vector<uint8_t>(meta.begin(), meta.end()), rundown, false,
+                              std::chrono::steady_clock::now()});
       m_queuedBytes += meta.size();
     }
   }
@@ -890,7 +896,8 @@ void LiveSource::submit(std::span<const uint8_t> meta, std::span<const uint8_t> 
       m_stats.droppedRecords += records;
       m_droppedPending += records;
     } else {
-      m_queue.push_back(Chunk{std::vector<uint8_t>(data.begin(), data.end()), false});
+      m_queue.push_back(Chunk{std::vector<uint8_t>(data.begin(), data.end()), false, true,
+                              std::chrono::steady_clock::now()});
       m_queuedBytes += data.size();
     }
   }
@@ -929,6 +936,25 @@ void LiveSource::run() {
       m_queuedBytes = 0;
       dropped = std::exchange(m_droppedPending, 0);
       stopping = m_stop;
+    }
+    {
+      // Stale sample / switch chunks are dropped, not decoded (see LiveSourceConfig::maxLag).
+      const auto now = std::chrono::steady_clock::now();
+      uint64_t droppedHere = 0;
+      for (auto it = work.begin(); it != work.end();) {
+        if (it->data && now - it->queuedAt > m_config.maxLag) {
+          size_t consumed = 0;
+          (void)forEachRecord(it->bytes, consumed, [&](std::span<const uint8_t>) { ++droppedHere; });
+          it = work.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      if (droppedHere != 0) {
+        dropped += droppedHere;
+        std::lock_guard lock(m_mutex);
+        m_stats.droppedRecords += droppedHere;
+      }
     }
     if (!work.empty()) {
       const auto began = std::chrono::steady_clock::now();

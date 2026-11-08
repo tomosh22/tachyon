@@ -8,7 +8,8 @@
 //
 // --duration S   stop the capture after S seconds (default: until the launched target exits or Ctrl-C kills
 //                the CLI; --system and --attach need --duration)
-// --window S     seconds of trace the CLI keeps in its live window (default 30; what a late subscriber can get is
+// --window S     seconds of trace the CLI keeps in its live window (default 30; what a late subscriber can
+// get is
 //                the agent's own --live-window-seconds)
 // --interval S   seconds between summary lines (default 1)
 //

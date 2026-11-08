@@ -192,7 +192,9 @@ TEST(LiveRoundTrip, EveryRecordTypeSurvives) {
   ASSERT_EQ(m.scopeEvents.size(), 2u);
   EXPECT_EQ(m.strings.get(m.scopeEvents[0].id), "Update");
   EXPECT_EQ(m.strings.get(m.scopeEvents[0].data), "dt=1");
-  EXPECT_EQ(m.scopeEvents[0].caller_addr, 0x400015u);
+  const uint64_t callerAddr =
+      m.scopeEvents[0].caller_addr;  // copied: a reference to a packed member is misaligned
+  EXPECT_EQ(callerAddr, 0x400015u);
   ASSERT_EQ(m.frameMarks.size(), 1u);
   EXPECT_EQ(m.strings.get(m.frameMarks[0].name), "Frame");
   EXPECT_EQ(m.frameMarks[0].frame_number, 7u);
@@ -504,6 +506,7 @@ TEST(LiveSnapshot, AnalysisAcceptsTheSnapshot) {
     p.enc.onSample(2000 + i * 100, 100, tid, tid - 101, 0,
                    std::vector<uint64_t>{0x400010 + static_cast<uint64_t>(i % 5) * 0x10, 0x400200, 0x400300});
   }
+  const std::vector<uint64_t> blockingStack = {0x400010, 0x400200};
   for (int i = 0; i < 20; ++i) {
     capture::LiveContextSwitch cs;
     cs.ts = 2000 + i * 1000 + 50;
@@ -513,7 +516,7 @@ TEST(LiveSnapshot, AnalysisAcceptsTheSnapshot) {
     cs.newPid = 100;
     cs.newTid = 102;
     cs.oldState = 5;
-    cs.oldStack = std::vector<uint64_t>{0x400010, 0x400200};
+    cs.oldStack = blockingStack;
     p.enc.onContextSwitch(cs);
     cs.ts += 400;
     cs.oldTid = 102;

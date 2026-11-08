@@ -94,6 +94,10 @@ struct LiveSourceConfig {
   uint64_t queueBytes = 64ull << 20;       // pending sample / switch bytes before they are dropped
   uint64_t metaQueueBytes = 256ull << 20;  // pending metadata bytes before the source gives up
   std::chrono::milliseconds period{50};    // how often the thread decodes what is queued
+  // A sample / switch chunk that has waited this long when the thread gets to it is dropped (counted,
+  // reported with onDropped) instead of decoded: a live view that is seconds behind is worse than one with
+  // holes, and dropping the stale data lets the decoder catch up.
+  std::chrono::milliseconds maxLag{2000};
   // The trace clock (for the heartbeat); empty: CLOCK_MONOTONIC_RAW.
   std::function<uint64_t()> nowNs;
 };
@@ -133,6 +137,8 @@ class LiveSource {
   struct Chunk {
     std::vector<uint8_t> bytes;
     bool rundown = false;
+    bool data = false;  // sample / switch records (droppable)
+    std::chrono::steady_clock::time_point queuedAt;
   };
   void run();
 

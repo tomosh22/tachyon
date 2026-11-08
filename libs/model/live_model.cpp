@@ -22,13 +22,17 @@ uint64_t tsOf(const T& rec) {
   return ts;
 }
 
-// Aligned local copy of a packed record.
+// Aligned local copy of a packed record (see the ALIGNMENT RULE in docs/specs/trace-format.md): a member of a
+// packed struct that sits at an arbitrary address must not have a method called on it or a reference bound to
+// it, so records are read through this holder, whose storage is 8-aligned.
 template <typename T>
-T load(const std::byte* p) {
+struct Aligned {
   alignas(8) T v;
-  std::memcpy(static_cast<void*>(&v), p, sizeof(T));
-  return v;
-}
+  explicit Aligned(const std::byte* p) { std::memcpy(static_cast<void*>(&v), p, sizeof(T)); }
+  explicit Aligned(const T& src) {
+    std::memcpy(static_cast<void*>(&v), static_cast<const void*>(&src), sizeof(T));
+  }
+};
 
 template <typename T>
 size_t vecBytes(const std::vector<T>& v) {
@@ -246,7 +250,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
   size_t pos = 0;
   while (pos < data.size()) {
     if (data.size() - pos < sizeof(RecordHeader)) return corrupt("truncated record header");
-    const RecordHeader h = load<RecordHeader>(data.data() + pos);
+    const Aligned<RecordHeader> ha(data.data() + pos);
+    const RecordHeader& h = ha.v;
     pos += sizeof(RecordHeader);
     if (h.byte_len > data.size() - pos) return corrupt("record runs past the end of the batch");
     const std::byte* p = data.data() + pos;
@@ -272,7 +277,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         if (n != 4 + sizeof(trace::ProcessRec)) return corrupt("bad ProcessDef size");
         const uint32_t idx = u32At(0);
         if (idx >= kMaxProcesses) return corrupt("process index over the cap");
-        const auto r = load<trace::ProcessRec>(p + 4);
+        const Aligned<trace::ProcessRec> ra(p + 4);
+        const auto& r = ra.v;
         if (idx >= processes.size()) processes.resize(idx + 1);
         Process& pr = processes[idx];
         pr.pid = r.pid;
@@ -288,7 +294,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         if (n != 4 + sizeof(trace::ThreadRec)) return corrupt("bad ThreadDef size");
         const uint32_t idx = u32At(0);
         if (idx >= kMaxThreads) return corrupt("thread index over the cap");
-        const auto r = load<trace::ThreadRec>(p + 4);
+        const Aligned<trace::ThreadRec> ra(p + 4);
+        const auto& r = ra.v;
         if (idx >= threads.size()) threads.resize(idx + 1);
         if (idx >= samples.size()) samples.resize(idx + 1);
         ThreadSlot& slot = threads[idx];
@@ -311,7 +318,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         if (n != 4 + sizeof(trace::ModuleRec)) return corrupt("bad ModuleDef size");
         const uint32_t idx = u32At(0);
         if (idx >= kMaxModules) return corrupt("module index over the cap");
-        const auto r = load<trace::ModuleRec>(p + 4);
+        const Aligned<trace::ModuleRec> ra(p + 4);
+        const auto& r = ra.v;
         if (idx >= modules.size()) modules.resize(idx + 1);
         Module& m = modules[idx];
         m.pid = r.pid;
@@ -330,7 +338,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         if (n != 4 + sizeof(trace::FrameRec)) return corrupt("bad FrameDef size");
         const uint32_t idx = u32At(0);
         if (idx >= kMaxFrames) return corrupt("frame index over the cap");
-        const auto r = load<trace::FrameRec>(p + 4);
+        const Aligned<trace::FrameRec> ra(p + 4);
+        const auto& r = ra.v;
         if (idx >= frames.size()) frames.resize(idx + 1);
         frames[idx] = Frame{r.module, r.addr_or_rva};
         break;
@@ -339,7 +348,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         if (n != 4 + sizeof(trace::CallstackNodeRec)) return corrupt("bad NodeDef size");
         const uint32_t idx = u32At(0);
         if (idx >= kMaxNodes) return corrupt("node index over the cap");
-        const auto r = load<trace::CallstackNodeRec>(p + 4);
+        const Aligned<trace::CallstackNodeRec> ra(p + 4);
+        const auto& r = ra.v;
         if (idx == 0) break;  // the root is implicit
         if (r.parent.valid() && r.parent.get() >= idx) return corrupt("node parent does not precede it");
         if (!r.parent.valid()) return corrupt("non-root node without a parent");
@@ -376,7 +386,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
       case RecordType::ContextSwitches: {
         if (n % sizeof(trace::ContextSwitchRec) != 0) return corrupt("bad ContextSwitches size");
         for (size_t off = 0; off < n; off += sizeof(trace::ContextSwitchRec)) {
-          auto r = load<trace::ContextSwitchRec>(p + off);
+          Aligned<trace::ContextSwitchRec> ra(p + off);
+          auto& r = ra.v;
           r.old_thread_stack = checkNode(r.old_thread_stack);
           switches.add(r);
           noteTs(r.ts);
@@ -386,7 +397,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
       case RecordType::Ready: {
         if (n % sizeof(trace::ReadyRec) != 0) return corrupt("bad Ready size");
         for (size_t off = 0; off < n; off += sizeof(trace::ReadyRec)) {
-          auto r = load<trace::ReadyRec>(p + off);
+          Aligned<trace::ReadyRec> ra(p + off);
+          auto& r = ra.v;
           r.readying_stack = checkNode(r.readying_stack);
           readies.add(r);
           noteTs(r.ts);
@@ -396,7 +408,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
       case RecordType::Scopes: {
         if (n % sizeof(trace::ScopeEventRec) != 0) return corrupt("bad Scopes size");
         for (size_t off = 0; off < n; off += sizeof(trace::ScopeEventRec)) {
-          const auto r = load<trace::ScopeEventRec>(p + off);
+          const Aligned<trace::ScopeEventRec> ra(p + off);
+          const auto& r = ra.v;
           scopes.add(r);
           noteTs(r.ts);
         }
@@ -405,7 +418,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
       case RecordType::FrameMarks: {
         if (n % sizeof(trace::FrameMarkRec) != 0) return corrupt("bad FrameMarks size");
         for (size_t off = 0; off < n; off += sizeof(trace::FrameMarkRec)) {
-          const auto r = load<trace::FrameMarkRec>(p + off);
+          const Aligned<trace::FrameMarkRec> ra(p + off);
+          const auto& r = ra.v;
           frameMarks.add(r);
           noteTs(r.ts);
         }
@@ -414,7 +428,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
       case RecordType::Markers: {
         if (n % sizeof(trace::MarkerRec) != 0) return corrupt("bad Markers size");
         for (size_t off = 0; off < n; off += sizeof(trace::MarkerRec)) {
-          const auto r = load<trace::MarkerRec>(p + off);
+          const Aligned<trace::MarkerRec> ra(p + off);
+          const auto& r = ra.v;
           markers.add(r);
           noteTs(r.ts);
         }
@@ -423,7 +438,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
       case RecordType::Plots: {
         if (n % sizeof(trace::PlotSampleRec) != 0) return corrupt("bad Plots size");
         for (size_t off = 0; off < n; off += sizeof(trace::PlotSampleRec)) {
-          const auto r = load<trace::PlotSampleRec>(p + off);
+          const Aligned<trace::PlotSampleRec> ra(p + off);
+          const auto& r = ra.v;
           plots.add(r);
           noteTs(r.ts);
         }
@@ -445,7 +461,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
       }
       case RecordType::Info: {
         if (n < sizeof(InfoPayload)) return corrupt("short Info");
-        const auto r = load<InfoPayload>(p);
+        const Aligned<InfoPayload> ra(p);
+        const auto& r = ra.v;
         clockHz = r.clock_frequency_hz;
         platform = r.platform;
         samplingHz = r.sampling_hz;
@@ -597,26 +614,29 @@ std::shared_ptr<const TraceModel> LiveModel::Impl::buildSnapshot() const {
   };
   m.frameMarks.reserve(frameMarks.size());
   for (size_t i = frameMarks.head; i < frameMarks.v.size(); ++i) {
-    const auto r = frameMarks.v[i];
+    const Aligned<trace::FrameMarkRec> ra(frameMarks.v[i]);
+    const auto& r = ra.v;
     m.frameMarks.push_back(FrameMark{r.ts, threadOf(r.tid), r.name, r.frame_number});
   }
   m.markers.reserve(markers.size());
   for (size_t i = markers.head; i < markers.v.size(); ++i) {
-    const auto r = markers.v[i];
+    const Aligned<trace::MarkerRec> ra(markers.v[i]);
+    const auto& r = ra.v;
     m.markers.push_back(Marker{r.ts, threadOf(r.tid), r.name, r.data, r.color_rgba});
   }
   {
     std::unordered_map<uint32_t, size_t> seriesOf;
     for (size_t i = plots.head; i < plots.v.size(); ++i) {
-      const auto r = plots.v[i];
+      const Aligned<trace::PlotSampleRec> ra(plots.v[i]);
+      const auto& r = ra.v;
       auto [it, inserted] = seriesOf.emplace(r.name.get(), m.plots.size());
       if (inserted) {
         m.plots.emplace_back();
         m.plots.back().name = r.name;
       }
       PlotSeries& ps = m.plots[it->second];
-      ps.ts.push_back(r.ts);
-      ps.value.push_back(r.value);
+      ps.ts.push_back(static_cast<uint64_t>(r.ts));
+      ps.value.push_back(static_cast<double>(r.value));
     }
   }
   if (!m.scopeEvents.empty() || !m.frameMarks.empty() || !m.markers.empty() || !m.plots.empty())
