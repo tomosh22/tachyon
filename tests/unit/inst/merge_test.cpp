@@ -17,6 +17,10 @@
 #include <iterator>
 #include <tuple>
 
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
+
 namespace tachyon::inst {
 namespace {
 
@@ -194,6 +198,22 @@ TEST(Merge, InPlaceGoesThroughATemporaryFileAndLeavesNothingBehind) {
 }
 
 #if !defined(_WIN32)
+TEST(Merge, TheReportCarriesTheIdentityOfTheFileRenamedIntoPlace) {
+  TempDir dir;
+  const BaseTrace base = writeBaseTrace(dir.path() / "base.tachyon");
+  const fs::path copy = dir.path() / "copy.tachyon";
+  fs::copy_file(base.path, copy);
+  const fs::path inst = sampleInstrumentation().write(dir.path() / "app.tachyon-inst");
+  const MergeInput in{inst};
+  auto merged = mergeInstrumentation(copy, std::span<const MergeInput>(&in, 1));
+  ASSERT_TRUE(merged.ok()) << merged.error().toString();
+  ASSERT_TRUE(merged->outputIdentity.has_value());
+  struct stat st {};
+  ASSERT_EQ(::stat(copy.c_str(), &st), 0);
+  EXPECT_EQ(merged->outputIdentity->volume, static_cast<uint64_t>(st.st_dev));
+  EXPECT_EQ(merged->outputIdentity->index, static_cast<uint64_t>(st.st_ino));
+}
+
 // WP-66b: the temporary file is created exclusively and written through its reservation; the final rename
 // replaces a link at the destination instead of writing through it.
 TEST(Merge, ALinkAtTheDestinationIsReplacedNotWrittenThrough) {

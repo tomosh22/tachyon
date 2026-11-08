@@ -368,6 +368,9 @@ Result<CaptureResult> WindowsEtwBackend::stop() {
   notify(CaptureState::Converting, 0.0f);
   etlconvert::ConvertOptions co = convertOptionsFor(options, cfg, *counters);
   co.progress = [this](float p) { notify(CaptureState::Converting, p); };
+  if (options.reservedOutput)
+    co.reservedOutput =
+        trace::TraceWriter::ReservedFile{options.reservedOutput->volume, options.reservedOutput->index};
 
   std::error_code ec;
   if (options.outPath.has_parent_path()) fs::create_directories(options.outPath.parent_path(), ec);

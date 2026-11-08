@@ -250,17 +250,18 @@ class Agent final : public control::IRequestHandler {
   // Detaches the session's ingest (null when none) and reports whether it is a circular capture.
   std::shared_ptr<inst::Ingest> takeIngest(bool& circular);
   // Stops the ingest, runs the backend's stop() and merges the spools into the result. Never holds m_mutex.
-  // `stillReserved` is set to the reserved identity of the trace when nothing replaced the file after the
-  // check (no instrumentation merge), so noteProduced can compare it.
+  // `expectedIdentity` is set to the identity the trace file must have: the reserved file, or the file the
+  // instrumentation merge renamed into place. noteProduced compares it.
   Result<capture::CaptureResult> stopAndMerge(std::vector<std::string>& warnings,
-                                              std::optional<control::FileIdentity>& stillReserved);
+                                              std::optional<control::FileIdentity>& expectedIdentity);
   // True when inst_hello from `pid` belongs to the running capture (see the class comment).
   bool instPidAllowedLocked(uint32_t pid) const;
   // Merges the spools into the trace of `result`; logs problems instead of failing the capture.
   // Returns the problems worth telling the client (they end up in CaptureSummary::warnings).
   std::vector<std::string> mergeSpools(inst::Ingest& ingest, const std::vector<inst::SpoolInfo>& spools,
                                        const capture::CaptureResult& result, bool clip, bool removeWhenDone,
-                                       const std::string& captureInfoPatch = {});
+                                       const std::string& captureInfoPatch = {},
+                                       std::optional<control::FileIdentity>* mergedIdentity = nullptr);
 
   std::unique_ptr<capture::ICaptureBackend> m_backend;
   AgentConfig m_config;

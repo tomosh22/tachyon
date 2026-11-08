@@ -561,6 +561,7 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
                      "cannot move the merged trace to " + outPath.string() + ": " + ec.message());
   guard.armed = false;
   report.wroteOutput = true;
+  report.outputIdentity = reservedTmp.second;
   return report;
 }
 

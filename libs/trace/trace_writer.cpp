@@ -82,6 +82,8 @@ class OutFile {
     if (GetFileInformationByHandle(h, &info) == 0) return fail(path, "cannot query the file");
     if ((info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0)
       return fail(path, "is a link or a directory, not a regular file");
+    if (mode != Mode::CreateNew && info.nNumberOfLinks != 1)
+      return fail(path, "has more than one hard link; refusing to overwrite a file that may be shared");
     if (mode == Mode::CreateNew) {
       m_identity = {info.dwVolumeSerialNumber,
                     (static_cast<uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow};
@@ -117,8 +119,12 @@ class OutFile {
     if (!S_ISREG(st.st_mode)) return fail(path, "is not a regular file");
     m_identity = {static_cast<uint64_t>(st.st_dev), static_cast<uint64_t>(st.st_ino)};
     if (mode == Mode::CreateNew) return ok();
+    // A hard link planted at the name (rm + ln by another user) would make the truncate below destroy the
+    // file it points to: an existing file that has other names is never overwritten.
+    if (st.st_nlink != 1)
+      return fail(path, "has more than one hard link; refusing to overwrite a file that may be shared");
     if (expected != nullptr && (static_cast<uint64_t>(st.st_dev) != expected->volume ||
-                                static_cast<uint64_t>(st.st_ino) != expected->index || st.st_nlink != 1))
+                                static_cast<uint64_t>(st.st_ino) != expected->index))
       return fail(path, "is not the file that was reserved for it");
     if (::ftruncate(fd, 0) != 0) return fail(path, "cannot truncate the file");
     return ok();

@@ -60,5 +60,35 @@ TEST_F(PerfOutputDir, ASymlinkAtTheOutputPathIsNotWrittenThrough) {
   EXPECT_TRUE(fs::is_symlink(out));
 }
 
+TEST_F(PerfOutputDir, TheReservedFileIsWrittenInPlaceAndAnotherFileIsRefused) {
+  const fs::path out = m_dir / "reserved.tachyon";
+  auto reserved = trace::TraceWriter::reserveNew(out);
+  ASSERT_TRUE(reserved.ok());
+  ConvertOptions options;
+  options.reservedOutput = *reserved;
+  auto stats = convertSpool(m_set, out, options);
+  ASSERT_TRUE(stats.ok()) << stats.error().toString();
+  EXPECT_GT(fs::file_size(out), 64u);
+
+  // Swapped for another regular file after the reservation: nothing is written into it.
+  const fs::path out2 = m_dir / "swapped.tachyon";
+  auto reserved2 = trace::TraceWriter::reserveNew(out2);
+  ASSERT_TRUE(reserved2.ok());
+  std::ofstream(m_dir / "other") << "OTHER";
+  fs::rename(m_dir / "other", out2);
+  options.reservedOutput = *reserved2;
+  EXPECT_FALSE(convertSpool(m_set, out2, options).ok());
+  EXPECT_EQ(slurp(out2), "OTHER");
+}
+
+TEST_F(PerfOutputDir, AHardLinkedOutputIsNeverTruncated) {
+  const fs::path victim = m_dir / "victim";
+  std::ofstream(victim) << "PRECIOUS";
+  const fs::path out = m_dir / "out.tachyon";
+  fs::create_hard_link(victim, out);
+  EXPECT_FALSE(convertSpool(m_set, out, {}).ok());
+  EXPECT_EQ(slurp(victim), "PRECIOUS");
+}
+
 }  // namespace
 }  // namespace tachyon::capture::perf

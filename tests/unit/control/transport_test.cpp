@@ -191,5 +191,21 @@ TEST(PipeNames, APrivateAgentPipeGetsItsOwnInstrumentationNamespace) {
   EXPECT_NE(windowsInstrumentationPipeName(R"(\\.\pipe\tachyon-agen)", 5), R"(\\.\pipe\tachyon-inst-5)");
 }
 
+TEST(PipeNames, ALongAgentPipeFallsBackToAHashOfTheAddress) {
+  const std::string longPipe = R"(\\.\pipe\)" + std::string(300, 'a');
+  const std::string name = windowsInstrumentationPipeName(longPipe, 99);
+  EXPECT_LE(name.size(), kMaxWindowsPipeNameChars);
+  EXPECT_EQ(name.rfind(R"(\\.\pipe\tachyon-inst-)", 0), 0u);
+  EXPECT_EQ(name.substr(name.size() - 3), "-99");
+  EXPECT_EQ(name, windowsInstrumentationPipeName(longPipe, 99)) << "deterministic";
+  EXPECT_NE(name, windowsInstrumentationPipeName(longPipe, 100));
+  EXPECT_NE(name, windowsInstrumentationPipeName(R"(\\.\pipe\)" + std::string(301, 'a'), 99));
+  // Case-folded like the pipe namespace.
+  EXPECT_EQ(name, windowsInstrumentationPipeName(R"(\\.\PIPE\)" + std::string(300, 'A'), 99));
+  // Just under the limit keeps the readable form.
+  const std::string fits = R"(\\.\pipe\)" + std::string(200, 'a');
+  EXPECT_EQ(windowsInstrumentationPipeName(fits, 5), fits + "-tachyon-inst-5");
+}
+
 }  // namespace
 }  // namespace tachyon::control

@@ -217,7 +217,9 @@ std::string remoteOutDirWarning(const std::filesystem::path& dir) {
   if (othersCanWrite && !sticky)
     return dir.string() +
            " is writable by group or others: a local user could delete or replace the traces the agent "
-           "writes there (they cannot redirect a write through a link); run: chmod go-w " +
+           "writes there. The agent never writes through a symbolic link or into a file with another hard "
+           "link, and checks the identity of the file afterwards, so such a user can make a capture fail but "
+           "not redirect it; run: chmod go-w " +
            dir.string();
   return {};
 #endif
@@ -390,6 +392,7 @@ Response Agent::handleStart(const StartRequest& req, bool remote) {
     reservation.identity = *reserved;
     reservation.active = true;
     reservedIdentity = *reserved;
+    opts.reservedOutput = capture::ReservedOutput{reserved->volume, reserved->index};
   } else if (req.out_path.empty()) {
     const auto now =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
@@ -555,7 +558,8 @@ std::shared_ptr<inst::Ingest> Agent::takeIngest(bool& circular) {
 
 std::vector<std::string> Agent::mergeSpools(inst::Ingest& ingest, const std::vector<inst::SpoolInfo>& spools,
                                             const capture::CaptureResult& result, bool clip,
-                                            bool removeWhenDone, const std::string& captureInfoPatch) {
+                                            bool removeWhenDone, const std::string& captureInfoPatch,
+                                            std::optional<control::FileIdentity>* mergedIdentity) {
   std::vector<std::string> warnings;
   if (const uint32_t rejected = ingest.rejectedConnections(); rejected > 0)
     warnings.push_back(
@@ -619,13 +623,15 @@ std::vector<std::string> Agent::mergeSpools(inst::Ingest& ingest, const std::vec
     TACHYON_LOG_WARN("agent: instrumentation: {}", warning);
     warnings.push_back("instrumentation: " + warning);
   }
+  if (mergedIdentity != nullptr && merged->wroteOutput && merged->outputIdentity)
+    *mergedIdentity = control::FileIdentity{merged->outputIdentity->volume, merged->outputIdentity->index};
   if (removeWhenDone && !m_config.keepInstSpool) ingest.removeSpoolDir();
   return warnings;
 }
 
 Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& warnings,
-                                                   std::optional<control::FileIdentity>& stillReserved) {
-  stillReserved.reset();
+                                                   std::optional<control::FileIdentity>& expectedIdentity) {
+  expectedIdentity.reset();
   bool circular = false;
   std::shared_ptr<inst::Ingest> ingest = takeIngest(circular);
   // Drain the SDK connections first: what the processes had already sent belongs to the capture.
@@ -644,13 +650,13 @@ Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& war
     // The reserved file itself is checked: a backend may report another path (or none it wrote).
     if (auto checked = checkReserved(reservedPath, reserved); !checked.ok()) {
       result = checked.error();
-    } else if (!ingest && reserved && result->tracePath == reservedPath) {
-      stillReserved = reserved;  // nothing replaces the file after this check
+    } else if (reserved && result->tracePath == reservedPath) {
+      expectedIdentity = reserved;  // replaced below when an instrumentation merge renames a new file in
     }
   }
   if (ingest) {
     if (result.ok()) {
-      warnings = mergeSpools(*ingest, spools, *result, circular, true);
+      warnings = mergeSpools(*ingest, spools, *result, circular, true, {}, &expectedIdentity);
     } else {
       ingest->removeSpoolDir();
     }
@@ -660,9 +666,9 @@ Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& war
 
 void Agent::conversionWorker() {
   std::vector<std::string> warnings;
-  std::optional<control::FileIdentity> stillReserved;
-  auto result = stopAndMerge(warnings, stillReserved);
-  if (result.ok()) noteProduced(result->tracePath, stillReserved);
+  std::optional<control::FileIdentity> expectedIdentity;
+  auto result = stopAndMerge(warnings, expectedIdentity);
+  if (result.ok()) noteProduced(result->tracePath, expectedIdentity);
   std::lock_guard lock(m_mutex);
   if (result.ok()) {
     TACHYON_LOG_INFO("agent: capture done: {} ({} events lost)", result->tracePath.string(),
@@ -728,16 +734,14 @@ Result<CaptureSummary> Agent::performFlush(const FlushJob& job) {
                             ",\"flush_window_s\":" + std::to_string(job.seconds) +
                             ",\"flush_trigger\":" + (job.trigger ? "true" : "false") + "}";
   std::vector<std::string> flushWarnings;
-  bool merged = false;
+  // The file must be the reserved one, or the one the instrumentation merge renamed into place over it.
+  std::optional<control::FileIdentity> expectedIdentity;
+  if (result->tracePath == job.dir / (job.name + ".tachyon")) expectedIdentity = job.reserved;
   if (std::shared_ptr<inst::Ingest> ingest = currentIngest()) {
-    merged = true;
     const std::vector<inst::SpoolInfo> spools = ingest->snapshot();
-    flushWarnings = mergeSpools(*ingest, spools, *result, true, false, patch);
+    flushWarnings = mergeSpools(*ingest, spools, *result, true, false, patch, &expectedIdentity);
   }
-  // After the merge: it replaces the file, so the reserved identity only applies when there was no merge.
-  std::optional<control::FileIdentity> stillReserved;
-  if (!merged && result->tracePath == job.dir / (job.name + ".tachyon")) stillReserved = job.reserved;
-  noteProduced(result->tracePath, stillReserved);
+  noteProduced(result->tracePath, expectedIdentity);
   CaptureSummary summary = toSummary(*result, std::move(flushWarnings));
   FlushedEvent event;
   event.path = summary.path;
@@ -1110,9 +1114,9 @@ void Agent::shutdown() {
   }
   if (needStop) {
     std::vector<std::string> warnings;
-    std::optional<control::FileIdentity> stillReserved;
-    auto result = stopAndMerge(warnings, stillReserved);
-    if (result.ok()) noteProduced(result->tracePath, stillReserved);
+    std::optional<control::FileIdentity> expectedIdentity;
+    auto result = stopAndMerge(warnings, expectedIdentity);
+    if (result.ok()) noteProduced(result->tracePath, expectedIdentity);
     std::lock_guard lock(m_mutex);
     if (result.ok()) {
       TACHYON_LOG_INFO("agent: shutdown stopped capture: {}", result->tracePath.string());

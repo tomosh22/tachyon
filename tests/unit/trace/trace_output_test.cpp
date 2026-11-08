@@ -143,6 +143,17 @@ TEST(TraceOutput, AHardLinkToAnotherFileIsRefusedForAReservedFile) {
   EXPECT_NE(writeSmall(TraceWriter::open(out, someHeader(), *reserved)), "");
 }
 
+TEST(TraceOutput, AHardLinkPlantedAtTheNameIsNeverTruncatedByName) {
+  Dir dir;
+  const fs::path victim = dir.path() / "victim";
+  spit(victim, "PRECIOUS");
+  const fs::path out = dir.path() / "out.tachyon";
+  fs::create_hard_link(victim, out);  // rm + ln by another user in a shared directory
+  const std::string error = writeSmall(TraceWriter::open(out, someHeader()));
+  EXPECT_NE(error.find("hard link"), std::string::npos) << error;
+  EXPECT_EQ(slurp(victim), "PRECIOUS");
+}
+
 TEST(TraceOutput, TheReservedFileItselfIsWritten) {
   Dir dir;
   const fs::path out = dir.path() / "out.tachyon";
