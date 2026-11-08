@@ -13,8 +13,8 @@
 #include "model/model.h"
 #include "trace/trace_reader.h"
 
-#include <nlohmann/json.hpp>
 #include <zstd.h>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -245,7 +245,7 @@ class SamplePrefixReader {
     while (dst.pos < dst.size) {
       const size_t hint = ZSTD_decompressStream(m_dctx, &dst, &in);
       if (ZSTD_isError(hint)) return false;
-      if (hint == 0) break;  // frame complete
+      if (hint == 0) break;                                       // frame complete
       if (in.pos == in.size && dst.pos < dst.size) return false;  // truncated input
     }
     return dst.pos == dst.size;

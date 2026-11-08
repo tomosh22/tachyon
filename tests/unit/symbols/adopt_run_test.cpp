@@ -61,8 +61,11 @@ model::TraceModel makeModel(size_t extraFrames) {
     mod.id.bytes[0] = static_cast<uint8_t>(m.modules.size() + 1);
     m.modules.push_back(mod);
   }
-  m.frames = {{ModuleIdx(0), 0x1010}, {ModuleIdx(0), 0x1110}, {ModuleIdx(1), 0x1010},
-              {ModuleIdx(2), 0x1010}, {ModuleIdx(3), 0x1210}};
+  m.frames = {{ModuleIdx(0), 0x1010},
+              {ModuleIdx(0), 0x1110},
+              {ModuleIdx(1), 0x1010},
+              {ModuleIdx(2), 0x1010},
+              {ModuleIdx(3), 0x1210}};
   for (size_t i = 0; i < extraFrames; ++i)  // the complete model knows more frames of the same modules
     m.frames.push_back({ModuleIdx(static_cast<uint32_t>(i % 4)), 0x1000 + 0x10 * i});
   m.nodes.push_back(model::CallstackNode{CallstackIdx::invalid(), FrameIdx::invalid()});
@@ -82,15 +85,17 @@ std::unique_ptr<SymbolService> makeService(Counters& counters,
                                            std::shared_ptr<SymbolStringTable> strings = nullptr) {
   auto svc = std::make_unique<SymbolService>(std::vector<std::string>{}, std::filesystem::path{},
                                              std::move(strings));
-  svc->setLocate([&counters](const Module& mod, const std::atomic<bool>* cancel) -> Result<std::filesystem::path> {
-    ++counters.located;
-    if (mod.path == "b.exe") return makeError(ErrorCode::NotFound, "no symbols for b.exe");
-    if (mod.path == "c.exe" && counters.holdC.load()) {
-      while (!cancel->load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      return makeError(ErrorCode::Cancelled, "cancelled");
-    }
-    return std::filesystem::path("t.sym");
-  });
+  svc->setLocate(
+      [&counters](const Module& mod, const std::atomic<bool>* cancel) -> Result<std::filesystem::path> {
+        ++counters.located;
+        if (mod.path == "b.exe") return makeError(ErrorCode::NotFound, "no symbols for b.exe");
+        if (mod.path == "c.exe" && counters.holdC.load()) {
+          while (!cancel->load(std::memory_order_acquire))
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          return makeError(ErrorCode::Cancelled, "cancelled");
+        }
+        return std::filesystem::path("t.sym");
+      });
   SymbolStringTable& sink = svc->stringSink();
   svc->setProviderFactory([&sink, &counters](const Module&, const std::filesystem::path&) {
     ++counters.created;

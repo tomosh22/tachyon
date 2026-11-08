@@ -177,7 +177,8 @@ TEST(StreamingApp, TheCompleteDocumentAdoptsThePreviewsFinishedSymbols) {
   EXPECT_EQ(&fullSymbols->symbolStrings(), &previewSymbols->symbolStrings());
   // The frames of the complete model resolve through the adopted providers.
   size_t resolved = 0;
-  for (uint32_t f = 0; f < full->model().frames.size(); ++f) resolved += fullSymbols->lookup(FrameIdx(f)).resolved;
+  for (uint32_t f = 0; f < full->model().frames.size(); ++f)
+    resolved += fullSymbols->lookup(FrameIdx(f)).resolved;
   EXPECT_GT(resolved, 0u);
 }
 

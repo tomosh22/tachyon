@@ -132,7 +132,8 @@ Result<void> SymbolService::addSymbolFileOverride(const std::filesystem::path& s
 
 size_t SymbolService::adoptRun(SymbolService& previous) {
   if (&previous == this || !previous.m_job || previous.m_strings != m_strings) return 0;
-  // Stop the previous run (its workers abandon unfinished modules back to Pending), then take what it finished.
+  // Stop the previous run (its workers abandon unfinished modules back to Pending), then take what it
+  // finished.
   previous.m_job->cancel.store(true, std::memory_order_release);
   for (std::thread& t : previous.m_job->threads)
     if (t.joinable()) t.join();
