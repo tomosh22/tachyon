@@ -323,7 +323,35 @@ struct TraceCounts {
   uint64_t switches = 0;
   uint64_t readies = 0;
   uint64_t firstSampleTs = ~uint64_t{0}, lastSampleTs = 0;
+  std::vector<uint64_t> sampleTs;  // every target sample, unsorted
 };
+
+std::vector<uint64_t> targetSampleTs(const model::TraceModel& m) {
+  std::vector<uint64_t> out;
+  for (size_t t = 0; t < m.threads.size(); ++t)
+    if (m.threads[t].is_target)
+      out.insert(out.end(), m.samplesByThread[t].ts.begin(), m.samplesByThread[t].ts.end());
+  return out;
+}
+
+// Samples per second of trace time, counted from `t0`, as "n0 n1 n2 ...".
+std::string secondsHistogram(const std::vector<uint64_t>& ts, uint64_t t0) {
+  const double freq = static_cast<double>(etw::traceClockFrequency());
+  std::vector<uint64_t> buckets;
+  uint64_t before = 0;
+  for (uint64_t t : ts) {
+    if (t < t0) {
+      ++before;
+      continue;
+    }
+    const auto b = static_cast<size_t>(static_cast<double>(t - t0) / freq);
+    if (b >= buckets.size()) buckets.resize(b + 1, 0);
+    ++buckets[b];
+  }
+  std::string out = "(before " + std::to_string(before) + ")";
+  for (uint64_t n : buckets) out += " " + std::to_string(n);
+  return out;
+}
 
 TraceCounts countTrace(const fs::path& path) {
   TraceCounts c;
@@ -336,6 +364,7 @@ TraceCounts countTrace(const fs::path& path) {
     if (!m->threads[t].is_target) continue;
     const auto& ts = m->samplesByThread[t].ts;
     c.targetSamples += ts.size();
+    c.sampleTs.insert(c.sampleTs.end(), ts.begin(), ts.end());
     if (!ts.empty()) {
       c.firstSampleTs = std::min<uint64_t>(c.firstSampleTs, ts.front());
       c.lastSampleTs = std::max<uint64_t>(c.lastSampleTs, ts.back());
@@ -445,6 +474,13 @@ TEST_F(EtwLiveTest, AgentSpinLive) {
   const auto fin =
       leafShares(*finalModel, finalSnap->header.start_ts, finalSnap->header.end_ts, &finalSamples);
   report("live samples=" + std::to_string(liveSamples) + " final samples=" + std::to_string(finalSamples));
+  {
+    const std::vector<uint64_t> finalTs = targetSampleTs(*finalModel);
+    const std::vector<uint64_t> liveTs = targetSampleTs(*finalSnap);
+    const uint64_t first = finalTs.empty() ? 0 : *std::min_element(finalTs.begin(), finalTs.end());
+    report("final samples per second from its first sample: " + secondsHistogram(finalTs, first));
+    report("live  samples per second from the same instant:  " + secondsHistogram(liveTs, first));
+  }
   EXPECT_GT(liveSamples, 10000u);
   EXPECT_NEAR(static_cast<double>(liveSamples), static_cast<double>(finalSamples),
               0.03 * static_cast<double>(finalSamples) + 100)
@@ -540,20 +576,35 @@ TEST_F(EtwLiveTest, LiveDoesNotChangeTheFinalTrace) {
   EXPECT_GT(sink.heartbeats, 20u);
 
   const double p50 = percentile(sink.latencies, 0.5), p95 = percentile(sink.latencies, 0.95);
-  const double decodePct = 100.0 * d.live.decodeCpuSeconds / live->wallS;
-  const double consumerPct = 100.0 * d.liveConsumer.cpuSeconds / live->wallS;
-  char buf[512];
+  // The cost of the live path as wall time spent working (GetThreadTimes is too coarse for threads that run
+  // in short bursts), as a share of one core over the capture.
+  const double decodePct = 100.0 * d.live.decodeSeconds / live->wallS;
+  const double consumerPct = 100.0 * d.liveConsumer.callbackSeconds / live->wallS;
+  char buf[1024];
   std::snprintf(buf, sizeof buf,
-                "live cost: decoder cpu %.2f s (%.1f%% of one core), consumer cpu %.2f s (%.1f%%), events "
-                "seen %llu, buffers %llu, decoded samples/switches/readies %llu/%llu/%llu, backend-level "
-                "sample age p50 %.3f p95 %.3f s, max event age in queue %.3f s",
-                d.live.decodeCpuSeconds, decodePct, d.liveConsumer.cpuSeconds, consumerPct,
+                "live cost: decoder busy %.3f s (%.2f%% of one core; thread cpu %.3f s), consumer callbacks "
+                "%.3f s (%.2f%%; thread cpu %.3f s), events seen %llu, buffers %llu, decoded "
+                "samples/switches/readies %llu/%llu/%llu, not-target %llu, stacks matched/unmatched "
+                "%llu/%llu, without stack %llu, backend-level sample age p50 %.3f p95 %.3f s, max event age "
+                "in queue %.3f s",
+                d.live.decodeSeconds, decodePct, d.live.decodeCpuSeconds, d.liveConsumer.callbackSeconds,
+                consumerPct, d.liveConsumer.cpuSeconds,
                 static_cast<unsigned long long>(d.liveConsumer.events),
                 static_cast<unsigned long long>(d.liveConsumer.buffers),
                 static_cast<unsigned long long>(d.live.decoder.samples),
                 static_cast<unsigned long long>(d.live.decoder.switches),
-                static_cast<unsigned long long>(d.live.decoder.readies), p50, p95, d.live.maxEventAgeSeconds);
+                static_cast<unsigned long long>(d.live.decoder.readies),
+                static_cast<unsigned long long>(d.live.decoder.droppedNotTarget),
+                static_cast<unsigned long long>(d.live.decoder.stacksMatched),
+                static_cast<unsigned long long>(d.live.decoder.stacksUnmatched),
+                static_cast<unsigned long long>(d.live.decoder.parentsWithoutStack), p50, p95,
+                d.live.maxEventAgeSeconds);
   report(buf);
+  // Where do the samples that the live path did not see lie in time?
+  report("final samples per second from its first sample: " +
+         secondsHistogram(live->counts.sampleTs, live->counts.firstSampleTs));
+  report("live  samples per second from the same instant:  " +
+         secondsHistogram(sink.sampleTs, live->counts.firstSampleTs));
   EXPECT_LT(p95, 3.0);
   EXPECT_LT(decodePct, 50.0);
 }
