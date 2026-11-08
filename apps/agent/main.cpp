@@ -89,6 +89,7 @@ void printUsage() {
       "[--etw-delete-raw] [--perf-delete-raw] [--perf-ring-pages N]\n"
       "                     [--inst-spool-mb N] [--inst-spool-dir DIR] [--keep-inst-spool]\n"
       "                     [--flush-seconds N] [--flush-coalesce-ms N] [--ring-min-mb N]\n"
+      "                     [--live-window-seconds N]\n"
       "The address defaults to $TACHYON_AGENT_PIPE or the platform default. An agent running as root on\n"
       "behalf of another user (started through pkexec or sudo: $PKEXEC_UID / $SUDO_UID, or --socket-owner "
       "UID)\n"
@@ -117,7 +118,10 @@ void printUsage() {
       "max(circular_mb, --ring-min-mb (default 64)) MiB per process. Tachyon_RequestFlush() from an\n"
       "instrumented process flushes the last --flush-seconds (default 10) into\n"
       "<out dir>/<process>-<reason>-<YYYYMMDD-HHMMSS>.tachyon; triggers closer than --flush-coalesce-ms\n"
-      "(default 2000) to the previous one are coalesced.\n");
+      "(default 2000) to the previous one are coalesced.\n"
+      "Live view: a capture started with live=true streams decoded events to clients that send "
+      "live_subscribe;\n"
+      "the agent keeps the last --live-window-seconds (default 30) of them for late subscribers.\n");
 }
 
 struct Options {
@@ -136,6 +140,7 @@ struct Options {
   long flushSeconds = 10;
   long flushCoalesceMs = 2000;
   long ringMinMb = 64;
+  long liveWindowSeconds = 30;
   std::string socketOwner;
   std::string listen;
   std::string tokenFile;
@@ -202,6 +207,10 @@ bool parseArgs(int argc, char** argv, Options& o) {
       if (!value(tmp)) return false;
       o.ringMinMb = std::strtol(tmp.c_str(), nullptr, 10);
       if (o.ringMinMb <= 0) return false;
+    } else if (a == "--live-window-seconds") {
+      if (!value(tmp)) return false;
+      o.liveWindowSeconds = std::strtol(tmp.c_str(), nullptr, 10);
+      if (o.liveWindowSeconds <= 0 || o.liveWindowSeconds > 3600) return false;
     } else if (a == "--mock-fixture") {
       if (!value(o.mockFixture)) return false;
     } else if (a == "--mock-duration-ms") {
@@ -397,6 +406,7 @@ int main(int argc, char** argv) {
   cfg.flushSeconds = static_cast<uint32_t>(opt.flushSeconds);
   cfg.flushCoalesceMs = static_cast<int>(opt.flushCoalesceMs);
   cfg.minRingBytes = static_cast<uint64_t>(opt.ringMinMb) << 20;
+  cfg.liveWindowSeconds = static_cast<uint32_t>(opt.liveWindowSeconds);
   agent::Agent agentCore(std::move(backend), cfg);
   control::Server server(std::move(*listener), agentCore);
   std::string tcpAddress;

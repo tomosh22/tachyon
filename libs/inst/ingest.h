@@ -3,7 +3,9 @@
 // is decoded here.
 #pragma once
 
+#include "capture/capture_backend.h"
 #include "core/result.h"
+#include "inst/live_forward.h"
 #include "inst/raw_stream_server.h"
 #include "inst/spool.h"
 
@@ -33,6 +35,9 @@ struct IngestConfig {
   // At finish(): each connection is read until it was silent for drainIdleMs or drainMaxMs elapsed.
   int drainIdleMs = 200;
   int drainMaxMs = 2000;
+  // WP-65a. A live capture: every frame an SDK client sends is also decoded and handed to this sink (see
+  // live_forward.h) as it arrives, in addition to being spooled. Null: not live.
+  std::shared_ptr<capture::ILiveSink> liveSink;
 };
 
 struct SpoolInfo {

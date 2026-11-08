@@ -41,6 +41,16 @@
 // Per capture the agent caps instrumented processes, connections per process and spool bytes (AgentConfig),
 // and closes data connections whose peer pid differs from the hello pid.
 //
+// Live view (WP-65a, docs/specs/live.md): a start with live=true gives the backend a LiveEncoder as its
+// ILiveSink (and the instrumentation ingest forwards the SDK's scopes, frame marks, markers and plots to it).
+// The encoder interns the raw events into live indices, cuts a batch every 250 ms (or 256 KiB) and retains the
+// last AgentConfig::liveWindowSeconds of them. A client that sends `live_subscribe` gets a keyframe (every
+// table definition plus the retained batches, in pieces) and then every new batch as `live` events, sent by a
+// thread of its own that never blocks the others: when the client's outbound queue is full the thread waits,
+// and a client that falls behind the retained window (or stalls for kLiveStallMs) gets `live_gap` and must
+// resubscribe. `live_end` follows the last batch when the capture ends. `status` carries live / live_seq while
+// a live capture runs. Local and authenticated remote clients alike may subscribe.
+//
 // Flight recorder (WP-60): a start with circular_mb > 0 is a circular capture. The backend keeps the newest
 // samples; the instrumentation spools become rings (inst/spool.h) that keep the newest max(circular_mb, 64)
 // MiB per process. Any number of flushes can follow; each writes `<dir of the output>/<name>.tachyon` with
@@ -61,6 +71,7 @@
 
 #include "capture/capture_backend.h"
 #include "capture/windows_etw/target_watch.h"
+#include "control/live_encoder.h"
 #include "control/safe_file.h"
 #include "control/server.h"
 #include "inst/ingest.h"
@@ -131,6 +142,14 @@ struct AgentConfig {
   // A trigger flush waits this long before it looks at the capture, so that what the requester sent just
   // before asking has been read from its connection.
   int flushSettleMs = 100;
+
+  // Live view (WP-65a).
+  // Seconds of batches the encoder retains for late subscribers (--live-window-seconds).
+  uint32_t liveWindowSeconds = 30;
+  // Simultaneous live subscribers; further `live_subscribe` get EBUSY.
+  uint32_t maxLiveSubscribers = 16;
+  // A subscriber whose outbound queue stays full this long gets live_gap.
+  int liveStallMs = 5000;
 };
 
 // Thread-safe. A warning (empty when there is none) about the directory remote traces are written to: a
@@ -155,6 +174,11 @@ class Agent final : public control::IRequestHandler {
   // Thread-safe (WP-61). Remember which clients are remote so their requests can be restricted.
   void onClientAccepted(control::ClientId client, const control::ClientInfo& info) override;
   void onDisconnect(control::ClientId client) override;
+  // Thread-safe (WP-65a). Live subscriptions start after their response is queued and use the server to send.
+  void afterResponse(control::ClientId client, const control::Request& request,
+                     const control::Response& response) override;
+  void onServerStarted(control::Server& server) override;
+  void onServerStopping() override;
 
   // Thread-safe, idempotent. Stops a running capture (discarding nothing: the result is converted and
   // reported like a normal stop) and joins the conversion worker. Stop the server first.
@@ -170,6 +194,12 @@ class Agent final : public control::IRequestHandler {
   control::Response handleStart(const control::StartRequest& req, bool remote);
   control::Response handleFetch(const control::FetchRequest& req);
   control::Response handleProcesses(const control::ProcessesRequest& req);
+  control::Response handleLiveSubscribe(control::ClientId client, const control::LiveSubscribeRequest& req);
+  // Stops and joins the live subscription of `client`, if any.
+  void stopLiveSubscriber(control::ClientId client);
+  void stopAllLiveSubscribers();
+  // Ends the running live capture's encoder (the last batch is cut, subscribers get live_end).
+  void endLive();
   bool isRemoteClient(control::ClientId client) const;
   // Records `path` (a trace this agent produced) as fetchable.
   void noteProduced(const std::filesystem::path& path);
@@ -264,6 +294,26 @@ class Agent final : public control::IRequestHandler {
   std::filesystem::path m_outReservedPath;             // where it is; m_mutex
   uint32_t m_coalesced = 0;                            // guarded by m_mutex: since the last flushed event
   std::shared_ptr<inst::Ingest> m_ingest;              // guarded by m_mutex
+  std::shared_ptr<control::LiveEncoder> m_live;        // the live capture's encoder (or the last one); m_mutex
+
+  // Live subscribers (WP-65a).
+  struct LiveSubscriber {
+    control::ClientId client = 0;
+    std::shared_ptr<control::LiveEncoder> encoder;
+    std::optional<control::LiveKeyframe> keyframe;  // to send first (absent: a continuation from `next`)
+    uint64_t next = 0;                              // the next batch to send
+    std::atomic<bool> stop{false};
+    std::thread thread;
+  };
+  void liveSubscriberLoop(LiveSubscriber& sub);
+  // Queues one line for the subscriber, waiting while its queue is full. False: stop (gone, stopped, stalled);
+  // `stalled` says it was the stall limit.
+  bool sendLiveLine(LiveSubscriber& sub, std::string line, bool& stalled);
+  std::mutex m_subMutex;  // guards m_subscribers and m_pendingSubs
+  std::map<control::ClientId, std::unique_ptr<LiveSubscriber>> m_subscribers;
+  std::map<control::ClientId, std::unique_ptr<LiveSubscriber>> m_pendingSubs;  // responded to, not started
+  std::mutex m_serverMutex;                // guards m_server
+  control::Server* m_server = nullptr;     // set between onServerStarted and onServerStopping
   bool m_circular = false;  // guarded by m_mutex: the running capture is a flight recorder
   capture::CaptureMode m_sessionMode = capture::CaptureMode::System;  // guarded by m_mutex
   uint32_t m_sessionPid = 0;                                          // attach target; guarded by m_mutex

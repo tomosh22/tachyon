@@ -14,11 +14,17 @@ namespace {
 // One connection: complete frames go to the spool, an incomplete tail at the end is only counted.
 class SpoolSink final : public IStreamSink {
  public:
-  explicit SpoolSink(Spool& spool) : m_spool(spool) { m_spool.noteConnection(); }
+  SpoolSink(Spool& spool, std::shared_ptr<LiveForwarder> forwarder)
+      : m_spool(spool), m_forwarder(std::move(forwarder)) {
+    m_spool.noteConnection();
+  }
 
   void onData(const uint8_t* data, size_t size) override {
-    if (!m_assembler.feed(
-            data, size, [this](const uint8_t* frame, size_t bytes) { m_spool.appendFrame(frame, bytes); }) &&
+    if (!m_assembler.feed(data, size,
+                          [this](const uint8_t* frame, size_t bytes) {
+                            m_spool.appendFrame(frame, bytes);
+                            if (m_forwarder) m_forwarder->onFrame(frame, bytes);
+                          }) &&
         !m_reportedCorrupt) {
       m_reportedCorrupt = true;
       TACHYON_LOG_WARN(
@@ -35,6 +41,7 @@ class SpoolSink final : public IStreamSink {
 
  private:
   Spool& m_spool;
+  std::shared_ptr<LiveForwarder> m_forwarder;
   FrameAssembler m_assembler;
   bool m_reportedCorrupt = false;
 };
@@ -83,13 +90,18 @@ Result<void> Ingest::attach(uint32_t pid, const std::string& address) {
   TACHYON_TRY_ASSIGN(std::unique_ptr<Spool> spool,
                      Spool::create(file, m_config.maxSpoolBytes, m_budget, spoolOptions));
   Spool* raw = spool.get();
+  std::shared_ptr<LiveForwarder> forwarder;
+  if (m_config.liveSink) forwarder = std::make_shared<LiveForwarder>(pid, m_config.liveSink);
   RawServerOptions serverOptions;
   serverOptions.maxConnections = m_config.maxConnectionsPerProcess;
   serverOptions.expectedPeerPid = m_config.verifyPeerPid ? pid : 0;
   TACHYON_TRY_ASSIGN(
       std::unique_ptr<RawStreamServer> server,
       RawStreamServer::listen(
-          address, [raw]() -> std::unique_ptr<IStreamSink> { return std::make_unique<SpoolSink>(*raw); },
+          address,
+          [raw, forwarder]() -> std::unique_ptr<IStreamSink> {
+            return std::make_unique<SpoolSink>(*raw, forwarder);
+          },
           serverOptions));
   Process p;
   p.pid = pid;

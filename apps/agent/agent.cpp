@@ -249,8 +249,11 @@ void Agent::onClientAccepted(ClientId client, const ClientInfo& info) {
 }
 
 void Agent::onDisconnect(ClientId client) {
-  std::lock_guard lock(m_remoteMutex);
-  m_remoteClients.erase(client);
+  {
+    std::lock_guard lock(m_remoteMutex);
+    m_remoteClients.erase(client);
+  }
+  stopLiveSubscriber(client);
 }
 
 bool Agent::isRemoteClient(ClientId client) const {
@@ -282,6 +285,11 @@ Response Agent::handle(ClientId client, const Request& request) {
     resp = handleFetch(*fe);
   } else if (const auto* pr = std::get_if<ProcessesRequest>(&request.body)) {
     resp = handleProcesses(*pr);
+  } else if (const auto* ls = std::get_if<LiveSubscribeRequest>(&request.body)) {
+    resp = handleLiveSubscribe(client, *ls);
+  } else if (std::holds_alternative<LiveUnsubscribeRequest>(request.body)) {
+    stopLiveSubscriber(client);
+    resp = makeOkResponse(id);
   }  // AuthRequest is answered by the server
   resp.id = id;
   return resp;
@@ -293,6 +301,14 @@ Response Agent::handleStatus(std::optional<int64_t> id) {
   body.progress = m_progress.load();
   body.backend = m_config.backendName;
   body.elevated = m_config.elevated;
+  {
+    std::lock_guard lock(m_mutex);
+    const CaptureState st = m_state.load();
+    if (m_live && !m_live->ended() && (st == CaptureState::Starting || st == CaptureState::Capturing)) {
+      body.live = true;
+      body.live_seq = m_live->lastSeq();
+    }
+  }
   return makeOkResponse(id, body);
 }
 
@@ -301,6 +317,10 @@ bool Agent::armedLocked() const {
 }
 
 Response Agent::handleStart(const StartRequest& req, bool remote) {
+  if (req.live && !m_backend->supportsLive())
+    return makeErrorResponse(std::nullopt,
+                             makeError(ErrorCode::Unsupported,
+                                       "the '" + m_config.backendName + "' backend has no live source"));
   if (remote && req.mode == capture::CaptureMode::Launch && !m_config.allowRemoteLaunch)
     return makeErrorResponse(std::nullopt,
                              makeError(ErrorCode::NoPrivilege,
@@ -322,6 +342,7 @@ Response Agent::handleStart(const StartRequest& req, bool remote) {
   opts.stackCSwitch = req.stackwalk.cswitch;
   opts.stackReady = req.stackwalk.readythread;
   opts.kernelStacks = req.kernel_stacks;
+  opts.live = req.live;
   if (opts.mode == capture::CaptureMode::Launch && !m_config.agentAddress.empty())
     opts.env[std::string(capture::etw::kAgentPipeEnvVar)] = m_config.agentAddress;  // the SDK connects here
   OutputReservation reservation;  // removes a reserved file again unless the capture starts
@@ -418,9 +439,25 @@ Response Agent::handleStart(const StartRequest& req, bool remote) {
       m_outIdentity = reservedIdentity;
       m_outReservedPath = opts.outPath;
       m_sessionFollow = opts.followChildren;
+      if (req.live) {
+        control::LiveEncoderConfig liveConfig;
+        liveConfig.windowSeconds = m_config.liveWindowSeconds;
+        m_live = std::make_shared<control::LiveEncoder>(liveConfig);
+        ingestConfig.liveSink = m_live;
+      } else {
+        m_live.reset();
+      }
       m_ingest = std::make_shared<inst::Ingest>(std::move(ingestConfig));
       m_circular = opts.circularMb > 0;
     }
+  }
+  if (req.live && !resuming) {
+    std::shared_ptr<control::LiveEncoder> encoder;
+    {
+      std::lock_guard lock(m_mutex);
+      encoder = m_live;
+    }
+    m_backend->setLiveSink(encoder);
   }
 
   Result<void> started = resuming ? ok() : m_backend->checkPrivileges();
@@ -435,6 +472,7 @@ Response Agent::handleStart(const StartRequest& req, bool remote) {
     if (!(resuming && m_watch->launchPending())) {
       setStateLocked(CaptureState::Idle, 0.0);
       abandoned = std::move(m_ingest);
+      m_live.reset();
     }
     return makeErrorResponse(std::nullopt, started.error());
   }
@@ -582,6 +620,7 @@ Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& war
   std::vector<inst::SpoolInfo> spools;
   if (ingest) spools = ingest->finish();
   auto result = m_backend->stop();
+  endLive();  // everything the backend decoded is in the encoder now
   if (result.ok()) {
     std::optional<control::FileIdentity> reserved;
     std::filesystem::path reservedPath;
@@ -806,6 +845,7 @@ Response Agent::handleCancel() {
             if (auto ingest = takeIngest(circular)) ingest->discard();
           }
           (void)m_backend->stop();
+          endLive();
           lock.lock();
           m_resuming = false;
           TACHYON_LOG_INFO("agent: parked launch cancelled");
@@ -825,6 +865,7 @@ Response Agent::handleCancel() {
     if (auto ingest = takeIngest(circular)) ingest->discard();
   }
   auto result = m_backend->stop();
+  endLive();
   if (result.ok()) {
     std::error_code ec;
     std::filesystem::remove(result->tracePath, ec);
@@ -1014,6 +1055,7 @@ void Agent::shutdown() {
       if (auto ingest = takeIngest(circular)) ingest->discard();
     }
     (void)m_backend->stop();  // terminates the parked process
+    endLive();
     std::lock_guard lock(m_mutex);
     setStateLocked(CaptureState::Idle, 0.0);
   }
@@ -1040,6 +1082,168 @@ void Agent::shutdown() {
   }
   if (worker.joinable()) worker.join();
   if (flushWorker.joinable()) flushWorker.join();
+  endLive();
+  stopAllLiveSubscribers();
+}
+
+// ---- Live view (WP-65a) ----
+
+namespace {
+// A subscriber's outbound queue may hold this much before its sender waits (below the 2 MiB cap that drops a
+// client, so a response or event of another kind always fits behind live data).
+constexpr size_t kLiveQueueLimit = 1536 * 1024;
+}  // namespace
+
+void Agent::onServerStarted(control::Server& server) {
+  std::lock_guard lock(m_serverMutex);
+  m_server = &server;
+}
+
+void Agent::onServerStopping() {
+  {
+    std::lock_guard lock(m_serverMutex);
+    m_server = nullptr;
+  }
+  stopAllLiveSubscribers();
+}
+
+void Agent::endLive() {
+  std::shared_ptr<control::LiveEncoder> encoder;
+  {
+    std::lock_guard lock(m_mutex);
+    encoder = m_live;
+  }
+  if (encoder) encoder->finish();
+}
+
+Response Agent::handleLiveSubscribe(ClientId client, const LiveSubscribeRequest& req) {
+  std::shared_ptr<control::LiveEncoder> encoder;
+  {
+    std::lock_guard lock(m_mutex);
+    const CaptureState st = m_state.load();
+    if (m_live && !m_live->ended() && (st == CaptureState::Starting || st == CaptureState::Capturing))
+      encoder = m_live;
+  }
+  if (!encoder)
+    return makeErrorResponse(std::nullopt, makeError(ErrorCode::NotFound, "no live capture is running"));
+  stopLiveSubscriber(client);  // a second subscribe replaces the first
+  auto sub = std::make_unique<LiveSubscriber>();
+  sub->client = client;
+  sub->encoder = encoder;
+  LiveSubscribeBody body;
+  if (req.has_from_seq && encoder->retains(req.from_seq)) {
+    sub->next = req.from_seq;
+    body.seq = req.from_seq;
+  } else {
+    sub->keyframe.emplace(encoder->beginKeyframe());
+    body.seq = sub->keyframe->seq();
+    sub->next = body.seq + 1;
+  }
+  {
+    std::lock_guard lock(m_subMutex);
+    if (m_subscribers.size() + m_pendingSubs.size() >= m_config.maxLiveSubscribers)
+      return makeErrorResponse(std::nullopt, makeError(ErrorCode::Busy, "too many live subscribers"));
+    m_pendingSubs[client] = std::move(sub);
+  }
+  return makeOkResponse(std::nullopt, body);
+}
+
+void Agent::afterResponse(ClientId client, const Request& request, const Response& response) {
+  if (!std::holds_alternative<LiveSubscribeRequest>(request.body) || !response.ok) return;
+  std::lock_guard lock(m_subMutex);
+  auto it = m_pendingSubs.find(client);
+  if (it == m_pendingSubs.end()) return;
+  std::unique_ptr<LiveSubscriber> sub = std::move(it->second);
+  m_pendingSubs.erase(it);
+  LiveSubscriber* raw = sub.get();
+  m_subscribers[client] = std::move(sub);
+  raw->thread = std::thread([this, raw] { liveSubscriberLoop(*raw); });
+}
+
+void Agent::stopLiveSubscriber(ClientId client) {
+  std::unique_ptr<LiveSubscriber> sub;
+  {
+    std::lock_guard lock(m_subMutex);
+    m_pendingSubs.erase(client);
+    auto it = m_subscribers.find(client);
+    if (it == m_subscribers.end()) return;
+    sub = std::move(it->second);
+    m_subscribers.erase(it);
+  }
+  sub->stop.store(true);
+  if (sub->thread.joinable()) sub->thread.join();
+}
+
+void Agent::stopAllLiveSubscribers() {
+  std::map<ClientId, std::unique_ptr<LiveSubscriber>> subs;
+  {
+    std::lock_guard lock(m_subMutex);
+    subs.swap(m_subscribers);
+    m_pendingSubs.clear();
+  }
+  for (auto& [id, sub] : subs) sub->stop.store(true);
+  for (auto& [id, sub] : subs)
+    if (sub->thread.joinable()) sub->thread.join();
+}
+
+bool Agent::sendLiveLine(LiveSubscriber& sub, std::string line, bool& stalled) {
+  using Clock = std::chrono::steady_clock;
+  const auto deadline = Clock::now() + std::chrono::milliseconds(m_config.liveStallMs);
+  for (;;) {
+    if (sub.stop.load()) return false;
+    Server::SendStatus status;
+    {
+      std::lock_guard lock(m_serverMutex);
+      if (m_server == nullptr) return false;
+      status = m_server->trySendLine(sub.client, line, kLiveQueueLimit);
+    }
+    if (status == Server::SendStatus::Sent) return true;
+    if (status == Server::SendStatus::Gone) return false;
+    if (Clock::now() >= deadline) {
+      stalled = true;
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+}
+
+void Agent::liveSubscriberLoop(LiveSubscriber& sub) {
+  control::LiveEncoder& encoder = *sub.encoder;
+  auto sendSmall = [&](const Event& event) {
+    std::lock_guard lock(m_serverMutex);
+    if (m_server != nullptr)
+      (void)m_server->trySendLine(sub.client, encodeEvent(event), kMaxQueuedBytesPerClient);
+  };
+  bool stalled = false;
+  if (sub.keyframe) {
+    std::string chunk;
+    bool first = true;
+    while (sub.keyframe->next(chunk)) {
+      if (!sendLiveLine(sub, encodeEvent(LiveEvent{sub.keyframe->seq(), first, std::move(chunk)}), stalled)) {
+        if (stalled) sendSmall(LiveGapEvent{sub.next});
+        return;
+      }
+      first = false;
+      chunk.clear();
+    }
+    sub.keyframe.reset();
+  }
+  while (!sub.stop.load()) {
+    control::LiveBatch batch;
+    switch (encoder.waitBatch(sub.next, batch, std::chrono::milliseconds(100))) {
+      case control::LiveWait::Timeout: continue;
+      case control::LiveWait::Gap: sendSmall(LiveGapEvent{sub.next}); return;
+      case control::LiveWait::Ended: sendSmall(LiveEndEvent{sub.next - 1}); return;
+      case control::LiveWait::Ready: break;
+    }
+    for (std::string_view piece : control::splitRecords(*batch.data, model::live_wire::kMaxEventBytes)) {
+      if (!sendLiveLine(sub, encodeEvent(LiveEvent{batch.seq, false, std::string(piece)}), stalled)) {
+        if (stalled) sendSmall(LiveGapEvent{sub.next});
+        return;
+      }
+    }
+    ++sub.next;
+  }
 }
 
 }  // namespace tachyon::agent

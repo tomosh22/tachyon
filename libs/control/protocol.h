@@ -19,7 +19,8 @@ constexpr uint32_t kProtocolApiVersion = 65536;
 
 // Auth, Fetch and Processes are WP-61 (remote capture); they are appended so the variant order of the older
 // commands is unchanged.
-enum class Cmd { Status, Start, Stop, Flush, Cancel, InstHello, Auth, Fetch, Processes };
+// LiveSubscribe and LiveUnsubscribe are WP-65a (live view), appended after Processes.
+enum class Cmd { Status, Start, Stop, Flush, Cancel, InstHello, Auth, Fetch, Processes, LiveSubscribe, LiveUnsubscribe };
 
 // ---- Requests (client -> agent). Field names mirror the JSON keys. ----
 
@@ -48,6 +49,10 @@ struct StartRequest {
   bool start_immediately = true;
   StackwalkOptions stackwalk;
   bool kernel_stacks = true;
+  // Optional (WP-65a). Stream the capture live: the agent decodes events as they arrive and serves them to
+  // `live_subscribe`d clients (docs/specs/live.md). Encoded only when set. Any mode, combinable with
+  // circular_mb; a backend without a live source refuses the start.
+  bool live = false;
 };
 
 struct FlushRequest {
@@ -99,8 +104,19 @@ struct ProcessesRequest {
   uint32_t offset = 0;
 };
 
+// Optional (WP-65a). {"cmd":"live_subscribe"[,"from_seq":N]}: from now on `live` events are sent to this client
+// (until live_unsubscribe, live_end, or the connection ends). Without from_seq, or when from_seq is no longer
+// retained, the first event is a keyframe. ENOTFOUND outside a live capture.
+struct LiveSubscribeRequest {
+  bool has_from_seq = false;
+  uint64_t from_seq = 0;  // the first batch sequence number the client wants (it already has everything before)
+};
+// Optional (WP-65a). {"cmd":"live_unsubscribe"}: stops the live events of this client. Always ok.
+struct LiveUnsubscribeRequest {};
+
 using RequestBody = std::variant<StatusRequest, StartRequest, StopRequest, FlushRequest, CancelRequest,
-                                 InstHelloRequest, AuthRequest, FetchRequest, ProcessesRequest>;
+                                 InstHelloRequest, AuthRequest, FetchRequest, ProcessesRequest,
+                                 LiveSubscribeRequest, LiveUnsubscribeRequest>;
 
 struct Request {
   int64_t id = 0;
@@ -114,6 +130,10 @@ struct StatusBody {
   double progress = 0.0;
   std::string backend;
   bool elevated = false;
+  // WP-65a: a live capture is running; `live_seq` is the sequence number of the newest batch. Encoded only
+  // while live.
+  bool live = false;
+  uint64_t live_seq = 0;
 };
 
 // Used by flush responses and the capture_done event.
@@ -161,8 +181,15 @@ struct ProcessesBody {
   uint32_t total = 0;   // entries in the whole list
 };
 
-using ResponseBody =
-    std::variant<std::monostate, StatusBody, CaptureSummary, InstHelloBody, FetchBody, ProcessesBody>;
+// Response of `live_subscribe` (WP-65a): the events that follow are batches with sequence numbers above `seq`
+// (a keyframe event carries `seq` itself: it is the state after batch `seq`). With from_seq the first event is
+// batch `seq` == from_seq.
+struct LiveSubscribeBody {
+  uint64_t seq = 0;
+};
+
+using ResponseBody = std::variant<std::monostate, StatusBody, CaptureSummary, InstHelloBody, FetchBody,
+                                  ProcessesBody, LiveSubscribeBody>;
 
 struct Response {
   std::optional<int64_t> id;  // nullopt is encoded as null (malformed requests without a usable id)
@@ -197,7 +224,34 @@ struct FlushedEvent {
   uint32_t coalesced = 0;
 };
 
-using Event = std::variant<StateEvent, CaptureDoneEvent, ErrorEvent, FlushedEvent>;
+// WP-65a (live view). One live batch, or a part of a keyframe: {"event":"live","seq":N,"keyframe":bool,
+// "data":"<base64>"}. `data` holds the decoded bytes (at most model::live_wire::kMaxEventBytes). A keyframe is
+// delivered as several events carrying the same seq; only the first of them has keyframe = true (the client
+// resets its window with it) and the following parts have keyframe = false. Regular batches have seq = the
+// previous seq + 1.
+struct LiveEvent {
+  uint64_t seq = 0;
+  bool keyframe = false;
+  std::string data;
+};
+// {"event":"live_gap","seq":N}: the client fell behind; batch N and later were not delivered and nothing more
+// is sent until it resubscribes (the next event is a keyframe).
+struct LiveGapEvent {
+  uint64_t seq = 0;
+};
+// {"event":"live_end","seq":N}: the capture ended; N is the last batch sent.
+struct LiveEndEvent {
+  uint64_t seq = 0;
+};
+
+using Event = std::variant<StateEvent, CaptureDoneEvent, ErrorEvent, FlushedEvent, LiveEvent, LiveGapEvent,
+                           LiveEndEvent>;
+
+// Thread-safe: pure function. True for the three live event types.
+inline bool isLiveEvent(const Event& e) {
+  return std::holds_alternative<LiveEvent>(e) || std::holds_alternative<LiveGapEvent>(e) ||
+         std::holds_alternative<LiveEndEvent>(e);
+}
 
 using ServerMessage = std::variant<Response, Event>;
 

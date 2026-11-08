@@ -70,7 +70,11 @@ Result<Response> Client::call(RequestBody body, int timeoutMs) {
     auto msg = decodeServerMessage(line, cmd);
     if (!msg.ok()) return std::move(msg).error();
     if (auto* ev = std::get_if<Event>(&*msg)) {
-      m_events.push_back(std::move(*ev));
+      if (m_liveHandler && isLiveEvent(*ev)) {
+        m_liveHandler(*ev);
+      } else {
+        m_events.push_back(std::move(*ev));
+      }
       continue;
     }
     Response& resp = std::get<Response>(*msg);
@@ -95,7 +99,13 @@ Result<Event> Client::nextEvent(int timeoutMs) {
     if (!*got) return makeError(ErrorCode::IoError, "connection closed by agent");
     auto msg = decodeServerMessage(line, std::nullopt);
     if (!msg.ok()) return std::move(msg).error();
-    if (auto* ev = std::get_if<Event>(&*msg)) return std::move(*ev);
+    if (auto* ev = std::get_if<Event>(&*msg)) {
+      if (m_liveHandler && isLiveEvent(*ev)) {
+        m_liveHandler(*ev);
+        continue;
+      }
+      return std::move(*ev);
+    }
     // A response with no outstanding request: ignore.
   }
 }
