@@ -37,3 +37,7 @@ Headers `libs/symbols/symbol_provider.h` and `libs/symbols/function_key.h` (`tac
   - `file`/`line` is the line-table position, inside the innermost inlinee for DWARF and DIA.
   - `inlines[k].line` for k ≥ 1 is a position inside that frame's function.
 - `linesForFunction` uses the call site for the physical-function key.
+
+## Clarifications added with WP-68 (2026-11-08, binding)
+
+- `SymbolService(servers, cacheDir, std::shared_ptr<SymbolStringTable>)` shares a string table between services; `sharedStrings()` returns it. `adoptRun(previous)` (once, before `resolveAllAsync`, after configuration) cancels and joins `previous`'s run, then takes over the providers, states (Resolved, NotFound, Failed) and cache-file pins of modules whose records are identical (pid, base, size, path, id) at the same index; anything else resolves normally. Both services may query the shared providers concurrently (providers are thread-safe after `load()`). `previous` stays usable for lookups only while the model it resolved is alive; its workers must be stopped (e.g. `cancel()`) before that model is freed. The viewer adopts the preview's run when the complete document of a stream replaces it; reruns never adopt.
