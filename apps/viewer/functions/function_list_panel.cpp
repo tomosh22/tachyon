@@ -76,8 +76,19 @@ void FunctionListPanel::resetDocumentState() {
   m_haveDocument = false;
 }
 
-void FunctionListPanel::onDocumentChanged(const Document*) {
+void FunctionListPanel::onDocumentChanged(const Document* document) {
+  // WP-65b: the next snapshot of a live capture keeps the table, the sort, the filter and the selection.
+  if (m_live.onDocument(document) && m_haveDocument) {
+    refreshForLiveSnapshot();
+    return;
+  }
   resetDocumentState();  // the in-flight query is cancelled; a late result is dropped as stale
+}
+
+void FunctionListPanel::refreshForLiveSnapshot() {
+  m_query.cancel();
+  m_haveRequested = false;
+  m_requested = {};
 }
 
 void FunctionListPanel::onSelectionChanged(const PanelContext& context, const SelectionState& state,
@@ -161,8 +172,10 @@ void FunctionListPanel::update(const PanelContext& context) {
     return;
   }
   if (!m_haveDocument || context.documentGeneration != m_documentGeneration) {
-    resetDocumentState();
-    m_haveDocument = true;
+    if (!(m_haveDocument && m_live.consumeKeep())) {
+      resetDocumentState();
+      m_haveDocument = true;
+    }
     m_documentGeneration = context.documentGeneration;
   }
   if (!context.queryExecutor || !context.selection) return;

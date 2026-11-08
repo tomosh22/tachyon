@@ -5,6 +5,8 @@
 #include "viewer/document.h"
 #include "viewer/file_browser.h"
 #include "viewer/job_queue.h"
+#include "viewer/live/live_panel.h"
+#include "viewer/live/live_session.h"
 #include "viewer/memory_governor.h"
 #include "viewer/panel.h"
 #include "viewer/renderer.h"
@@ -34,9 +36,17 @@ struct ImGuiContext;
 namespace tachyon::analysis {
 class QueryExecutor;
 }  // namespace tachyon::analysis
+namespace tachyon::control {
+struct StartRequest;  // control/protocol.h
+}  // namespace tachyon::control
 
 namespace tachyon::viewer {
 
+namespace timeline {
+class TimelineWidget;  // timeline/timeline_widget.h
+}  // namespace timeline
+
+struct AgentEvent;        // capture/agent_session.h
 struct StreamMailbox;     // app.cpp (WP-64)
 struct SymbolSetupRun;    // app.cpp (WP-67)
 class CaptureController;  // capture/capture_controller.h (WP-41)
@@ -84,6 +94,12 @@ struct AppOptions {
   uint64_t memoryCeilingBytes = 0;
   // How often the ceiling is checked (the first check of a document is immediate); 0 = every frame.
   int memoryCheckMs = 1000;
+  // WP-65b: live view. A new snapshot of the live window is built at most this often.
+  uint32_t liveRefreshMs = 500;
+  // WP-65b: the live window the viewer keeps (the agent's own window, --live-window-seconds, is separate).
+  uint32_t liveWindowSeconds = 30;
+  // WP-65b (tests): called on the snapshot worker before each snapshot starts.
+  std::function<void()> liveBeforeSnapshot;
 };
 
 // Thread-safe: pure function. WP-67: the options of the headless entry points (--selftest and --bench): no
@@ -159,6 +175,26 @@ class App {
   // Main-thread only. The agent connection, capture dialogs and live capture state.
   CaptureController& capture() { return *m_capture; }
 
+  // ---- WP-65b: live view ----
+  // Main-thread only. The live capture machinery (always present; idle until a Live capture starts).
+  LiveSession& live() { return *m_live; }
+  // Main-thread only. What the Live panel and the status bar show.
+  LiveUiState liveUiState();
+  // Main-thread only. Pause freezes the document on screen (the LiveModel keeps receiving); Resume shows the
+  // newest data.
+  void setLivePaused(bool paused);
+  // Main-thread only. Follow: the timeline shows the newest window ending at "now" and scrolls with it.
+  void setLiveFollow(bool follow);
+  // Main-thread only. Save last 30 s (flush; circular captures only) and Stop (stop, then open the trace).
+  void liveSaveLast();
+  void liveStop();
+  // Main-thread only. Leaves live mode: stops the snapshot worker and the feed; the document on screen stays.
+  void closeLive();
+  // Main-thread only. Snapshots swapped in since the Live capture started.
+  uint64_t liveSwaps() const { return m_liveSwaps; }
+  // Main-thread only. The text the status bar showed for the live capture last ("" when none).
+  const std::string& liveStatusLine() const { return m_liveStatusLine; }
+
   // ---- WP-48: status, warnings, symbol paths, toasts, shortcut sheet ----
   // Main-thread only. Shows a message in the bottom-right corner (5 s, at most 5 stacked).
   void toast(ToastLevel level, std::string text);
@@ -204,6 +240,12 @@ class App {
   void onDocumentLoaded(std::shared_ptr<Document> document);
   void closeDocument();
   void pumpStream();
+  void pumpLive();
+  std::shared_ptr<model::LiveModel> beginLive(const control::StartRequest& request);
+  void onLiveAgentEvent(const AgentEvent& event);
+  void swapLiveDocument(std::shared_ptr<Document> document);
+  LiveSymbolsConfig liveSymbolsConfig();
+  timeline::TimelineWidget* timelineWidget();
   // Main-thread only. Installs a SymbolService on `document` and starts resolving; the workers report through
   // m_symbolMailbox (thread-safe), which wakes the event loop.
   void startSymbolResolution(Document& document);
@@ -244,9 +286,19 @@ class App {
   std::shared_ptr<symbols::SymbolService> m_adoptSource;
   std::vector<std::string> m_symbolPathProblems;
 
+  // WP-65b.
+  enum class LivePhase : uint8_t { None, Waiting, Running, Ended, Failed };
+  std::unique_ptr<LiveSession> m_live;
+  LivePhase m_livePhase = LivePhase::None;
+  std::string m_liveError;
+  uint64_t m_liveSwaps = 0;
+  uint64_t m_liveStream = 0;
+  std::string m_liveStatusLine;
+
   MemoryGovernor m_memory;
   uint64_t m_memoryModelBytes = 0;  // TraceModel::residentBytes() of the document of m_memoryGeneration
   uint64_t m_memoryGeneration = ~0ull;
+  bool m_memoryWasLive = false;
   std::chrono::steady_clock::time_point m_lastMemoryCheck{};
   JobQueue::JobId m_openJob = 0;
   uint64_t m_streamCounter = 0;  // WP-64: numbers the opens; documents of one open share the id

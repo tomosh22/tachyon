@@ -38,7 +38,20 @@ constexpr ImVec4 kRed(1.0f, 0.4f, 0.4f, 1.0f);
 constexpr ImVec4 kAmber(1.0f, 0.75f, 0.2f, 1.0f);
 constexpr ImVec4 kGreen(0.4f, 0.85f, 0.45f, 1.0f);
 
-const char* modeTitle(capture::CaptureMode mode, bool remote) {
+const char* modeTitle(capture::CaptureMode mode, bool remote, bool live = false) {
+  if (live) {
+    switch (mode) {
+      case capture::CaptureMode::Launch:
+        return remote ? "Live: Run Application (remote agent)##capture-dialog"
+                      : "Live: Run Application##capture-dialog";
+      case capture::CaptureMode::Attach:
+        return remote ? "Live: Attach to Process (remote agent)##capture-dialog"
+                      : "Live: Attach to Process##capture-dialog";
+      case capture::CaptureMode::System:
+        return remote ? "Live: System Capture (remote agent)##capture-dialog"
+                      : "Live: System Capture##capture-dialog";
+    }
+  }
   switch (mode) {
     case capture::CaptureMode::Launch:
       return remote ? "Run Application (remote agent)##capture-dialog" : "Run Application##capture-dialog";
@@ -420,6 +433,11 @@ void CaptureController::stopCapture() {
   m_session.stop();
 }
 
+void CaptureController::stopCaptureAndOpen() {
+  m_openNextCapture = true;
+  m_session.stop();
+}
+
 void CaptureController::cancelCapture() {
   m_session.cancel();
 }
@@ -444,6 +462,7 @@ bool CaptureController::pump() {
 }
 
 void CaptureController::handleEvent(const AgentEvent& e) {
+  if (m_host.liveEvent) m_host.liveEvent(e);
   switch (e.kind) {
     case AgentEventKind::Connected: {
       if (e.userInitiated) {
@@ -514,6 +533,11 @@ void CaptureController::handleEvent(const AgentEvent& e) {
       }
       break;
     }
+    case AgentEventKind::LiveGap: toast(ToastLevel::Warning, e.message); break;
+    case AgentEventKind::LiveEnded: break;  // the host turns the Live document into a static snapshot
+    case AgentEventKind::LiveFailed:
+      toast(ToastLevel::Error, "Live view stopped: " + e.message + " (the capture itself continues)");
+      break;
     case AgentEventKind::CaptureDone: onCaptureDone(e); break;
     case AgentEventKind::AgentError: toast(ToastLevel::Error, "Agent: " + e.message); break;
     case AgentEventKind::CommandFailed:
@@ -546,11 +570,14 @@ void CaptureController::onCaptureDone(const AgentEvent& e) {
   if (m_session.snapshot().remote && !s.path.empty()) {
     // The trace is on the agent's machine: bring it here first (in the background); it is listed and opened
     // when it has arrived.
-    const bool open = m_host.settings && m_host.settings->capture.autoOpen;
+    const bool open = m_openNextCapture || (m_host.settings && m_host.settings->capture.autoOpen);
+    m_openNextCapture = false;
     fetchRemote(s.path, open, /*isCapture=*/true, s.warnings);
     return;
   }
-  const bool open = m_host.settings && m_host.settings->capture.autoOpen && !s.path.empty();
+  const bool open =
+      (m_openNextCapture || (m_host.settings && m_host.settings->capture.autoOpen)) && !s.path.empty();
+  m_openNextCapture = false;
   if (!s.path.empty())
     finishLocalCapture(path, open, s.warnings);
   else if (m_host.capturesChanged)
@@ -573,10 +600,11 @@ void CaptureController::finishLocalCapture(const std::filesystem::path& path, bo
 
 // ---- dialogs ----
 
-void CaptureController::openDialog(capture::CaptureMode mode) {
+void CaptureController::openDialog(capture::CaptureMode mode, bool live) {
   const CaptureSettings empty;
   const CaptureSettings& settings = m_host.settings ? m_host.settings->capture : empty;
   m_form = formFromSettings(settings, mode);
+  m_form.live = live;
   m_form.remote = m_session.snapshot().remote;
   m_form.outPath.clear();
   m_form.pid = 0;
@@ -684,6 +712,10 @@ bool CaptureController::submitDialog() {
     if (m_host.saveSettings) m_host.saveSettings();
   }
   m_lastRequest = *request;
+  // WP-65b: the Live document must exist (and the session must know its model) before the first `live` event
+  // can arrive.
+  if (request->live && m_host.liveBegin) m_session.setLiveModel(m_host.liveBegin(*request));
+  m_openNextCapture = false;
   m_session.start(*request, describeTarget(m_form));
   m_dialogOpen = false;
   if (m_host.showPanel) m_host.showPanel(kCapturePanelName);
@@ -796,7 +828,7 @@ void CaptureController::drawDialog() {
   bool open = true;
   const ImGuiWindowFlags flags = ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking;
   const bool remote = m_form.remote;
-  if (ImGui::Begin(modeTitle(m_form.mode, remote), &open, flags)) {
+  if (ImGui::Begin(modeTitle(m_form.mode, remote, m_form.live), &open, flags)) {
     if (m_dialogJustOpened) {
       ImGui::SetWindowFocus();
       m_dialogJustOpened = false;
@@ -806,6 +838,25 @@ void CaptureController::drawDialog() {
       ImGui::TextColored(kAmber, "Remote agent: paths and processes below are on the agent's machine.");
     ImGui::Separator();
     bool changed = false;
+    if (m_form.live) {
+      ImGui::TextWrapped(
+          "Live: the viewer shows the last 30 seconds of the capture, scrolling, while it records. The "
+          "capture "
+          "is still written to a normal trace when you stop.");
+      int mode = static_cast<int>(m_form.mode);
+      const int before = mode;
+      ImGui::RadioButton("Run application", &mode, static_cast<int>(capture::CaptureMode::Launch));
+      ImGui::SameLine();
+      ImGui::RadioButton("Attach to process", &mode, static_cast<int>(capture::CaptureMode::Attach));
+      ImGui::SameLine();
+      ImGui::RadioButton("System", &mode, static_cast<int>(capture::CaptureMode::System));
+      if (mode != before) {
+        m_form.mode = static_cast<capture::CaptureMode>(mode);
+        if (m_form.mode == capture::CaptureMode::Attach) refreshProcesses();
+        changed = true;
+      }
+      ImGui::Separator();
+    }
     if (m_form.mode == capture::CaptureMode::Launch) {
       changed |= inputString(remote ? "Executable (on agent)" : "Executable", m_form.exe);
       ImGui::SameLine();
@@ -864,6 +915,8 @@ void CaptureController::drawDialog() {
     changed |= ImGui::InputInt("Sampling rate (Hz)", &m_form.samplingHz, 100, 1000);
     fieldError("samplingHz");
     changed |= ImGui::InputInt("Circular buffer (MB, 0 = off)", &m_form.circularMb, 16, 256);
+    if (m_form.live && m_form.circularMb == 0)
+      ImGui::TextDisabled("A circular buffer lets the Live window save the last 30 s while recording.");
     fieldError("circularMb");
     changed |= ImGui::Checkbox("Follow children", &m_form.followChildren);
     if (m_form.followChildren) {
@@ -1017,6 +1070,7 @@ void CaptureController::drawMenu() {
   if (ImGui::MenuItem("Run...")) openDialog(capture::CaptureMode::Launch);
   if (ImGui::MenuItem("Attach...")) openDialog(capture::CaptureMode::Attach);
   if (ImGui::MenuItem("System capture...")) openDialog(capture::CaptureMode::System);
+  if (ImGui::MenuItem("Live...")) openDialog(capture::CaptureMode::Launch, true);
   ImGui::Separator();
   if (ImGui::MenuItem("Resume", nullptr, false, snap.phase == AgentPhase::Armed)) resumeCapture();
   if (ImGui::MenuItem("Stop", nullptr, false, snap.phase == AgentPhase::Capturing)) stopCapture();
@@ -1104,6 +1158,8 @@ void CaptureController::drawPanelContents() {
       if (ImGui::Button("Attach...")) openDialog(capture::CaptureMode::Attach);
       ImGui::SameLine();
       if (ImGui::Button("System...")) openDialog(capture::CaptureMode::System);
+      ImGui::SameLine();
+      if (ImGui::Button("Live...")) openDialog(capture::CaptureMode::Launch, true);
     }
     if (snap.phase == AgentPhase::Armed) {
       if (ImGui::Button("Resume")) resumeCapture();
@@ -1169,6 +1225,10 @@ FlightRecorderState CaptureController::flightRecorderState() const {
 }
 
 bool CaptureController::flushNow() {
+  return flushSeconds(m_flushSeconds);
+}
+
+bool CaptureController::flushSeconds(int requestedSeconds) {
   const FlightRecorderState st = flightRecorderState();
   if (!st.capturing) {
     toast(ToastLevel::Warning, "Nothing to flush: no capture is running");
@@ -1176,7 +1236,7 @@ bool CaptureController::flushNow() {
   }
   if (st.circularUnknown)
     toast(ToastLevel::Info, "Asking the agent to flush; this works only if the capture is circular");
-  const int seconds = std::clamp(m_flushSeconds, 1, 3600);
+  const int seconds = std::clamp(requestedSeconds, 1, 3600);
   char stamp[32];
   const std::time_t now = std::time(nullptr);
   std::tm tm{};

@@ -32,6 +32,9 @@ struct CaptureForm {
   // WP-61: the agent is on another machine. exe / cwd are paths there (not checked against this file
   // system), and outPath is only a file name for the agent to use in its own output directory.
   bool remote = false;
+  // WP-65b: start the capture with live:true (the Live dialog): the agent streams the last 30 s to the viewer
+  // while it records. Not persisted.
+  bool live = false;
 
   // Thread-safe: pure function on the value.
   bool operator==(const CaptureForm&) const = default;

@@ -37,6 +37,12 @@ struct CaptureHost {
   // WP-67: the free-text warnings of a finished capture's `capture_done`, for the trace at `path` (shown by
   // the warnings banner when that trace is open). Called before openFile.
   std::function<void(const std::filesystem::path&, std::vector<std::string>)> captureWarnings;
+  // WP-65b (live view). Called right before a start request with live = true is sent: the host prepares its
+  // Live document and returns the model the AgentSession applies the agent's `live` events to.
+  std::function<std::shared_ptr<model::LiveModel>(const control::StartRequest&)> liveBegin;
+  // WP-65b. Every agent event, before the controller handles it (the host reacts to LiveGap / LiveEnded /
+  // LiveFailed, to a refused start, a lost connection and capture_done). Main thread.
+  std::function<void(const AgentEvent&)> liveEvent;
 };
 
 // What starting the agent would run (see planAgentLaunch).
@@ -159,11 +165,15 @@ class CaptureController {
   void disconnectAgent();
 
   // ---- capture commands (no-ops with a toast when they do not apply) ----
-  // Opens the Run / Attach / System dialog.
-  void openDialog(capture::CaptureMode mode);
+  // Opens the Run / Attach / System dialog. WP-65b: `live` makes it the Live dialog (the same fields plus a
+  // mode choice; the capture starts with live:true).
+  void openDialog(capture::CaptureMode mode, bool live = false);
   void closeDialog() { m_dialogOpen = false; }
   void resumeCapture();
   void stopCapture();
+  // WP-65b. Stops the capture and opens its trace when it is done, whatever Settings::capture.autoOpen says
+  // (the Live window's Stop).
+  void stopCaptureAndOpen();
   void cancelCapture();
 
   // ---- flight recorder (WP-60) ----
@@ -175,6 +185,9 @@ class CaptureController {
   // Asks the agent for a flush of the last flushSeconds() seconds. False (with a toast) when the capture is
   // not a flight recorder or there is none.
   bool flushNow();
+  // WP-65b. Asks the agent to write the last `seconds` seconds of the circular capture ("Save last 30 s" of
+  // the Live window). Same rules as flushNow().
+  bool flushSeconds(int seconds);
   // Opens the flushed trace #index in the viewer.
   void openFlushed(size_t index);
   // Draws the contents of the Flight Recorder panel (between Begin/End).
@@ -278,6 +291,7 @@ class CaptureController {
   std::vector<RemoteTransfer> m_transfers;
   bool m_remoteProcessesPending = false;
 
+  bool m_openNextCapture = false;  // WP-65b: the next capture_done opens its trace regardless of autoOpen
   std::vector<FlushedCapture> m_flushed;
   int m_flushSeconds = 10;
   uint32_t m_flushSerial = 0;
