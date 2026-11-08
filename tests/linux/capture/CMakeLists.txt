@@ -66,3 +66,8 @@ if(TARGET live_capture_linux_tests)
                                                               TACHYON_AGENT_EXE="$<TARGET_FILE:tachyon-agent>")
   add_dependencies(live_capture_linux_tests tachyon-testbed tachyon-agent)
 endif()
+
+# WP-66b: the converter's output is opened without following a link (no perf_event_open needed).
+tachyon_add_test(perf_output_linux_tests
+  SOURCES perf_output_test.cpp
+  DEPS tachyon::capture_linux_perf tachyon::capture tachyon::trace)

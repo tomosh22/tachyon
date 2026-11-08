@@ -1,4 +1,5 @@
 #include "control/transport.h"
+#include "control/pipe_names.h"
 #include "test_util.h"
 
 #include <gtest/gtest.h>
@@ -166,6 +167,28 @@ TEST(Transport, ConnectToMissingFails) {
 
 TEST(Transport, InstrumentationAddressIncludesPid) {
   EXPECT_NE(instrumentationAddress(testAddress("inst"), 4321).find("tachyon-inst-4321"), std::string::npos);
+}
+
+// WP-66b: pure string function, so it is checked on every platform (it is what Windows uses).
+TEST(PipeNames, TheDefaultAgentPipeKeepsTheMachineWideInstrumentationName) {
+  EXPECT_EQ(windowsInstrumentationPipeName(R"(\\.\pipe\tachyon-agent)", 4321),
+            R"(\\.\pipe\tachyon-inst-4321)");
+  EXPECT_EQ(windowsInstrumentationPipeName(R"(\\.\PIPE\Tachyon-Agent)", 7), R"(\\.\pipe\tachyon-inst-7)")
+      << "pipe names are case-insensitive";
+  EXPECT_EQ(windowsInstrumentationPipeName("", 7), R"(\\.\pipe\tachyon-inst-7)");
+}
+
+TEST(PipeNames, APrivateAgentPipeGetsItsOwnInstrumentationNamespace) {
+  const std::string a = windowsInstrumentationPipeName(R"(\\.\pipe\tachyon-test-111-a)", 1234);
+  const std::string b = windowsInstrumentationPipeName(R"(\\.\pipe\tachyon-test-222-b)", 1234);
+  EXPECT_EQ(a, R"(\\.\pipe\tachyon-test-111-a-tachyon-inst-1234)");
+  EXPECT_NE(a, b) << "two test processes with the same pid in the hello do not collide";
+  EXPECT_NE(a, windowsInstrumentationPipeName(R"(\\.\pipe\tachyon-agent)", 1234));
+  EXPECT_NE(windowsInstrumentationPipeName(R"(\\.\pipe\x)", 1),
+            windowsInstrumentationPipeName(R"(\\.\pipe\x)", 2));
+  // Longer or shorter than the default name, sharing its prefix, is not the default.
+  EXPECT_NE(windowsInstrumentationPipeName(R"(\\.\pipe\tachyon-agent2)", 5), R"(\\.\pipe\tachyon-inst-5)");
+  EXPECT_NE(windowsInstrumentationPipeName(R"(\\.\pipe\tachyon-agen)", 5), R"(\\.\pipe\tachyon-inst-5)");
 }
 
 }  // namespace

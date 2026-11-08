@@ -1,14 +1,30 @@
 #include "trace/trace_writer.h"
 
 #include "core/hash.h"
+#include "core/platform.h"
 #include "core/span_util.h"
 #include "trace/string_table.h"
 
 #include <zstd.h>
 
+#if TACHYON_PLATFORM_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cerrno>
+#endif
+
 #include <algorithm>
 #include <cstring>
-#include <fstream>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -32,13 +48,147 @@ struct FrameKeyHash {
   }
 };
 
+// The output file, opened without ever following a link at the final path (WP-66b). POSIX: O_NOFOLLOW and an
+// fstat before anything is truncated. Windows: FILE_FLAG_OPEN_REPARSE_POINT, and a reparse point is refused
+// (needs Windows verification). Writes are unbuffered; the writer hands over whole chunks.
+class OutFile {
+ public:
+  OutFile() = default;
+  OutFile(const OutFile&) = delete;
+  OutFile& operator=(const OutFile&) = delete;
+  ~OutFile() { close(); }
+
+  enum class Mode { CreateOrReuse, CreateNew, Existing };
+
+  // CreateOrReuse: created, or an existing regular file reused (truncated). CreateNew: fails with Busy when
+  // anything is there. Existing: `expected` names the regular file that must be there (truncated).
+  Result<void> open(const std::filesystem::path& path, Mode mode, const TraceWriter::ReservedFile* expected) {
+#if TACHYON_PLATFORM_WINDOWS
+    HANDLE h =
+        CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                    mode == Mode::Existing    ? OPEN_EXISTING
+                    : mode == Mode::CreateNew ? CREATE_NEW
+                                              : OPEN_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+      const DWORD err = GetLastError();
+      if (mode == Mode::CreateNew && (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS))
+        return makeError(ErrorCode::Busy, path.string() + " already exists");
+      return makeError(ErrorCode::IoError, "cannot create trace file " + path.string() + " (Windows error " +
+                                               std::to_string(err) + ")");
+    }
+    m_handle = h;
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (GetFileInformationByHandle(h, &info) == 0) return fail(path, "cannot query the file");
+    if ((info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0)
+      return fail(path, "is a link or a directory, not a regular file");
+    if (mode == Mode::CreateNew) {
+      m_identity = {info.dwVolumeSerialNumber,
+                    (static_cast<uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow};
+      return ok();
+    }
+    if (expected != nullptr) {
+      const uint64_t index = (static_cast<uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+      if (info.dwVolumeSerialNumber != expected->volume || index != expected->index)
+        return fail(path, "is not the file that was reserved for it");
+    }
+    LARGE_INTEGER zero{};
+    if (SetFilePointerEx(h, zero, nullptr, FILE_BEGIN) == 0 || SetEndOfFile(h) == 0)
+      return fail(path, "cannot truncate the file");
+    return ok();
+#else
+    int fd;
+    do {
+      fd = ::open(path.c_str(),
+                  O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | O_NOCTTY |
+                      (mode == Mode::Existing ? 0 : O_CREAT) | (mode == Mode::CreateNew ? O_EXCL : 0),
+                  0644);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0) {
+      if (mode == Mode::CreateNew && errno == EEXIST)
+        return makeError(ErrorCode::Busy, path.string() + " already exists");
+      return makeError(ErrorCode::IoError,
+                       "cannot create trace file " + path.string() + ": " +
+                           (errno == ELOOP ? "it is a symbolic link" : std::strerror(errno)));
+    }
+    m_fd = fd;
+    struct stat st {};
+    if (::fstat(fd, &st) != 0) return fail(path, "cannot stat the file");
+    if (!S_ISREG(st.st_mode)) return fail(path, "is not a regular file");
+    m_identity = {static_cast<uint64_t>(st.st_dev), static_cast<uint64_t>(st.st_ino)};
+    if (mode == Mode::CreateNew) return ok();
+    if (expected != nullptr && (static_cast<uint64_t>(st.st_dev) != expected->volume ||
+                                static_cast<uint64_t>(st.st_ino) != expected->index || st.st_nlink != 1))
+      return fail(path, "is not the file that was reserved for it");
+    if (::ftruncate(fd, 0) != 0) return fail(path, "cannot truncate the file");
+    return ok();
+#endif
+  }
+
+  bool write(const void* data, size_t size) {
+    const auto* p = static_cast<const char*>(data);
+    while (size > 0) {
+#if TACHYON_PLATFORM_WINDOWS
+      DWORD got = 0;
+      const DWORD want = static_cast<DWORD>(std::min<size_t>(size, size_t{1} << 30));
+      if (WriteFile(m_handle, p, want, &got, nullptr) == 0 || got == 0) return false;
+#else
+      const ssize_t got = ::write(m_fd, p, size);
+      if (got < 0) {
+        if (errno == EINTR) continue;
+        return false;
+      }
+      if (got == 0) return false;
+#endif
+      p += got;
+      size -= static_cast<size_t>(got);
+    }
+    return true;
+  }
+
+  bool seekStart() {
+#if TACHYON_PLATFORM_WINDOWS
+    LARGE_INTEGER zero{};
+    return SetFilePointerEx(m_handle, zero, nullptr, FILE_BEGIN) != 0;
+#else
+    return ::lseek(m_fd, 0, SEEK_SET) == 0;
+#endif
+  }
+
+  TraceWriter::ReservedFile identity() const { return m_identity; }
+
+  void close() {
+#if TACHYON_PLATFORM_WINDOWS
+    if (m_handle != INVALID_HANDLE_VALUE) CloseHandle(m_handle);
+    m_handle = INVALID_HANDLE_VALUE;
+#else
+    if (m_fd >= 0) ::close(m_fd);
+    m_fd = -1;
+#endif
+  }
+
+ private:
+  TraceWriter::ReservedFile m_identity;
+  Error fail(const std::filesystem::path& path, const char* what) {
+    close();
+    return makeError(ErrorCode::IoError, "trace file " + path.string() + " " + what);
+  }
+
+#if TACHYON_PLATFORM_WINDOWS
+  HANDLE m_handle = INVALID_HANDLE_VALUE;
+#else
+  int m_fd = -1;
+#endif
+};
+
 }  // namespace
 
 struct TraceWriter::Impl {
-  std::fstream file;
+  OutFile file;
   FileHeader header;
   uint64_t offset = 0;
   bool finished = false;
+  bool keepPartial = false;
   std::optional<Error> error;
   std::vector<FooterRec> footer;
 
@@ -59,15 +209,12 @@ struct TraceWriter::Impl {
 
   void writeRaw(const void* data, size_t size) {
     if (error) return;
-    file.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
-    if (!file) fail("write to trace file failed");
+    if (!file.write(data, size)) fail("write to trace file failed");
     offset += size;
   }
 
   void writeHeaderAtStart() {
-    file.seekp(0);
-    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
-    if (!file) fail("failed to write file header");
+    if (!file.seekStart() || !file.write(&header, sizeof(header))) fail("failed to write file header");
   }
 
   // Writes one chunk whose payload is in `payload`.
@@ -159,9 +306,27 @@ TraceWriter& TraceWriter::operator=(TraceWriter&&) noexcept = default;
 TraceWriter::~TraceWriter() = default;
 
 Result<TraceWriter> TraceWriter::open(const std::filesystem::path& path, FileHeader header) {
+  return openImpl(path, header, nullptr);
+}
+
+Result<TraceWriter::ReservedFile> TraceWriter::reserveNew(const std::filesystem::path& path) {
+  OutFile file;
+  TACHYON_TRY(file.open(path, OutFile::Mode::CreateNew, nullptr));
+  return file.identity();
+}
+
+Result<TraceWriter> TraceWriter::open(const std::filesystem::path& path, FileHeader header,
+                                      const ReservedFile& reserved) {
+  return openImpl(path, header, &reserved);
+}
+
+Result<TraceWriter> TraceWriter::openImpl(const std::filesystem::path& path, FileHeader header,
+                                          const ReservedFile* reserved) {
   auto impl = std::make_unique<Impl>();
-  impl->file.open(path, std::ios::in | std::ios::out | std::ios::binary | std::ios::trunc);
-  if (!impl->file) return makeError(ErrorCode::IoError, "cannot create trace file " + path.string());
+  if (auto opened =
+          impl->file.open(path, reserved ? OutFile::Mode::Existing : OutFile::Mode::CreateOrReuse, reserved);
+      !opened.ok())
+    return opened.error();
   std::memcpy(header.magic, kMagic, sizeof(kMagic));
   header.format_version = kFormatVersion;
   header.flags |= kFlagPartial;
@@ -244,6 +409,10 @@ void TraceWriter::setTimeRange(uint64_t startTs, uint64_t endTs) {
   m_impl->header.end_ts = endTs;
 }
 
+void TraceWriter::keepPartialFlag() {
+  m_impl->keepPartial = true;
+}
+
 void TraceWriter::addFlags(uint32_t flags) {
   m_impl->header.flags |= flags;
 }
@@ -258,11 +427,9 @@ Result<void> TraceWriter::finish() {
   d.finished = true;
   d.footer.pop_back();
   d.header.footer_offset = footerOffset;
-  d.header.flags &= ~kFlagPartial;
+  if (!d.keepPartial) d.header.flags &= ~kFlagPartial;
   if (!d.error) {
     d.writeHeaderAtStart();
-    d.file.flush();
-    if (!d.file) d.fail("flush of trace file failed");
   }
   d.file.close();
   if (d.error) return *d.error;

@@ -135,6 +135,35 @@ TEST_F(RemoteProcess, AgentRefusesToListenWithoutAGoodTokenFile) {
   EXPECT_EQ(run({"--token-file", m_token.string()}), 2) << "a token file without --listen";
 }
 
+#if TACHYON_PLATFORM_LINUX
+// WP-66b: the trace writer no longer follows links, so a shared writable output directory only draws a
+// warning; a directory owned by another user is still refused.
+TEST_F(RemoteProcess, ASharedWritableOutputDirectoryOnlyWarns) {
+  ::chmod(m_outDir.string().c_str(), 0777);  // writable by everyone, no sticky bit
+  Process agent = startAgent();
+  const std::string log = agentLog();
+  EXPECT_NE(log.find("writable by group or others"), std::string::npos) << log;
+  EXPECT_EQ(log.find("refusing --listen"), std::string::npos) << log;
+  EXPECT_EQ(cli({"capture", "--attach", "1", "--duration", "1", "--out", "shared.tachyon"}, "shared.txt"), 0)
+      << readTextFile(m_dir.path() / "shared.txt");
+  EXPECT_TRUE(fs::exists(m_outDir / "shared.tachyon"));
+  stopAgent(agent);
+}
+
+TEST_F(RemoteProcess, AnOutputDirectoryOwnedByAnotherUserIsRefused) {
+  if (::geteuid() != 0) GTEST_SKIP() << "needs root to hand a directory to another user";
+  ASSERT_EQ(::chown(m_outDir.string().c_str(), 12345, 12345), 0);
+  const std::vector<std::string> args = {"--backend",        "mock",
+                                         "--socket",         m_socket,
+                                         "--listen",         "127.0.0.1:" + std::to_string(m_port),
+                                         "--token-file",     m_token.string(),
+                                         "--remote-out-dir", m_outDir.string()};
+  EXPECT_EQ(runToCompletion(TACHYON_AGENT_EXE, args, m_dir.path() / "foreign.log", 20000), 2);
+  const std::string log = readTextFile(m_dir.path() / "foreign.log");
+  EXPECT_NE(log.find("owned by uid 12345"), std::string::npos) << log;
+}
+#endif
+
 TEST_F(RemoteProcess, CliCapturesAndFetchesOverTcp) {
   Process agent = startAgent();
   const fs::path dir = m_localDir / "fetched";

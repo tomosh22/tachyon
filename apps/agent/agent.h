@@ -153,9 +153,13 @@ struct AgentConfig {
 };
 
 // Thread-safe. A warning (empty when there is none) about the directory remote traces are written to: a
-// directory other users can write to without the sticky bit lets them replace files the agent created
-// (output files are created with O_EXCL|O_NOFOLLOW, which stops planted links, not renames). POSIX only.
+// directory other users can write to without the sticky bit lets them delete or rename files the agent
+// created. Output files are reserved with O_EXCL|O_NOFOLLOW and written through O_NOFOLLOW, so a planted
+// link is never written through; a swapped file is caught by the identity check. POSIX only.
 std::string remoteOutDirWarning(const std::filesystem::path& dir);
+// Thread-safe. A reason to refuse --listen (empty when there is none): the directory is owned by another
+// user, who could replace the traces the agent writes there. POSIX only.
+std::string remoteOutDirProblem(const std::filesystem::path& dir);
 
 class Agent final : public control::IRequestHandler {
  public:
@@ -189,6 +193,13 @@ class Agent final : public control::IRequestHandler {
   // Thread-safe. How many whole-file SHA-256 computations fetch requests have caused (a cache hit adds none).
   uint64_t hashComputations() const { return m_hashComputations.load(); }
 
+  // Thread-safe. Records `path` (a trace this agent produced) as fetchable. The path is lstat'ed, not
+  // canonicalised: a symlink is refused and, when `reserved` is set, the file must have that identity.
+  void noteProduced(const std::filesystem::path& path,
+                    const std::optional<control::FileIdentity>& reserved = {});
+  // Thread-safe. True when noteProduced accepted `path` (the final component is not resolved).
+  bool isProduced(const std::filesystem::path& path);
+
  private:
   control::Response handleStatus(std::optional<int64_t> id);
   control::Response handleStart(const control::StartRequest& req, bool remote);
@@ -201,8 +212,6 @@ class Agent final : public control::IRequestHandler {
   // Ends the running live capture's encoder (the last batch is cut, subscribers get live_end).
   void endLive();
   bool isRemoteClient(control::ClientId client) const;
-  // Records `path` (a trace this agent produced) as fetchable.
-  void noteProduced(const std::filesystem::path& path);
   control::Response handleStop();
   control::Response handleFlush(const control::FlushRequest& req);
   struct FlushJob {
@@ -241,7 +250,10 @@ class Agent final : public control::IRequestHandler {
   // Detaches the session's ingest (null when none) and reports whether it is a circular capture.
   std::shared_ptr<inst::Ingest> takeIngest(bool& circular);
   // Stops the ingest, runs the backend's stop() and merges the spools into the result. Never holds m_mutex.
-  Result<capture::CaptureResult> stopAndMerge(std::vector<std::string>& warnings);
+  // `stillReserved` is set to the reserved identity of the trace when nothing replaced the file after the
+  // check (no instrumentation merge), so noteProduced can compare it.
+  Result<capture::CaptureResult> stopAndMerge(std::vector<std::string>& warnings,
+                                              std::optional<control::FileIdentity>& stillReserved);
   // True when inst_hello from `pid` belongs to the running capture (see the class comment).
   bool instPidAllowedLocked(uint32_t pid) const;
   // Merges the spools into the trace of `result`; logs problems instead of failing the capture.

@@ -22,7 +22,22 @@ class TraceWriter {
  public:
   // Thread-safe: creates the file; the returned writer is single-threaded. The header is written with
   // footer_offset = 0 and the partial flag set; finish() rewrites it. magic/format_version are filled in.
+  // A final symbolic link (or Windows reparse point) at `path` is never followed: the open fails. An existing
+  // regular file is truncated and reused.
   static Result<TraceWriter> open(const std::filesystem::path& path, FileHeader header);
+
+  // Identity of a file reserved by the caller (st_dev/st_ino; volume serial and file index on Windows).
+  struct ReservedFile {
+    uint64_t volume = 0;
+    uint64_t index = 0;
+  };
+  // Thread-safe: creates `path` as a new empty regular file and fails with ErrorCode::Busy when anything is
+  // there (a file, a directory, a link even if dangling): O_CREAT|O_EXCL|O_NOFOLLOW, CREATE_NEW.
+  static Result<ReservedFile> reserveNew(const std::filesystem::path& path);
+  // Thread-safe: like open(), but `path` must already exist as exactly the regular file `reserved` names
+  // (and, on POSIX, have no other hard link); anything else fails before a byte is written or truncated.
+  static Result<TraceWriter> open(const std::filesystem::path& path, FileHeader header,
+                                  const ReservedFile& reserved);
 
   TraceWriter(TraceWriter&&) noexcept;
   TraceWriter& operator=(TraceWriter&&) noexcept;
@@ -57,6 +72,8 @@ class TraceWriter {
   // Not thread-safe. `json` is the raw UTF-8 JSON document (record_count 1).
   void appendCaptureInfo(std::string_view json);
 
+  // Not thread-safe. finish() leaves the partial flag set (a merge of a partial capture keeps it).
+  void keepPartialFlag();
   // Not thread-safe. Updates header fields that are written by finish().
   void setTimeRange(uint64_t startTs, uint64_t endTs);
   // Not thread-safe. ORs flag bits into the header flags written by finish().
@@ -74,6 +91,8 @@ class TraceWriter {
  private:
   struct Impl;
   explicit TraceWriter(std::unique_ptr<Impl> impl);
+  static Result<TraceWriter> openImpl(const std::filesystem::path& path, FileHeader header,
+                                      const ReservedFile* reserved);
   std::unique_ptr<Impl> m_impl;
 };
 

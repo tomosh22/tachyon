@@ -392,13 +392,15 @@ int main(int argc, char** argv) {
     cfg.remoteOutDir = opt.remoteOutDir.empty() ? std::filesystem::current_path(ec)
                                                 : std::filesystem::absolute(opt.remoteOutDir, ec);
   }
-  // A root agent writing remote traces into a directory other users can rename in could be made to write
-  // through a planted symlink (the trace writer opens its output by name): refuse to serve TCP from there.
+  // Traces are opened without following links, so a shared writable directory cannot redirect a write; a
+  // directory owned by another user could still have its files replaced by the owner: refuse that one.
   if (tcpListener) {
-    if (const std::string unsafe = agent::remoteOutDirWarning(cfg.remoteOutDir); !unsafe.empty()) {
+    if (const std::string unsafe = agent::remoteOutDirProblem(cfg.remoteOutDir); !unsafe.empty()) {
       TACHYON_LOG_ERROR("agent: refusing --listen: remote output directory: {}", unsafe);
       return kExitUsage;
     }
+    if (const std::string shared = agent::remoteOutDirWarning(cfg.remoteOutDir); !shared.empty())
+      TACHYON_LOG_WARN("agent: remote output directory: {}", shared);
   }
   cfg.maxInstSpoolBytes = static_cast<uint64_t>(opt.instSpoolMb) << 20;
   cfg.instSpoolRoot = opt.instSpoolDir;
