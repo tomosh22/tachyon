@@ -17,11 +17,6 @@
 #include <system_error>
 #include <unordered_map>
 
-#if !defined(_WIN32)
-#include <fcntl.h>
-#include <unistd.h>
-#endif
-
 namespace tachyon::inst {
 
 namespace fs = std::filesystem;
@@ -38,23 +33,20 @@ fs::path tempPathFor(const fs::path& out) {
   return tmp;
 }
 
-// The temporary file for `out`, created empty with O_EXCL|O_NOFOLLOW (POSIX) so that the merge never writes
-// through a link someone planted at its name in a shared directory (WP-66); a taken name is skipped.
-// Elsewhere (or when the file cannot be created here) the name alone is returned and the writer reports the
-// problem.
-fs::path reserveTempPath(const fs::path& out) {
-#if !defined(_WIN32)
+// The temporary file for `out`, created empty with O_EXCL|O_NOFOLLOW (CREATE_NEW and no reparse point on
+// Windows) so that the merge never writes through a link someone planted at its name in a shared directory
+// (WP-66, WP-66b); a taken name is skipped. The identity of the file is returned: the writer opens exactly
+// it.
+Result<std::pair<fs::path, TraceWriter::ReservedFile>> reserveTempPath(const fs::path& out) {
+  Error last = makeError(ErrorCode::IoError, "cannot create a temporary file next to " + out.string());
   for (int attempt = 0; attempt < 16; ++attempt) {
     fs::path tmp = tempPathFor(out);
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
-    if (fd >= 0) {
-      ::close(fd);
-      return tmp;
-    }
-    if (errno != EEXIST) return tmp;
+    auto reserved = TraceWriter::reserveNew(tmp);
+    if (reserved.ok()) return std::make_pair(std::move(tmp), *reserved);
+    last = reserved.error();
+    if (last.code != ErrorCode::Busy) break;
   }
-#endif
-  return tempPathFor(out);
+  return last;
 }
 
 // Chunk types the merge re-appends untouched, in this order.
@@ -424,7 +416,8 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
         "partial flag");
 
   // ---- write the new file ----
-  const fs::path tmp = reserveTempPath(outPath);
+  TACHYON_TRY_ASSIGN(auto reservedTmp, reserveTempPath(outPath));
+  const fs::path tmp = reservedTmp.first;
   struct TempGuard {
     fs::path path;
     bool armed = true;
@@ -438,7 +431,7 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
   FileHeader outHeader = inHeader;
   outHeader.start_ts = startTs;
   outHeader.end_ts = endTs;
-  TACHYON_TRY_ASSIGN(TraceWriter writer, TraceWriter::open(tmp, outHeader));
+  TACHYON_TRY_ASSIGN(TraceWriter writer, TraceWriter::open(tmp, outHeader, reservedTmp.second));
 
   // Tables keep their indices: the records refer to them.
   {
@@ -556,20 +549,10 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
   writer.appendCaptureInfo(buildCaptureInfo(havePreviousInfo ? &previousInfoText : nullptr, report, data,
                                             options.captureInfoPatch, addMerge));
 
+  // The capture behind a partial input is still cut short: the output keeps the partial flag (it has a valid
+  // footer, which readers use regardless of the flag).
+  if ((inHeader.flags & kFlagPartial) != 0) writer.keepPartialFlag();
   TACHYON_TRY(writer.finish());
-  if ((inHeader.flags & kFlagPartial) != 0) {
-    // finish() clears the partial flag; the capture behind this trace is still cut short, so put it back (the
-    // trace now has a valid footer, which readers use regardless of the flag).
-    std::fstream header(tmp, std::ios::in | std::ios::out | std::ios::binary);
-    uint32_t flags = 0;
-    header.seekg(offsetof(FileHeader, flags));
-    header.read(reinterpret_cast<char*>(&flags), sizeof(flags));
-    flags |= kFlagPartial;
-    header.seekp(offsetof(FileHeader, flags));
-    header.write(reinterpret_cast<const char*>(&flags), sizeof(flags));
-    header.flush();
-    if (!header) return makeError(ErrorCode::IoError, "cannot update the header of " + tmp.string());
-  }
 
   readerHolder.reset();
   fs::rename(tmp, outPath, ec);
@@ -578,6 +561,7 @@ Result<MergeReport> mergeDecoded(const fs::path& tracePath, DecodedInstrumentati
                      "cannot move the merged trace to " + outPath.string() + ": " + ec.message());
   guard.armed = false;
   report.wroteOutput = true;
+  report.outputIdentity = reservedTmp.second;
   return report;
 }
 

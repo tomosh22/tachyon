@@ -759,6 +759,9 @@ Result<CaptureResult> LinuxPerfBackend::stop() {
   if (!set.ok()) return finishFailed(set.error());
   perf::ConvertOptions co = convertOptionsFor(options, *session);
   co.progress = [this](float p) { notify(CaptureState::Converting, p); };
+  if (options.reservedOutput)
+    co.reservedOutput =
+        trace::TraceWriter::ReservedFile{options.reservedOutput->volume, options.reservedOutput->index};
   auto stats = perf::convertSpool(*set, options.outPath, co);
   if (!stats.ok())
     return finishFailed(makeError(stats.error().code, "converting " + session->spoolDir.string() + ": " +

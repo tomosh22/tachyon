@@ -1466,7 +1466,9 @@ Result<ConvertStats> convertSpool(const SpoolSet& set, const fs::path& out, cons
   trace::FileHeader header;
   header.clock_frequency_hz = 1'000'000'000ull;
   header.platform = trace::kPlatformLinux;
-  TACHYON_TRY_ASSIGN(trace::TraceWriter writer, trace::TraceWriter::open(out, header));
+  TACHYON_TRY_ASSIGN(trace::TraceWriter writer,
+                     options.reservedOutput ? trace::TraceWriter::open(out, header, *options.reservedOutput)
+                                            : trace::TraceWriter::open(out, header));
 
   Converter conv(set, options, writer, stats);
   auto ran = conv.run();

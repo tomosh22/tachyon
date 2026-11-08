@@ -14,7 +14,7 @@ Requests (client → agent):
 {"id":6,"cmd":"inst_hello","pid":1234,"api_version":65536}   // from SDK client; agent replies with shm/pipe details
 ```
 Responses/events (agent → client): `{"id":N,"ok":true,...}` or `{"id":N,"ok":false,"error":"...","code":"ENOPRIV|EBUSY|ENOTFOUND|EINTERNAL"}`; unsolicited events `{"event":"state","state":"idle|starting|capturing|converting|done","progress":0.0-1.0}`, `{"event":"capture_done","path":"...","events_lost":0,"duration_s":31.2}`, `{"event":"error","message":"..."}`.
-Instrumentation data path: after `inst_hello`, the agent opens a second pipe `\\.\pipe\tachyon-inst-<pid>`; the SDK streams binary `ScopeEventRec`/`FiberEventRec`/... frames prefixed with `{uint32 type; uint32 byte_len}`; strings are sent once per process as `{type=StringDef, uint64 ptr_key, uint32 len, bytes}` and referenced by `ptr_key` until the agent remaps to `StringIdx` at conversion.
+Instrumentation data path: after `inst_hello`, the agent opens a second pipe (name from the `inst_hello` reply, below); the SDK streams binary `ScopeEventRec`/`FiberEventRec`/... frames prefixed with `{uint32 type; uint32 byte_len}`; strings are sent once per process as `{type=StringDef, uint64 ptr_key, uint32 len, bytes}` and referenced by `ptr_key` until the agent remaps to `StringIdx` at conversion.
 
 ## Orchestrator clarifications (binding; merged with WP-10, 2026-10-25)
 Headers: `libs/control/protocol.h` (`tachyon::control`), now orchestrator-owned.
@@ -23,7 +23,7 @@ Headers: `libs/control/protocol.h` (`tachyon::control`), now orchestrator-owned.
 - Error mapping: NoPrivilege→ENOPRIV, Busy→EBUSY, NotFound→ENOTFOUND, all else→EINTERNAL. `stop`/`flush`/`cancel` while idle → ENOTFOUND; while starting/converting → EBUSY; a second `start` while not idle → EBUSY.
 - `stop` replies `ok` when conversion begins; `capture_done` follows as an event. `done` is transient: events are `state(done)`, `capture_done`, `state(idle)`.
 - `cancel` stops the backend and deletes the output.
-- `inst_hello` reply: `{"id":N,"ok":true,"pipe":"<name>"}`; Linux `<agent socket dir>/tachyon-inst-<pid>.sock`, Windows `\\.\pipe\tachyon-inst-<pid>`.
+- `inst_hello` reply: `{"id":N,"ok":true,"pipe":"<name>"}`; Linux `<agent socket dir>/tachyon-inst-<pid>.sock`, Windows `\\.\pipe\tachyon-inst-<pid>` when the agent pipe is the default `\\.\pipe\tachyon-agent`, else `<agent pipe>-tachyon-inst-<pid>`; a name over 256 characters becomes `\\.\pipe\tachyon-inst-<16-hex FNV-1a of the lower-cased agent pipe name>-<pid>` (WP-66b). The SDK always uses the name from the reply.
 - Overrides: `--socket <path>` / `--pipe <name>` / env `TACHYON_AGENT_PIPE`.
 
 ## Clarifications added with WP-11 (2026-10-25)
@@ -55,7 +55,7 @@ Headers: `libs/control/protocol.h` (`tachyon::control`), now orchestrator-owned.
 ## Clarifications added with WP-66 (2026-11-03, binding)
 
 - Remote `start` and every `flush` output name is reserved with `O_CREAT|O_EXCL|O_NOFOLLOW` (Windows `CREATE_NEW`); an existing name, including a dangling symlink, gets `-N`. A reservation is removed on failure only if it is still the same file. After the backend returns, the file's identity (st_dev/st_ino) must equal the reservation's, else the capture/flush fails ("replaced") and nothing is served.
-- The agent refuses `--listen` when `--remote-out-dir` is writable by group or others without the sticky bit, or owned by another user (the trace writer opens its output by name).
+- Trace outputs are opened without following links (O_NOFOLLOW; a reparse point is refused on Windows), and an existing file with more than one hard link is never overwritten. The final trace of a remote capture is written into exactly the file the agent reserved (same device and inode, `CaptureOptions::reservedOutput`); flushes and the instrumentation merge open by name with the same refusals, and the post-write identity check stays. After a merge, `noteProduced` records and compares the identity of the file the merge renamed into place. So a `--remote-out-dir` writable by group or others without the sticky bit only logs a warning (a local user can delete or swap a trace, which then fails or is not served, but cannot redirect a write); one owned by another user is refused (WP-66b).
 - Token file: opened once with `O_NOFOLLOW`; mode (no group/other access) and owner (the agent's euid or root) are checked on the descriptor. Windows: no mode/owner check.
 - `fetch` opens the file first (no symlinks) and requires the descriptor's identity to equal the one recorded when the agent produced it. The whole-file SHA-256 is cached per (path, size, mtime).
 - `connectTcp` gives each resolved address an equal share of the remaining deadline; time left by a fast failure carries over.

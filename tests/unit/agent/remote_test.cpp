@@ -691,7 +691,7 @@ TEST(RemoteOutput, AFailedStartLeavesNoReservedFileBehind) {
 #endif
 
 #if TACHYON_PLATFORM_LINUX
-TEST(RemoteOutput, TheOutputDirectoryIsCheckedForOtherWriters) {
+TEST(RemoteOutput, ASharedWritableDirectoryWarnsAndOnlyAForeignOwnerIsRefused) {
   TempDir dir;
   const fs::path d = dir.path() / "out";
   fs::create_directories(d);
@@ -706,7 +706,59 @@ TEST(RemoteOutput, TheOutputDirectoryIsCheckedForOtherWriters) {
   ::chmod(d.c_str(), 01777);
   EXPECT_TRUE(remoteOutDirWarning(d).empty()) << "a sticky directory like /tmp cannot have files replaced";
   EXPECT_TRUE(remoteOutDirWarning(d / "missing").empty());
+  // A shared directory is no longer a reason to refuse: the writer cannot be redirected through a link.
+  for (const mode_t mode : {0700, 0775, 0777, 01777}) {
+    ::chmod(d.c_str(), mode);
+    EXPECT_TRUE(remoteOutDirProblem(d).empty()) << std::oct << mode;
+  }
+  EXPECT_TRUE(remoteOutDirProblem(d / "missing").empty());
+  if (::geteuid() == 0) {
+    ASSERT_EQ(::chown(d.c_str(), 12345, 12345), 0);
+    ::chmod(d.c_str(), 0700);
+    EXPECT_NE(remoteOutDirProblem(d).find("owned by uid 12345"), std::string::npos);
+    ::chmod(d.c_str(), 01777);
+    EXPECT_FALSE(remoteOutDirProblem(d).empty()) << "a foreign owner is refused even with the sticky bit";
+  }
 }
+
+TEST(RemoteOutput, NoteProducedRecordsTheReservedFileAndNeverALinkToIt) {
+  RemoteHarness h(1000);
+  Agent& agent = *h.agent;
+  const fs::path file = h.outDir / "real.tachyon";
+  auto id = createExclusive(file);
+  ASSERT_TRUE(id.ok());
+  EXPECT_FALSE(agent.isProduced(file));
+  agent.noteProduced(file, *id);
+  EXPECT_TRUE(agent.isProduced(file));
+  EXPECT_TRUE(agent.isProduced(h.outDir / "." / "real.tachyon")) << "same key however the path is spelled";
+
+  // A symlink to a produced file is not itself recorded (the old code canonicalised it onto the target).
+  const fs::path link = h.outDir / "link.tachyon";
+  fs::create_symlink(file, link);
+  agent.noteProduced(link);
+  EXPECT_FALSE(agent.isProduced(link));
+
+  // Reserved, then swapped for a symlink to a file that is produced anyway: refused.
+  const fs::path swapped = h.outDir / "swapped.tachyon";
+  auto swappedId = createExclusive(swapped);
+  ASSERT_TRUE(swappedId.ok());
+  fs::remove(swapped);
+  fs::create_symlink(file, swapped);
+  agent.noteProduced(swapped, *swappedId);
+  EXPECT_FALSE(agent.isProduced(swapped));
+
+  // Reserved, then replaced by another regular file: the identity differs, so it is not recorded.
+  const fs::path replaced = h.outDir / "replaced.tachyon";
+  auto replacedId = createExclusive(replaced);
+  ASSERT_TRUE(replacedId.ok());
+  writeBlob(h.outDir / "other.tmp", 10, 3);  // made first, so the freed inode is not reused
+  fs::rename(h.outDir / "other.tmp", replaced);
+  agent.noteProduced(replaced, *replacedId);
+  EXPECT_FALSE(agent.isProduced(replaced));
+  agent.noteProduced(replaced);  // without a reservation to compare (after an instrumentation merge)
+  EXPECT_TRUE(agent.isProduced(replaced));
+}
+
 #endif
 
 TEST(RemoteFetch, TheFileOpenedMustBeTheFileThatWasProduced) {

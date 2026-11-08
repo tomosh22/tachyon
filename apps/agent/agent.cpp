@@ -191,6 +191,20 @@ struct OutputReservation {
 
 }  // namespace
 
+std::string remoteOutDirProblem(const std::filesystem::path& dir) {
+#if TACHYON_PLATFORM_WINDOWS
+  (void)dir;
+  return {};
+#else
+  struct stat st {};
+  if (::stat(dir.c_str(), &st) != 0) return {};
+  if (st.st_uid != ::geteuid() && st.st_uid != 0)
+    return dir.string() + " is owned by uid " + std::to_string(st.st_uid) +
+           ", who could replace the traces the agent writes there; use a directory you own";
+  return {};
+#endif
+}
+
 std::string remoteOutDirWarning(const std::filesystem::path& dir) {
 #if TACHYON_PLATFORM_WINDOWS
   (void)dir;
@@ -200,15 +214,13 @@ std::string remoteOutDirWarning(const std::filesystem::path& dir) {
   if (::stat(dir.c_str(), &st) != 0) return {};
   const bool othersCanWrite = (st.st_mode & (S_IWGRP | S_IWOTH)) != 0;
   const bool sticky = (st.st_mode & S_ISVTX) != 0;
-  const bool foreignOwner = st.st_uid != ::geteuid() && st.st_uid != 0;
   if (othersCanWrite && !sticky)
     return dir.string() +
-           " is writable by group or others: a local user could replace the traces the agent writes there; "
-           "run: chmod go-w " +
+           " is writable by group or others: a local user could delete or replace the traces the agent "
+           "writes there. The agent never writes through a symbolic link or into a file with another hard "
+           "link, and checks the identity of the file afterwards, so such a user can make a capture fail but "
+           "not redirect it; run: chmod go-w " +
            dir.string();
-  if (foreignOwner)
-    return dir.string() + " is owned by uid " + std::to_string(st.st_uid) +
-           ", who could replace the traces the agent writes there; use a directory you own";
   return {};
 #endif
 }
@@ -380,6 +392,7 @@ Response Agent::handleStart(const StartRequest& req, bool remote) {
     reservation.identity = *reserved;
     reservation.active = true;
     reservedIdentity = *reserved;
+    opts.reservedOutput = capture::ReservedOutput{reserved->volume, reserved->index};
   } else if (req.out_path.empty()) {
     const auto now =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
@@ -545,7 +558,8 @@ std::shared_ptr<inst::Ingest> Agent::takeIngest(bool& circular) {
 
 std::vector<std::string> Agent::mergeSpools(inst::Ingest& ingest, const std::vector<inst::SpoolInfo>& spools,
                                             const capture::CaptureResult& result, bool clip,
-                                            bool removeWhenDone, const std::string& captureInfoPatch) {
+                                            bool removeWhenDone, const std::string& captureInfoPatch,
+                                            std::optional<control::FileIdentity>* mergedIdentity) {
   std::vector<std::string> warnings;
   if (const uint32_t rejected = ingest.rejectedConnections(); rejected > 0)
     warnings.push_back(
@@ -609,11 +623,15 @@ std::vector<std::string> Agent::mergeSpools(inst::Ingest& ingest, const std::vec
     TACHYON_LOG_WARN("agent: instrumentation: {}", warning);
     warnings.push_back("instrumentation: " + warning);
   }
+  if (mergedIdentity != nullptr && merged->wroteOutput && merged->outputIdentity)
+    *mergedIdentity = control::FileIdentity{merged->outputIdentity->volume, merged->outputIdentity->index};
   if (removeWhenDone && !m_config.keepInstSpool) ingest.removeSpoolDir();
   return warnings;
 }
 
-Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& warnings) {
+Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& warnings,
+                                                   std::optional<control::FileIdentity>& expectedIdentity) {
+  expectedIdentity.reset();
   bool circular = false;
   std::shared_ptr<inst::Ingest> ingest = takeIngest(circular);
   // Drain the SDK connections first: what the processes had already sent belongs to the capture.
@@ -630,11 +648,15 @@ Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& war
       reservedPath = m_outReservedPath;
     }
     // The reserved file itself is checked: a backend may report another path (or none it wrote).
-    if (auto checked = checkReserved(reservedPath, reserved); !checked.ok()) result = checked.error();
+    if (auto checked = checkReserved(reservedPath, reserved); !checked.ok()) {
+      result = checked.error();
+    } else if (reserved && result->tracePath == reservedPath) {
+      expectedIdentity = reserved;  // replaced below when an instrumentation merge renames a new file in
+    }
   }
   if (ingest) {
     if (result.ok()) {
-      warnings = mergeSpools(*ingest, spools, *result, circular, true);
+      warnings = mergeSpools(*ingest, spools, *result, circular, true, {}, &expectedIdentity);
     } else {
       ingest->removeSpoolDir();
     }
@@ -644,8 +666,9 @@ Result<capture::CaptureResult> Agent::stopAndMerge(std::vector<std::string>& war
 
 void Agent::conversionWorker() {
   std::vector<std::string> warnings;
-  auto result = stopAndMerge(warnings);
-  if (result.ok()) noteProduced(result->tracePath);
+  std::optional<control::FileIdentity> expectedIdentity;
+  auto result = stopAndMerge(warnings, expectedIdentity);
+  if (result.ok()) noteProduced(result->tracePath, expectedIdentity);
   std::lock_guard lock(m_mutex);
   if (result.ok()) {
     TACHYON_LOG_INFO("agent: capture done: {} ({} events lost)", result->tracePath.string(),
@@ -711,11 +734,14 @@ Result<CaptureSummary> Agent::performFlush(const FlushJob& job) {
                             ",\"flush_window_s\":" + std::to_string(job.seconds) +
                             ",\"flush_trigger\":" + (job.trigger ? "true" : "false") + "}";
   std::vector<std::string> flushWarnings;
+  // The file must be the reserved one, or the one the instrumentation merge renamed into place over it.
+  std::optional<control::FileIdentity> expectedIdentity;
+  if (result->tracePath == job.dir / (job.name + ".tachyon")) expectedIdentity = job.reserved;
   if (std::shared_ptr<inst::Ingest> ingest = currentIngest()) {
     const std::vector<inst::SpoolInfo> spools = ingest->snapshot();
-    flushWarnings = mergeSpools(*ingest, spools, *result, true, false, patch);
+    flushWarnings = mergeSpools(*ingest, spools, *result, true, false, patch, &expectedIdentity);
   }
-  noteProduced(result->tracePath);  // after the merge: it replaces the file, the identity is recorded now
+  noteProduced(result->tracePath, expectedIdentity);
   CaptureSummary summary = toSummary(*result, std::move(flushWarnings));
   FlushedEvent event;
   event.path = summary.path;
@@ -878,15 +904,42 @@ Response Agent::handleCancel() {
   return makeOkResponse(std::nullopt);
 }
 
-void Agent::noteProduced(const std::filesystem::path& path) {
+namespace {
+// The key of a produced file: its directory resolved, its final component as spelled. Empty when the
+// directory does not exist.
+std::filesystem::path producedKey(const std::filesystem::path& path) {
   std::error_code ec;
-  std::filesystem::path canonical = std::filesystem::canonical(path, ec);
-  if (ec) return;  // not on disk (a backend that reports a path it did not write): nothing to serve
-  auto info = inspectPath(canonical);
-  if (!info.ok() || !info->regular) return;
+  const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+  if (ec || abs.filename().empty()) return {};
+  const std::filesystem::path dir = std::filesystem::canonical(abs.parent_path(), ec);
+  if (ec) return {};
+  return dir / abs.filename();
+}
+}  // namespace
+
+void Agent::noteProduced(const std::filesystem::path& path,
+                         const std::optional<control::FileIdentity>& reserved) {
+  // The reserved path itself is looked at, never what a link at its name points to: a symlink planted there
+  // is refused, and the file must be the one that was reserved (when the reservation is known). Only the
+  // directory part is resolved, so the key matches the canonical path fetch requests are reduced to.
+  auto info = inspectPath(path);
+  if (!info.ok() || info->symlink || !info->regular) return;  // not on disk, or not a plain file: not served
+  if (reserved && info->identity != *reserved) {
+    TACHYON_LOG_WARN("agent: {} is not the file the agent reserved for it; not served", path.string());
+    return;
+  }
+  const std::filesystem::path key = producedKey(path);
+  if (key.empty()) return;
   std::lock_guard lock(m_producedMutex);
-  m_produced[canonical] = info->identity;
-  m_hashCache.erase(canonical);
+  m_produced[key] = info->identity;
+  m_hashCache.erase(key);
+}
+
+bool Agent::isProduced(const std::filesystem::path& path) {
+  const std::filesystem::path key = producedKey(path);
+  if (key.empty()) return false;
+  std::lock_guard lock(m_producedMutex);
+  return m_produced.count(key) != 0;
 }
 
 Response Agent::handleFetch(const FetchRequest& req) {
@@ -1061,8 +1114,9 @@ void Agent::shutdown() {
   }
   if (needStop) {
     std::vector<std::string> warnings;
-    auto result = stopAndMerge(warnings);
-    if (result.ok()) noteProduced(result->tracePath);
+    std::optional<control::FileIdentity> expectedIdentity;
+    auto result = stopAndMerge(warnings, expectedIdentity);
+    if (result.ok()) noteProduced(result->tracePath, expectedIdentity);
     std::lock_guard lock(m_mutex);
     if (result.ok()) {
       TACHYON_LOG_INFO("agent: shutdown stopped capture: {}", result->tracePath.string());
