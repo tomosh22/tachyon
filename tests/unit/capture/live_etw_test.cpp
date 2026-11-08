@@ -442,6 +442,46 @@ TEST(LiveEtwDecoder, WhatPrecedesAProcessEndIsKeptEvenWhenItArrivesAfterIt) {
   EXPECT_EQ(exe->unloadTs, 1000u);
 }
 
+TEST(LiveEtwDecoder, AnImageUnloadIsHeldBackForTheSamplesThatPrecedeIt) {
+  // The sink resolves a sample's addresses against the modules it knows when the sample reaches it, so the
+  // unload of a module (a process exiting unloads all of its images) must not overtake older samples.
+  using namespace opcodes;
+  EventScript s;
+  s.process(kProcessStart, 10, 100, 4, "game.exe");
+  s.thread(kThreadStart, 11, 100, 101);
+  s.image(kImageLoad, 12, 100, kGameBase, 0x10000, 0x5F001234, kGamePath);
+  s.image(kImageUnload, 500, 100, kGameBase, 0x10000, 0x5F001234, kGamePath);
+  s.sample(400, 101, 100, 0, kGameBase + 0x10);  // older than the unload, decoded after it
+  auto sink = std::make_shared<RecordingSink>();
+  LiveEtwDecoder decoder(decoderConfig(sink));
+  for (const HexEvent& e : s.events()) decoder.onEvent(e.view());
+  EXPECT_EQ(sink->module(100, kGameBase, true), nullptr) << "not reported yet";
+  EventScript later;
+  later.sample(500 + kEndedGraceSeconds * 10'000'000 + 1, 999, 999, 0, 0x10);  // any later event moves time
+  for (const HexEvent& e : later.events()) decoder.onEvent(e.view());
+  ASSERT_NE(sink->module(100, kGameBase, true), nullptr);
+  EXPECT_EQ(sink->module(100, kGameBase, true)->unloadTs, 500u);
+  decoder.flush();
+  ASSERT_EQ(sink->samples.size(), 1u);
+}
+
+TEST(LiveEtwDecoder, AModuleLoadedAgainAtTheSameBaseReportsTheOldUnloadFirst) {
+  using namespace opcodes;
+  EventScript s;
+  s.process(kProcessStart, 10, 100, 4, "game.exe");
+  s.image(kImageLoad, 12, 100, kGameBase, 0x10000, 0x5F001234, kGamePath);
+  s.image(kImageUnload, 500, 100, kGameBase, 0x10000, 0x5F001234, kGamePath);
+  s.image(kImageLoad, 600, 100, kGameBase, 0x10000, 0x5F001234, kGamePath);
+  auto sink = std::make_shared<RecordingSink>();
+  LiveEtwDecoder decoder(decoderConfig(sink));
+  for (const HexEvent& e : s.events()) decoder.onEvent(e.view());
+  ASSERT_EQ(sink->modules.size(), 3u);
+  EXPECT_EQ(sink->modules[0].unloadTs, 0u);
+  EXPECT_EQ(sink->modules[1].unloadTs, 500u);
+  EXPECT_EQ(sink->modules[2].unloadTs, 0u);
+  EXPECT_EQ(sink->modules[2].loadTs, 600u);
+}
+
 TEST(LiveEtwDecoder, AnEndedProcessIsForgottenAfterTheGracePeriod) {
   using namespace opcodes;
   EventScript s;

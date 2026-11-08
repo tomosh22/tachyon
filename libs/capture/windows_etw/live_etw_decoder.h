@@ -18,7 +18,10 @@
 //
 // Order: events should arrive roughly in timestamp order (LiveEtwSource sorts each batch). A Process, Thread
 // or Image event that arrives after the sample it explains is not retroactive: that sample keeps an unknown
-// pid or unmapped frames.
+// pid or unmapped frames. The opposite order is handled: the metadata of a batch is decoded before its data
+// (LiveEtwSource holds data back), so an END (Process End, Image Unload) can overtake the samples that
+// precede it; a process stays a target until its End time and its tables and modules are released
+// kEndedGraceSeconds later, so those samples are still attributed and resolved.
 #pragma once
 
 #include "capture/capture_backend.h"
@@ -51,7 +54,8 @@ struct LiveEtwDecoderConfig {
   etlconvert::DevicePathMapper deviceMapper;
 };
 
-// How long after its Process End event a process stays in the tables. The samples, switches and images of a
+// How long after its Process End event a process stays in the tables, and how long an Image Unload is held
+// back. The samples, switches and images of a
 // process's last moments reach the decoder after the End event when the buffers of the CPUs are delivered in
 // another order (or the data is held back, see LiveEtwSource): they are still attributed to it.
 inline constexpr uint64_t kEndedGraceSeconds = 5;
@@ -140,6 +144,9 @@ class LiveEtwDecoder final : private etlconvert::ParentListener {
   // A process that ended is forgotten only some time later (see kEndedGraceSeconds); `all` forgets them now.
   void reapEnded(bool all);
   void reapProcess(uint32_t pid, uint64_t endTs);
+  // An Image Unload is reported kUnloadGrace later, for the same reason (the samples that precede it).
+  void applyPendingUnloads(uint32_t pid, uint64_t base, bool anyBase);
+  void noteReapDue(uint64_t ts);
   void pruneThreads();
 
   LiveEtwDecoderConfig m_cfg;
@@ -157,6 +164,12 @@ class LiveEtwDecoder final : private etlconvert::ParentListener {
   std::unordered_map<uint32_t, Thr> m_threads;
   // pid -> base -> the module as reported (kept to report its unload).
   std::unordered_map<uint32_t, std::unordered_map<uint64_t, LiveModule>> m_loaded;
+  struct PendingUnload {
+    uint32_t pid = 0;
+    uint64_t base = 0, ts = 0;
+  };
+  std::vector<PendingUnload> m_pendingUnloads;
+  uint64_t m_reapDueAt = ~uint64_t{0};  // trace time after which reapEnded() has something to do
   uint64_t m_newestTs = 0;
   std::vector<uint64_t> m_ips;  // scratch
 };

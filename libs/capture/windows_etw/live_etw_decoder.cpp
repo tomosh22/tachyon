@@ -83,12 +83,17 @@ void LiveEtwDecoder::onEvent(const EtwEvent& e) {
   }
   m_newestTs = std::max(m_newestTs, e.timestamp);
   m_matcher->advance(m_newestTs);
-  if (!m_ended.empty()) reapEnded(false);
+  if (m_newestTs > m_reapDueAt) reapEnded(false);
 }
 
 void LiveEtwDecoder::flush() {
   m_matcher->flush();
   reapEnded(true);
+}
+
+void LiveEtwDecoder::noteReapDue(uint64_t ts) {
+  const uint64_t grace = kEndedGraceSeconds * m_cfg.clockFrequencyHz;
+  m_reapDueAt = std::min(m_reapDueAt, ts > ~uint64_t{0} - grace ? ~uint64_t{0} - 1 : ts + grace);
 }
 
 void LiveEtwDecoder::reapEnded(bool all) {
@@ -98,13 +103,42 @@ void LiveEtwDecoder::reapEnded(bool all) {
     if (all || m_newestTs > endTs + grace) due.emplace_back(pid, endTs);
   std::sort(due.begin(), due.end());
   for (const auto& [pid, endTs] : due) reapProcess(pid, endTs);
+  // Image unloads that are old enough, in the order they happened.
+  std::vector<PendingUnload> ready;
+  for (auto it = m_pendingUnloads.begin(); it != m_pendingUnloads.end();) {
+    if (all || m_newestTs > it->ts + grace) {
+      ready.push_back(*it);
+      it = m_pendingUnloads.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  std::stable_sort(ready.begin(), ready.end(),
+                   [](const PendingUnload& a, const PendingUnload& b) { return a.ts < b.ts; });
+  for (const PendingUnload& u : ready) unloadModule(u.pid, u.base, u.ts);
+  m_reapDueAt = ~uint64_t{0};
+  for (const auto& [pid, endTs] : m_ended) noteReapDue(endTs);
+  for (const PendingUnload& u : m_pendingUnloads) noteReapDue(u.ts);
 }
 
 void LiveEtwDecoder::reapProcess(uint32_t pid, uint64_t endTs) {
+  applyPendingUnloads(pid, 0, true);
   unloadAllModules(pid, endTs);
   m_targets.erase(pid);
   m_procs.erase(pid);
   m_ended.erase(pid);
+}
+
+void LiveEtwDecoder::applyPendingUnloads(uint32_t pid, uint64_t base, bool anyBase) {
+  for (auto it = m_pendingUnloads.begin(); it != m_pendingUnloads.end();) {
+    if (it->pid == pid && (anyBase || it->base == base)) {
+      const PendingUnload u = *it;
+      it = m_pendingUnloads.erase(it);
+      unloadModule(u.pid, u.base, u.ts);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void LiveEtwDecoder::onProcessEvent(const EtwEvent& e) {
@@ -158,6 +192,7 @@ void LiveEtwDecoder::onProcessEvent(const EtwEvent& e) {
       // The process is forgotten later: what it did just before it ended may still be on its way here.
       if (const auto t = m_targets.find(pid); t != m_targets.end()) t->second = e.timestamp;
       m_ended[pid] = e.timestamp;
+      noteReapDue(e.timestamp);
       break;
     }
     default: break;
@@ -237,7 +272,13 @@ void LiveEtwDecoder::onImageEvent(const EtwEvent& e) {
   const uint32_t pid = img->processId;
   if (!keepPid(pid, e.timestamp)) return;
   if (e.opcode == op::kImageUnload) {
-    unloadModule(pid, img->imageBase, e.timestamp);
+    // Held back: samples older than the unload may still be on their way, and the sink resolves their
+    // addresses against the modules it knows when they arrive.
+    const auto known = m_loaded.find(pid);
+    if (known != m_loaded.end() && known->second.count(img->imageBase) != 0) {
+      m_pendingUnloads.push_back(PendingUnload{pid, img->imageBase, e.timestamp});
+      noteReapDue(e.timestamp);
+    }
   } else {
     loadModule(pid, img->imageBase, img->imageSize, img->fileName, img->imageChecksum, img->timeDateStamp,
                e.opcode == op::kImageLoad ? e.timestamp : 0);
@@ -452,6 +493,7 @@ void LiveEtwDecoder::pruneThreads() {
 
 void LiveEtwDecoder::loadModule(uint32_t pid, uint64_t base, uint64_t size, const std::string& path,
                                 uint32_t checksum, uint32_t timeDateStamp, uint64_t loadTs) {
+  applyPendingUnloads(pid, base, false);  // the module was unloaded and is being loaded again
   auto& perPid = m_loaded[pid];
   const auto known = perPid.find(base);
   if (known != perPid.end()) {
