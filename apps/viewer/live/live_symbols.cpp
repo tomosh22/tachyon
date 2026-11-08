@@ -60,8 +60,12 @@ void registerPlatformProviders(symbols::SymbolService& service) {
 LiveSymbols::LiveSymbols(LiveSymbolsConfig config) : m_config(std::move(config)) {}
 
 LiveSymbols::~LiveSymbols() {
-  std::lock_guard lock(m_statsMutex);
-  m_epoch.reset();
+  std::shared_ptr<Epoch> old;
+  {
+    std::lock_guard lock(m_statsMutex);
+    old = std::move(m_epoch);
+  }
+  // `old` is released here, outside the lock: its workers are joined (stats() must not wait for that).
 }
 
 LiveSymbolStats LiveSymbols::stats() const {
@@ -76,10 +80,14 @@ LiveSymbolStats LiveSymbols::stats() const {
 }
 
 void LiveSymbols::reset(LiveSymbolsConfig config) {
-  std::lock_guard lock(m_statsMutex);
-  m_config = std::move(config);
-  m_epoch.reset();  // joins the workers of the old run; documents that still use it keep it alive
-  m_stats = {};
+  std::shared_ptr<Epoch> old;
+  {
+    std::lock_guard lock(m_statsMutex);
+    m_config = std::move(config);
+    old = std::move(m_epoch);
+    m_stats = {};
+  }
+  // `old` is released here (outside the lock): when no document still uses it, its workers are joined.
 }
 
 bool LiveSymbols::sameTables(const Epoch& epoch, const model::TraceModel& snapshot,

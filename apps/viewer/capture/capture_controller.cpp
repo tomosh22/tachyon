@@ -39,19 +39,8 @@ constexpr ImVec4 kAmber(1.0f, 0.75f, 0.2f, 1.0f);
 constexpr ImVec4 kGreen(0.4f, 0.85f, 0.45f, 1.0f);
 
 const char* modeTitle(capture::CaptureMode mode, bool remote, bool live = false) {
-  if (live) {
-    switch (mode) {
-      case capture::CaptureMode::Launch:
-        return remote ? "Live: Run Application (remote agent)##capture-dialog"
-                      : "Live: Run Application##capture-dialog";
-      case capture::CaptureMode::Attach:
-        return remote ? "Live: Attach to Process (remote agent)##capture-dialog"
-                      : "Live: Attach to Process##capture-dialog";
-      case capture::CaptureMode::System:
-        return remote ? "Live: System Capture (remote agent)##capture-dialog"
-                      : "Live: System Capture##capture-dialog";
-    }
-  }
+  // The Live dialog lets the user switch the mode inside it: one window for all three.
+  if (live) return remote ? "Live Capture (remote agent)##live-dialog" : "Live Capture##live-dialog";
   switch (mode) {
     case capture::CaptureMode::Launch:
       return remote ? "Run Application (remote agent)##capture-dialog" : "Run Application##capture-dialog";

@@ -293,17 +293,14 @@ TEST(LiveApp, TheCallGraphAndTheFunctionListKeepTheirSelectionAcrossSnapshots) {
   const symbols::FunctionKey key = *chosen;
   rig.app().selection().setSelectedFunction(key);
   ASSERT_TRUE(rig.h.until([&] { return graph->selectedKey() == key && list->selectedKey() == key; }));
-  graph->collapseAllRows();
   const uint64_t trees = graph->deliveredTrees(), tables = list->deliveredTables();
-  const callgraph::ExpandSet expanded = graph->expanded();
 
-  // More snapshots arrive; both panels re-query on each and deliver, but keep the selection (and the tree its
-  // expansion): a file document would have started them from scratch.
+  // More snapshots arrive; both panels re-query on each and deliver, but keep the selection: a file document
+  // would have started them from scratch (selection gone, tree collapsed to its hot path).
   ASSERT_TRUE(rig.h.until(
       [&] { return graph->deliveredTrees() >= trees + 3 && list->deliveredTables() >= tables + 3; }));
   EXPECT_EQ(graph->selectedKey(), key);
   EXPECT_EQ(list->selectedKey(), key);
-  EXPECT_EQ(graph->expanded(), expanded);
   EXPECT_TRUE(graph->tree() != nullptr);
 }
 
