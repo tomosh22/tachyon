@@ -5,8 +5,7 @@
 #include "cli/cli.h"
 #include "export/export.h"
 #include "model/model.h"
-#include "symbols/dia/dia_provider.h"
-#include "symbols/dwarf/dwarf_provider.h"
+#include "report/symbol_setup.h"
 #include "symbols/symbol_service.h"
 
 #include <nlohmann/json.hpp>
@@ -154,49 +153,6 @@ fs::path defaultSymbolCacheDir() {
   return {};
 }
 
-bool endsWith(const std::string& s, const std::string& suffix) {
-  return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-// Directories become search paths (and contribute their *.symbols.json files as overrides), *.json files are
-// overrides, any other file is a search path. Problems are returned as warnings.
-std::vector<std::string> applySymbolPaths(symbols::SymbolService& service, const ExportArgs& a) {
-  std::vector<std::string> problems;
-  symbols::SymbolLocatorConfig config;
-  config.servers = a.symbolServers;
-  config.cacheDir = defaultSymbolCacheDir();
-  auto addOverride = [&](const fs::path& file) {
-    const Result<void> r = service.addSymbolFileOverride(file);
-    if (!r.ok()) problems.push_back(file.string() + ": " + r.error().toString());
-  };
-  for (const std::string& p : a.symbolPaths) {
-    const fs::path path(p);
-    std::error_code ec;
-    if (fs::is_directory(path, ec)) {
-      config.searchPaths.push_back(path);
-      std::vector<fs::path> sidecars;
-      for (fs::directory_iterator it(path, fs::directory_options::skip_permission_denied, ec), end;
-           !ec && it != end; it.increment(ec)) {
-        std::error_code fileEc;
-        if (it->is_regular_file(fileEc) && endsWith(it->path().filename().string(), ".symbols.json"))
-          sidecars.push_back(it->path());
-      }
-      std::sort(sidecars.begin(), sidecars.end());
-      for (const fs::path& s : sidecars) addOverride(s);
-    } else if (fs::is_regular_file(path, ec)) {
-      if (path.extension() == ".json") {
-        addOverride(path);
-      } else {
-        config.searchPaths.push_back(path);
-      }
-    } else {
-      problems.push_back(p + ": does not exist");
-    }
-  }
-  if (!config.searchPaths.empty() || !config.servers.empty()) service.configureLocator(std::move(config));
-  return problems;
-}
-
 }  // namespace
 
 int runExport(const std::vector<std::string>& args, bool json, std::ostream& out, std::ostream& err) {
@@ -250,12 +206,16 @@ int runExport(const std::vector<std::string>& args, bool json, std::ostream& out
   // Symbols matter for speedscope frame names only.
   symbols::SymbolService service(a.symbolServers, defaultSymbolCacheDir());
   if (a.format == Format::Speedscope) {
-#ifdef _WIN32
-    symbols::registerDiaProvider(service);
-#else
-    symbols::registerDwarfProvider(service);
-#endif
-    for (const std::string& p : applySymbolPaths(service, a)) err << "tachyon-cli: warning: " << p << "\n";
+    report::SymbolSetupOptions setup;
+    setup.servers = a.symbolServers;
+    setup.cacheDir = defaultSymbolCacheDir();
+    setup.directorySidecars = true;
+    for (const std::string& p : a.symbolPaths) setup.symbolPaths.emplace_back(p);
+    for (const report::SymbolSetupProblem& p : report::setupSymbolService(service, setup))
+      err << "tachyon-cli: warning: "
+          << (p.kind == report::SymbolSetupProblem::Kind::MissingPath ? p.path.string() + ": does not exist"
+                                                                      : p.path.string() + ": " + p.detail)
+          << "\n";
     service.resolveAllAsync(m);
     service.waitAll();
     size_t missing = 0;

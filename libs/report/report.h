@@ -18,6 +18,10 @@ inline constexpr int kSchemaVersion = 1;
 inline constexpr size_t kMaxFrameSeries = 16;
 inline constexpr size_t kMaxThreads = 256;
 inline constexpr size_t kMaxWarnings = 32;
+// The baseline function set (Report::significantFunctions): every function whose exclusive share is at least
+// kSignificantFunctionPct percent, at most kMaxSignificantFunctions of them.
+inline constexpr double kSignificantFunctionPct = 0.5;
+inline constexpr size_t kMaxSignificantFunctions = 2000;
 
 struct TraceSummary {
   double durationMs = 0;
@@ -31,6 +35,9 @@ struct TraceSummary {
   uint64_t sampleCount = 0;
   bool hasInstrumentation = false;
   std::vector<std::string> warnings;  // CaptureInfo "warnings", at most kMaxWarnings
+  // Running time summed over every thread of the trace (threadStateTotals), the "total CPU" of the baseline
+  // diff. 0: unknown (a report written before WP-69).
+  double totalCpuMs = 0;
 };
 
 struct ReportSettings {
@@ -101,6 +108,12 @@ struct Report {
   double totalExclusiveMs = 0;
   uint64_t functionCount = 0;
   std::vector<FunctionReportRow> functions;  // top N by exclusive time, exclusive > 0
+  // Baseline function set (WP-62b): every function with exclusivePct >= kSignificantFunctionPct (capped at
+  // kMaxSignificantFunctions), same order as `functions`. significantFloorPct is the share below which a
+  // function is not listed here: kSignificantFunctionPct, or the smallest listed share when the cap cut the
+  // list. -1: the report has no such set (a report written before WP-69; only `functions` is known).
+  std::vector<FunctionReportRow> significantFunctions;
+  double significantFloorPct = -1;
   uint64_t scopeCount = 0;
   std::vector<ScopeReportRow> scopes;  // top N by total time
   uint64_t lockCount = 0;

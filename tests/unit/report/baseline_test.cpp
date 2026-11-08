@@ -177,6 +177,169 @@ TEST(BaselineDiff, UnlistedFunctionsAreBoundedByTheSmallestListedShare) {
   EXPECT_EQ(f->baseline, 20.0);
 }
 
+// WP-62b: a flat profile. Twenty functions at 3.9% plus a tail; the reports list only the top 5 but carry
+// the 0.5% function set. One tail function rises from ~1% to ~4%.
+Report flatReport(double hotPct) {
+  Report r;
+  r.trace.platform = "linux";
+  r.trace.durationMs = 1000;
+  r.trace.totalCpuMs = 1000;
+  r.totalExclusiveMs = 1000;
+  r.settings.topN = 5;
+  r.significantFloorPct = kSignificantFunctionPct;
+  for (int i = 0; i < 20; ++i) {
+    FunctionReportRow f = fn("F" + std::to_string(i), 3.9);
+    f.exclusiveMs = 39;
+    r.significantFunctions.push_back(f);
+  }
+  FunctionReportRow hot = fn("Hot", hotPct);
+  hot.exclusiveMs = hotPct * 10;
+  r.significantFunctions.push_back(hot);
+  r.functions.assign(r.significantFunctions.begin(), r.significantFunctions.begin() + 5);
+  return r;
+}
+
+TEST(BaselineDiff, FlatProfileGrowthFromOneToFourPercentIsFlagged) {
+  const Report base = flatReport(1.0), cur = flatReport(4.0);
+  // Neither report lists Hot among its top 5: the old comparison saw only bounds (<= 3.9) and missed it.
+  const Diff d = compareReports(base, cur, {});
+  const Finding* f = find(d.regressions, "function_exclusive", "game.exe!Hot");
+  ASSERT_NE(f, nullptr);
+  EXPECT_EQ(f->baseline, 1.0);
+  EXPECT_EQ(f->current, 4.0);
+  EXPECT_FALSE(f->baselineIsBound);
+  EXPECT_FALSE(f->currentIsBound);
+  EXPECT_NEAR(*f->change, 3.0, 1e-9);
+
+  // The same reports without the function set (an old baseline): only the top-N bound is known, no finding.
+  Report oldBase = base, oldCur = cur;
+  oldBase.significantFunctions.clear();
+  oldBase.significantFloorPct = -1;
+  oldCur.significantFunctions.clear();
+  oldCur.significantFloorPct = -1;
+  EXPECT_EQ(find(compareReports(oldBase, oldCur, {}).regressions, "function_exclusive", "game.exe!Hot"),
+            nullptr);
+  // A new current report against an old baseline still compares what it can.
+  (void)compareReports(oldBase, cur, {});
+}
+
+TEST(BaselineDiff, FunctionBelowTheFloorInTheBaselineIsBoundedByTheFloor) {
+  Report base = flatReport(1.0), cur = flatReport(4.0);
+  base.significantFunctions.pop_back();  // Hot was below 0.5% in the baseline
+  const Diff d = compareReports(base, cur, {});
+  const Finding* f = find(d.regressions, "function_exclusive", "game.exe!Hot");
+  ASSERT_NE(f, nullptr);
+  EXPECT_TRUE(f->baselineIsBound);
+  EXPECT_EQ(f->baseline, kSignificantFunctionPct);
+  EXPECT_NEAR(*f->change, 3.5, 1e-9);
+}
+
+TEST(BaselineDiff, AbsoluteExclusiveTimeRegressesWhenTheShareBarelyMoves) {
+  // 30 ms -> 45 ms (+50%, +15 ms) while the share only moves by 1.5 pp: below the 2 pp threshold.
+  const Report base = flatReport(3.0), cur = flatReport(4.5);
+  const Diff d = compareReports(base, cur, {});
+  EXPECT_EQ(find(d.regressions, "function_exclusive", "game.exe!Hot"), nullptr);
+  const Finding* f = find(d.regressions, "function_exclusive_ms", "game.exe!Hot");
+  ASSERT_NE(f, nullptr);
+  EXPECT_EQ(f->baseline, 30.0);
+  EXPECT_EQ(f->current, 45.0);
+  EXPECT_EQ(f->valueUnit, "ms");
+  EXPECT_NEAR(*f->change, 50.0, 1e-9);
+
+  Thresholds t;  // configurable: a floor above the +15 ms silences it
+  t.functionExclusiveAbsFloorMs = 20;
+  EXPECT_EQ(find(compareReports(base, cur, t).regressions, "function_exclusive_ms"), nullptr);
+  t = {};
+  t.functionExclusiveRelPct = 60;
+  EXPECT_EQ(find(compareReports(base, cur, t).regressions, "function_exclusive_ms"), nullptr);
+  // A function flagged by share is not reported a second time by time.
+  const Report big = flatReport(8.0);
+  EXPECT_EQ(find(compareReports(base, big, {}).regressions, "function_exclusive_ms", "game.exe!Hot"),
+            nullptr);
+  EXPECT_NE(find(compareReports(base, big, {}).regressions, "function_exclusive", "game.exe!Hot"), nullptr);
+  // And the reverse direction is an improvement.
+  EXPECT_NE(find(compareReports(cur, base, {}).improvements, "function_exclusive_ms", "game.exe!Hot"),
+            nullptr);
+}
+
+TEST(BaselineDiff, TotalCpuRegression) {
+  Report base = flatReport(1.0), cur = flatReport(1.0);
+  cur.trace.totalCpuMs = 1150;  // +15%, +150 ms
+  const Diff d = compareReports(base, cur, {});
+  const Finding* f = find(d.regressions, "total_cpu");
+  ASSERT_NE(f, nullptr);
+  EXPECT_EQ(f->baseline, 1000.0);
+  EXPECT_EQ(f->current, 1150.0);
+  EXPECT_NEAR(*f->change, 15.0, 1e-9);
+
+  cur.trace.totalCpuMs = 1080;  // +8%: within 10%
+  EXPECT_EQ(find(compareReports(base, cur, {}).regressions, "total_cpu"), nullptr);
+  cur.trace.totalCpuMs = 800;
+  EXPECT_NE(find(compareReports(base, cur, {}).improvements, "total_cpu"), nullptr);
+
+  Thresholds t;
+  t.totalCpuRelPct = 5;
+  cur.trace.totalCpuMs = 1080;
+  EXPECT_NE(find(compareReports(base, cur, t).regressions, "total_cpu"), nullptr);
+  base.trace.totalCpuMs = 0;  // an old baseline has no total: skipped
+  cur.trace.totalCpuMs = 5000;
+  EXPECT_EQ(find(compareReports(base, cur, {}).regressions, "total_cpu"), nullptr);
+}
+
+TEST(BaselineDiff, NotesForNewRemovedScopesFramesAndPartialTraces) {
+  Report base = baseReport();
+  base.scopeCount = 2;
+  base.frameSeriesTotal = 1;
+  Report cur = base;
+  cur.scopes = {scope("Update", 4.0), scope("Brand New", 1.0)};  // Render removed, Brand New new
+  cur.scopeCount = 2;
+  cur.frames.clear();  // the Frame@Main series is gone
+  cur.frameSeriesTotal = 0;
+  cur.trace.partial = true;
+  const Diff d = compareReports(base, cur, {});
+  auto has = [&](const std::string& needle) {
+    for (const std::string& n : d.notes)
+      if (n.find(needle) != std::string::npos) return true;
+    return false;
+  };
+  EXPECT_TRUE(has("scope 'Brand New' is new")) << d.notes.size();
+  EXPECT_TRUE(has("scope 'Render' was removed"));
+  EXPECT_TRUE(has("frame series 'Frame@Main' of the baseline is not in the current trace"));
+  EXPECT_TRUE(has("current trace is partial"));
+  EXPECT_FALSE(d.regressed());  // notes never fail a run
+
+  Report partialBase = baseReport();
+  partialBase.trace.partial = true;
+  bool noted = false;
+  for (const std::string& n : compareReports(partialBase, baseReport(), {}).notes)
+    if (n.find("baseline trace was partial") != std::string::npos) noted = true;
+  EXPECT_TRUE(noted);
+}
+
+TEST(BaselineDiff, CappedListsDoNotClaimRemovedOrNewScopes) {
+  Report base = baseReport();
+  base.scopeCount = 10;  // the baseline listed 2 of 10 scopes
+  Report cur = baseReport();
+  cur.scopes = {scope("Update", 4.0), scope("Other", 1.0)};
+  cur.scopeCount = 10;
+  for (const std::string& n : compareReports(base, cur, {}).notes) {
+    EXPECT_EQ(n.find("is new"), std::string::npos) << n;
+    EXPECT_EQ(n.find("was removed"), std::string::npos) << n;
+  }
+}
+
+TEST(BaselineDiff, DifferentDurationsAreNoted) {
+  Report base = baseReport(), cur = baseReport();
+  base.trace.durationMs = 10000;
+  cur.trace.durationMs = 20000;
+  bool noted = false;
+  for (const std::string& n : compareReports(base, cur, {}).notes)
+    if (n.find("differ in duration") != std::string::npos) noted = true;
+  EXPECT_TRUE(noted);
+  cur.trace.durationMs = 11000;
+  EXPECT_TRUE(compareReports(base, cur, {}).notes.empty());
+}
+
 TEST(BaselineDiff, ScopeMedianRegression) {
   const Report base = baseReport();
   Report cur = base;
@@ -265,6 +428,10 @@ TEST(Thresholds, ParseDefaultsAndOverrides) {
   EXPECT_EQ(t->scopeMedianRelPct, 25.0);
   EXPECT_EQ(t->scopeAbsFloorMs, 0.05);
   EXPECT_EQ(t->lostEventsAllowed, 0u);
+  EXPECT_EQ(t->functionExclusiveRelPct, 25.0);
+  EXPECT_EQ(t->functionExclusiveAbsFloorMs, 5.0);
+  EXPECT_EQ(t->totalCpuRelPct, 10.0);
+  EXPECT_EQ(t->totalCpuAbsFloorMs, 10.0);
 
   auto o = thresholdsFromJson(nlohmann::json::parse(
       R"({"frame_p95_rel_pct": 3, "function_exclusive_pp": 0.5, "lost_events_allowed": 4})"));
@@ -289,10 +456,18 @@ TEST(Thresholds, RoundTripThroughJson) {
   Thresholds t;
   t.frameP95RelPct = 7;
   t.lostEventsAllowed = 9;
+  t.functionExclusiveRelPct = 12.5;
+  t.functionExclusiveAbsFloorMs = 2;
+  t.totalCpuRelPct = 3;
+  t.totalCpuAbsFloorMs = 4;
   auto back = thresholdsFromJson(nlohmann::json::parse(thresholdsToJson(t).dump()));
   ASSERT_TRUE(back.ok());
   EXPECT_EQ(back->frameP95RelPct, 7.0);
   EXPECT_EQ(back->lostEventsAllowed, 9u);
+  EXPECT_EQ(back->functionExclusiveRelPct, 12.5);
+  EXPECT_EQ(back->functionExclusiveAbsFloorMs, 2.0);
+  EXPECT_EQ(back->totalCpuRelPct, 3.0);
+  EXPECT_EQ(back->totalCpuAbsFloorMs, 4.0);
 }
 
 }  // namespace

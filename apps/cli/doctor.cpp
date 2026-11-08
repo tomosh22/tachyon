@@ -826,8 +826,13 @@ DoctorReport runDoctorChecks(const DoctorEnv& env) {
 }
 
 std::string formatDoctorText(const DoctorReport& report, const DoctorEnv& env) {
+  return formatDoctorText(report, env.requestedHz);
+}
+
+std::string formatDoctorText(const DoctorReport& report, uint32_t requestedHz) {
   std::ostringstream os;
-  os << "tachyon-cli doctor: Linux capture prerequisites (sampling " << env.requestedHz << " Hz)\n\n";
+  os << "tachyon-cli doctor: " << (report.platform == "windows" ? "Windows" : "Linux")
+     << " capture prerequisites (sampling " << requestedHz << " Hz)\n\n";
   for (const DoctorCheck& c : report.checks) {
     os << "[" << doctorStatusName(c.status) << "] " << c.title << "\n       " << c.detail << "\n";
     if (!c.hint.empty()) os << "       fix: " << c.hint << "\n";
@@ -840,12 +845,16 @@ std::string formatDoctorText(const DoctorReport& report, const DoctorEnv& env) {
 }
 
 std::string formatDoctorJson(const DoctorReport& report, const DoctorEnv& env) {
+  return formatDoctorJson(report, env.requestedHz);
+}
+
+std::string formatDoctorJson(const DoctorReport& report, uint32_t requestedHz) {
   nlohmann::ordered_json j;
   j["schema"] = 1;
-  j["platform"] = "linux";
+  j["platform"] = report.platform;
   j["ok"] = report.fail == 0;
   j["exit_code"] = report.exitCode();
-  j["requested_hz"] = env.requestedHz;
+  j["requested_hz"] = requestedHz;
   j["summary"] = {{"pass", report.pass}, {"warn", report.warn}, {"fail", report.fail}};
   nlohmann::ordered_json checks = nlohmann::ordered_json::array();
   for (const DoctorCheck& c : report.checks) {
@@ -870,6 +879,69 @@ int runDoctorWithEnv(const DoctorEnv& env, bool json, std::ostream& out) {
   }
   return report.exitCode();
 }
+
+int runDoctorWithEnv(const WindowsDoctorEnv& env, bool json, std::ostream& out) {
+  const DoctorReport report = runWindowsDoctorChecks(env);
+  if (json)
+    out << formatDoctorJson(report, env.requestedHz) << "\n";
+  else
+    out << formatDoctorText(report, env.requestedHz);
+  return report.exitCode();
+}
+
+namespace {
+
+struct DoctorArgs {
+  uint32_t hz = 8000;
+  std::string agent, address;
+};
+
+constexpr int kDoctorUsage = 3;
+
+// Returns 0, or kDoctorUsage after printing the problem.
+int parseDoctorArgs(const std::vector<std::string>& args, std::ostream& err, DoctorArgs& d) {
+  for (size_t i = 0; i < args.size(); ++i) {
+    const std::string& a = args[i];
+    const auto value = [&](std::string& dst) {
+      if (i + 1 >= args.size()) return false;
+      dst = args[++i];
+      return true;
+    };
+    std::string v;
+    if (a == "--json") {
+      continue;
+    } else if (a == "--socket" || a == "--pipe") {
+      if (!value(d.address)) {
+        err << "tachyon-cli: missing value for " << a << "\n";
+        return kDoctorUsage;
+      }
+    } else if (a == "--timeout" || a == "--connect-timeout-ms") {
+      if (!value(v)) {
+        err << "tachyon-cli: missing value for " << a << "\n";
+        return kDoctorUsage;
+      }
+    } else if (a == "--hz" || a == "--sampling-hz") {
+      int64_t n = 0;
+      if (!value(v) || !parseInt(v, n) || n <= 0 || n > 1'000'000) {
+        err << "tachyon-cli: --hz expects a positive number\n";
+        return kDoctorUsage;
+      }
+      d.hz = static_cast<uint32_t>(n);
+    } else if (a == "--agent") {
+      if (!value(d.agent)) {
+        err << "tachyon-cli: missing value for --agent\n";
+        return kDoctorUsage;
+      }
+    } else {
+      err << "tachyon-cli: unknown argument for doctor: " << a << "\n";
+      return kDoctorUsage;
+    }
+  }
+  if (d.address.empty()) d.address = control::defaultAgentAddress();
+  return 0;
+}
+
+}  // namespace
 
 #if defined(__linux__)
 
@@ -967,47 +1039,9 @@ DoctorEnv makeSystemDoctorEnv(uint32_t requestedHz, const std::string& socketAdd
 }
 
 int runDoctor(const std::vector<std::string>& args, bool json, std::ostream& out, std::ostream& err) {
-  uint32_t hz = 8000;
-  std::string agent, address;
-  for (size_t i = 0; i < args.size(); ++i) {
-    const std::string& a = args[i];
-    const auto value = [&](std::string& dst) {
-      if (i + 1 >= args.size()) return false;
-      dst = args[++i];
-      return true;
-    };
-    std::string v;
-    if (a == "--json") {
-      continue;
-    } else if (a == "--socket" || a == "--pipe") {
-      if (!value(address)) {
-        err << "tachyon-cli: missing value for " << a << "\n";
-        return 3;
-      }
-    } else if (a == "--timeout" || a == "--connect-timeout-ms") {
-      if (!value(v)) {
-        err << "tachyon-cli: missing value for " << a << "\n";
-        return 3;
-      }
-    } else if (a == "--hz" || a == "--sampling-hz") {
-      int64_t n = 0;
-      if (!value(v) || !parseInt(v, n) || n <= 0 || n > 1'000'000) {
-        err << "tachyon-cli: --hz expects a positive number\n";
-        return 3;
-      }
-      hz = static_cast<uint32_t>(n);
-    } else if (a == "--agent") {
-      if (!value(agent)) {
-        err << "tachyon-cli: missing value for --agent\n";
-        return 3;
-      }
-    } else {
-      err << "tachyon-cli: unknown argument for doctor: " << a << "\n";
-      return 3;
-    }
-  }
-  if (address.empty()) address = control::defaultAgentAddress();
-  return runDoctorWithEnv(makeSystemDoctorEnv(hz, address, agent), json, out);
+  DoctorArgs d;
+  if (const int rc = parseDoctorArgs(args, err, d); rc != 0) return rc;
+  return runDoctorWithEnv(makeSystemDoctorEnv(d.hz, d.address, d.agent), json, out);
 }
 
 #else
@@ -1019,13 +1053,17 @@ DoctorEnv makeSystemDoctorEnv(uint32_t requestedHz, const std::string& socketAdd
   return env;
 }
 
-int runDoctor(const std::vector<std::string>&, bool json, std::ostream& out, std::ostream&) {
-  const char* note =
-      "doctor is not implemented on this platform (Linux only); on Windows run the agent elevated";
+int runDoctor(const std::vector<std::string>& args, bool json, std::ostream& out, std::ostream& err) {
+  DoctorArgs d;
+  if (const int rc = parseDoctorArgs(args, err, d); rc != 0) return rc;
+#if defined(_WIN32)
+  return runDoctorWithEnv(makeSystemWindowsDoctorEnv(d.hz, d.address, d.agent), json, out);
+#else
+  const char* note = "doctor is only implemented on Linux and Windows";
   if (json) {
     nlohmann::ordered_json j;
     j["schema"] = 1;
-    j["platform"] = "windows";
+    j["platform"] = "unknown";
     j["ok"] = true;
     j["exit_code"] = 0;
     j["note"] = note;
@@ -1034,6 +1072,7 @@ int runDoctor(const std::vector<std::string>&, bool json, std::ostream& out, std
     out << note << "\n";
   }
   return 0;
+#endif
 }
 
 #endif

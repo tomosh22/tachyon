@@ -98,6 +98,44 @@ TEST(ReportJson, ReaderIgnoresBaselineDiffAndRejectsOtherVersions) {
   EXPECT_FALSE(reportFromJson(nlohmann::json::parse("{}")).ok());
 }
 
+// WP-69: a baseline written before the baseline function set and total CPU existed still loads (and the
+// fields are absent from the result), and one with them round-trips.
+TEST(ReportJson, OldBaselinesWithoutTheNewFieldsStillLoad) {
+  const Report r = reportOf("medium");
+  nlohmann::json doc = nlohmann::json::parse(dumpJson(reportToJson(r)));
+  ASSERT_TRUE(doc["functions"].contains("significant"));
+  ASSERT_TRUE(doc["trace"].contains("total_cpu_ms"));
+  EXPECT_TRUE(testutil::reportSchema().validate(doc).empty());
+  doc["functions"].erase("significant");
+  doc["functions"].erase("significant_floor_pct");
+  doc["trace"].erase("total_cpu_ms");
+  EXPECT_TRUE(testutil::reportSchema().validate(doc).empty());  // the schema keeps them optional
+  auto old = reportFromJson(doc);
+  ASSERT_TRUE(old.ok()) << old.error().toString();
+  EXPECT_LT(old->significantFloorPct, 0);
+  EXPECT_TRUE(old->significantFunctions.empty());
+  EXPECT_EQ(old->trace.totalCpuMs, 0.0);
+  EXPECT_EQ(old->functions.size(), r.functions.size());
+
+  nlohmann::json bad = nlohmann::json::parse(dumpJson(reportToJson(r)));
+  bad["functions"].erase("significant_floor_pct");
+  EXPECT_FALSE(reportFromJson(bad).ok());  // the set without its floor is malformed
+  nlohmann::json badRow = nlohmann::json::parse(dumpJson(reportToJson(r)));
+  badRow["functions"]["significant"][0].erase("exclusive_ms");
+  EXPECT_FALSE(reportFromJson(badRow).ok());
+}
+
+TEST(ReportJson, NewFieldsRoundTrip) {
+  const Report r = reportOf("medium");
+  ASSERT_FALSE(r.significantFunctions.empty());
+  const std::string text = dumpJson(reportToJson(r));
+  auto back = reportFromJson(nlohmann::json::parse(text));
+  ASSERT_TRUE(back.ok());
+  EXPECT_EQ(back->significantFunctions.size(), r.significantFunctions.size());
+  EXPECT_EQ(back->significantFloorPct, r.significantFloorPct);
+  EXPECT_EQ(back->trace.totalCpuMs, r.trace.totalCpuMs);
+}
+
 TEST(ReportJson, TwoIndependentRunsAreByteIdentical) {
   for (const char* fixture : {"frames", "scopes", "medium"}) {
     const Report a = reportOf(fixture), b = reportOf(fixture);

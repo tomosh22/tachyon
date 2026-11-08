@@ -92,6 +92,8 @@ const char* categoryText(const std::string& c) {
   if (c == "frame_p95") return "Frame p95";
   if (c == "frame_p99") return "Frame p99";
   if (c == "function_exclusive") return "Function exclusive";
+  if (c == "function_exclusive_ms") return "Function exclusive time";
+  if (c == "total_cpu") return "Total CPU";
   if (c == "scope_median") return "Scope median";
   if (c == "lost_events") return "Lost events";
   return "Other";

@@ -54,7 +54,7 @@ tachyon-cli --agent tcp://build-box:7331 fetch /var/tmp/capture-1700000000.tachy
 * Exit codes: a wrong token or an unreachable agent is 2, a missing token file is 3 (usage), a refused fetch or
   launch is 1.
 
-## doctor (Linux)
+## doctor (Linux and Windows)
 
 ```
 tachyon-cli [--json] doctor [--hz N] [--agent PATH] [--socket PATH]
@@ -100,7 +100,7 @@ version; new checks may be added to `checks`.
 | key | type | meaning |
 |---|---|---|
 | `schema` | number | 1 |
-| `platform` | string | `"linux"` |
+| `platform` | string | `"linux"` or `"windows"` |
 | `ok` | bool | no check failed |
 | `exit_code` | number | the process exit code (0 or 1) |
 | `requested_hz` | number | the `--hz` value |
@@ -113,6 +113,21 @@ version; new checks may be added to `checks`.
 
 ### Windows
 
-`doctor` prints a one-line note that it is not implemented on this platform and exits 0 (with `--json`:
-`{"schema":1,"platform":"windows","ok":true,"exit_code":0,"note":"..."}`). On Windows the agent needs an elevated
-process (`SeSystemProfilePrivilege`).
+`doctor` runs the Windows checks below with the same output, exit codes and JSON schema as on Linux (`platform` is
+`"windows"`). `--pipe NAME` selects the agent pipe to probe (default `\\.\pipe\tachyon-agent`), `--agent PATH`
+the agent executable; `--hz` is only echoed. Platforms other than Linux and Windows print a one-line note and exit 0.
+
+| id | what it checks | FAIL when |
+|---|---|---|
+| `windows_version` | build number >= 15063 (Windows 10 1703: ETW system logger sessions) | older build |
+| `elevation` | this process runs elevated (the capture agent must) | WARN when not elevated |
+| `sysprofile_privilege` | the token holds `SeSystemProfilePrivilege` (enabled on demand) | an elevated token lacks it (WARN when not elevated) |
+| `etw_sessions` | ETW loggers via `QueryAllTraces`: 64-session limit, `NT Kernel Logger` in use by another tool, stale `Tachyon ...` sessions | all 64 slots used (WARN for the rest, and when enumeration needs elevation) |
+| `agent_pipe` | an agent listens on the control pipe (`WaitNamedPipe`, no connection is made) | access denied (WARN when no agent runs) |
+| `agent_binary` | `tachyon-agent.exe` next to the CLI or on `PATH` | never (WARN) |
+| `symbol_cache` | `%LOCALAPPDATA%\Tachyon\symbols` can be created and written | never (WARN) |
+| `nt_symbol_path` | `_NT_SYMBOL_PATH` elements are well formed (`srv*cache*server`, bare URLs, plain http, missing directories) | never (WARN) |
+| `dia` | `msdia140.dll` loads (next to the executable) | cannot be loaded |
+
+Needs Windows verification: the real calls (`OpenProcessToken`, `QueryAllTraces`, `WaitNamedPipe`, DIA loading);
+the windows CI job runs `tachyon-cli doctor --json` and checks that it parses.

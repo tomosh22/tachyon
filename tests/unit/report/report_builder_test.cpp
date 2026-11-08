@@ -237,6 +237,43 @@ TEST(ReportFunctions, ScopesFixtureBlendedAndNot) {
   expectFunctionsMatch("scopes", false, 30);
 }
 
+// WP-69: the baseline function set holds every function with at least 0.5% exclusive share, whatever topN is.
+TEST(ReportFunctions, SignificantSetIsIndependentOfTopN) {
+  for (const char* fixture : {"frames", "medium", "scopes"}) {
+    Loaded l(fixture);
+    ReportOptions small;
+    small.topN = 2;
+    ReportOptions large;
+    large.topN = 500;
+    const Report a = buildOrDie(l, small), b = buildOrDie(l, large);
+    EXPECT_EQ(a.significantFloorPct, kSignificantFunctionPct) << fixture;
+    ASSERT_EQ(a.significantFunctions.size(), b.significantFunctions.size()) << fixture;
+    ASSERT_FALSE(a.significantFunctions.empty()) << fixture;
+    for (size_t i = 0; i < a.significantFunctions.size(); ++i) {
+      EXPECT_EQ(a.significantFunctions[i].name, b.significantFunctions[i].name) << fixture;
+      EXPECT_GE(a.significantFunctions[i].exclusivePct, kSignificantFunctionPct) << fixture;
+    }
+    // Every function of the (complete) large report with a share of at least 0.5% is in the set, nothing
+    // else.
+    size_t want = 0;
+    for (const FunctionReportRow& f : b.functions)
+      if (f.exclusivePct >= kSignificantFunctionPct) ++want;
+    EXPECT_EQ(a.significantFunctions.size(), want) << fixture;
+    // The top rows of the small report agree with the set's leading rows.
+    for (size_t i = 0; i < a.functions.size() && i < a.significantFunctions.size(); ++i)
+      EXPECT_EQ(a.functions[i].name, a.significantFunctions[i].name) << fixture;
+  }
+}
+
+TEST(ReportFunctions, TotalCpuIsTheRunningTimeOfAllThreads) {
+  Loaded l("medium");
+  const Report r = buildOrDie(l);
+  double running = 0;
+  for (const ThreadRow& t : r.threads) running += t.runningMs;
+  EXPECT_GT(r.trace.totalCpuMs, 0.0);
+  EXPECT_NEAR(r.trace.totalCpuMs, running, 1e-3 * static_cast<double>(r.threads.size() + 1));
+}
+
 TEST(ReportFunctions, BlendingIsReportedAsEffective) {
   Loaded scopes("scopes");
   EXPECT_TRUE(buildOrDie(scopes).settings.blendScopes);

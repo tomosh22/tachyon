@@ -25,6 +25,15 @@ struct Thresholds {
   // A function regresses when its share of the total exclusive time grows by more than this many percentage
   // points (improves when it shrinks by more).
   double functionExclusivePp = 2.0;
+  // A function listed exactly in both reports also regresses when its absolute exclusive time grows by more
+  // than this many percent AND by more than the floor (improves likewise). Catches growth in a flat profile
+  // that shifts shares by less than functionExclusivePp.
+  double functionExclusiveRelPct = 25.0;
+  double functionExclusiveAbsFloorMs = 5.0;
+  // Total CPU (running time of all threads) regresses when it grows by more than this many percent AND by
+  // more than the floor. Skipped when either report has no total (baselines written before WP-69).
+  double totalCpuRelPct = 10.0;
+  double totalCpuAbsFloorMs = 10.0;
   // A scope's median regresses when it grows by more than this many percent AND by more than the floor.
   double scopeMedianRelPct = 25.0;
   double scopeAbsFloorMs = 0.05;
@@ -41,14 +50,16 @@ enum class FindingKind : uint8_t { Regression, Improvement };
 
 struct Finding {
   FindingKind kind = FindingKind::Regression;
-  std::string category;  // frame_p95, frame_p99, function_exclusive, scope_median, lost_events
-  std::string subject;   // series label, "module!function" or "scope:name"; "" for lost_events
+  // frame_p95, frame_p99, function_exclusive (share, pp), function_exclusive_ms (absolute), total_cpu,
+  // scope_median, lost_events
+  std::string category;
+  std::string subject;  // series label, "module!function" or "scope:name"; "" for lost_events
   double baseline = 0, current = 0;
   std::string valueUnit;         // "ms", "% of total", "events"
   std::optional<double> change;  // relative change in percent, percentage points, or events
   std::string changeUnit;        // "%", "pp", "events"
   // function_exclusive only: the baseline (or current) value is an upper bound because the function was not
-  // listed in that report's top N.
+  // in that report's function set (baseline.functions.significant, or only the top N for old reports).
   bool baselineIsBound = false, currentIsBound = false;
 };
 

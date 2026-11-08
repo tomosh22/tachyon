@@ -2,11 +2,8 @@
 
 #include "analysis/thread_states.h"
 #include "model/model.h"
-#include "symbols/dwarf/dwarf_provider.h"
+#include "report/symbol_setup.h"
 #include "symbols/symbol_service.h"
-#if defined(TACHYON_HAVE_DIA)
-#include "symbols/dia/dia_provider.h"
-#endif
 
 #include <system_error>
 
@@ -17,22 +14,17 @@ Result<Report> analyzeTrace(const std::filesystem::path& tracePath, const Analyz
   if (!std::filesystem::is_regular_file(tracePath, ec))
     return makeError(ErrorCode::NotFound, "trace file not found: " + tracePath.generic_string());
 
-  symbols::SymbolLocatorConfig locator;
-  locator.servers = options.symbolServers;
-  locator.cacheDir = options.symbolCacheDir;
-  std::vector<std::filesystem::path> overrides;
+  SymbolSetupOptions setup;
+  setup.servers = options.symbolServers;
+  setup.cacheDir = options.symbolCacheDir;
   for (const std::filesystem::path& p : options.symbolPaths) {
     if (!std::filesystem::exists(p, ec))
       return makeError(ErrorCode::InvalidArgument, "symbol path does not exist: " + p.generic_string());
-    if (std::filesystem::is_regular_file(p, ec) && p.extension() == ".json")
-      overrides.push_back(p);
-    else
-      locator.searchPaths.push_back(p);
+    setup.symbolPaths.push_back(p);
   }
   if (options.useSidecarSymbols) {
-    std::filesystem::path sidecar = tracePath;
-    sidecar.replace_extension(".symbols.json");
-    if (std::filesystem::is_regular_file(sidecar, ec)) overrides.push_back(std::move(sidecar));
+    setup.sidecarFile = tracePath;
+    setup.sidecarFile.replace_extension(".symbols.json");
   }
 
   auto loaded = model::TraceModel::load(tracePath);
@@ -41,15 +33,10 @@ Result<Report> analyzeTrace(const std::filesystem::path& tracePath, const Analyz
   if (Result<void> s = analysis::buildThreadStates(model); !s.ok()) return s.error();
 
   symbols::SymbolService service(options.symbolServers, options.symbolCacheDir);
-  service.configureLocator(std::move(locator));
-#if defined(TACHYON_HAVE_DIA)
-  symbols::registerDiaProvider(service);
-#endif
-  symbols::registerDwarfProvider(service);  // no-op without libdw; .symbols.json overrides keep working
-  for (const std::filesystem::path& p : overrides) {
-    if (Result<void> s = service.addSymbolFileOverride(p); !s.ok())
+  for (const SymbolSetupProblem& p : setupSymbolService(service, setup)) {
+    if (p.kind == SymbolSetupProblem::Kind::BadOverride)
       return makeError(ErrorCode::InvalidArgument,
-                       "symbol file " + p.filename().generic_string() + ": " + s.error().toString());
+                       "symbol file " + p.path.filename().generic_string() + ": " + p.detail);
   }
   service.resolveAllAsync(model);
   service.waitAll();

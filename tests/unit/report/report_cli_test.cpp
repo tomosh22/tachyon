@@ -152,6 +152,9 @@ TEST(ReportCli, FunctionShareRegressionGivesExit1) {
   const json base = makeReport(dir, "frames", "base.json");
   const std::string lowered = doctor(dir, "lowered.json", base, [](json& d) {
     d["functions"]["top"][0]["exclusive_pct"] = d["functions"]["top"][0]["exclusive_pct"].get<double>() - 6.0;
+    // The baseline function set (WP-69) is what the diff compares; its first row is the same function.
+    d["functions"]["significant"][0]["exclusive_pct"] =
+        d["functions"]["significant"][0]["exclusive_pct"].get<double>() - 6.0;
   });
   const RunResult r = runCli({trace("frames"), "--baseline", lowered, "--out", (dir / "cur.json").string()});
   EXPECT_EQ(r.code, kExitRegression) << r.err;
@@ -159,6 +162,32 @@ TEST(ReportCli, FunctionShareRegressionGivesExit1) {
   const json& top = base["functions"]["top"][0];
   EXPECT_TRUE(hasFinding(cur["baseline_diff"]["regressions"], "function_exclusive",
                          top["module"].get<std::string>() + "!" + top["name"].get<std::string>()));
+}
+
+// WP-69: a baseline written by the previous version (no function set, no total CPU) still loads and compares.
+TEST(ReportCli, OldFormatBaselineStillCompares) {
+  const auto dir = tempDir("oldfmt");
+  const json base = makeReport(dir, "frames", "base.json");
+  const std::string old = doctor(dir, "old.json", base, [](json& d) {
+    d["functions"].erase("significant");
+    d["functions"].erase("significant_floor_pct");
+    d["trace"].erase("total_cpu_ms");
+    d["functions"]["top"][0]["exclusive_pct"] = d["functions"]["top"][0]["exclusive_pct"].get<double>() - 6.0;
+  });
+  const RunResult r = runCli({trace("frames"), "--baseline", old, "--out", (dir / "cur.json").string()});
+  EXPECT_EQ(r.code, kExitRegression) << r.err;
+  const json cur = readJson(dir / "cur.json");
+  const json& top = base["functions"]["top"][0];
+  EXPECT_TRUE(hasFinding(cur["baseline_diff"]["regressions"], "function_exclusive",
+                         top["module"].get<std::string>() + "!" + top["name"].get<std::string>()));
+  EXPECT_FALSE(hasFinding(cur["baseline_diff"]["regressions"], "total_cpu", "total CPU"));
+  // The unchanged old baseline passes.
+  const std::string same = doctor(dir, "same.json", base, [](json& d) {
+    d["functions"].erase("significant");
+    d["functions"].erase("significant_floor_pct");
+    d["trace"].erase("total_cpu_ms");
+  });
+  EXPECT_EQ(runCli({trace("frames"), "--baseline", same}).code, kExitOk);
 }
 
 TEST(ReportCli, ScopeMedianRegressionGivesExit1) {

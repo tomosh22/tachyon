@@ -2,6 +2,7 @@
 # executable; the lock tests reuse the HandModel helpers of the analysis tests.
 tachyon_add_test(report_tests
   SOURCES baseline_test.cpp markdown_test.cpp report_builder_test.cpp report_cli_test.cpp report_json_test.cpp
+          symbol_setup_test.cpp
   DEPS tachyon::report tachyon::analysis tachyon::symbols tachyon::model tachyon::trace
        nlohmann_json::nlohmann_json)
 
