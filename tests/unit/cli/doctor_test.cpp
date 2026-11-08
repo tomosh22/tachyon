@@ -551,11 +551,11 @@ TEST(Doctor, ExitCodeFollowsFailNotWarn) {
   EXPECT_NE(fail.str().find("[FAIL]"), std::string::npos);
 }
 
-#if !defined(__linux__)
+#if !defined(__linux__) && !defined(_WIN32)
 TEST(Doctor, OtherPlatformsPrintANoteAndSucceed) {
   std::ostringstream out, err;
   EXPECT_EQ(cli::run({"doctor"}, out, err), kExitOk);
-  EXPECT_NE(out.str().find("not implemented"), std::string::npos);
+  EXPECT_NE(out.str().find("only implemented"), std::string::npos);
   std::ostringstream json;
   EXPECT_EQ(cli::run({"doctor", "--json"}, json, err), kExitOk);
   EXPECT_EQ(nlohmann::json::parse(json.str())["ok"], true);

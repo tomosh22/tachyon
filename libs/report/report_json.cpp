@@ -27,6 +27,7 @@ ordered_json traceToJson(const TraceSummary& t) {
   j["sample_count"] = t.sampleCount;
   j["has_instrumentation"] = t.hasInstrumentation;
   j["warnings"] = t.warnings;
+  j["total_cpu_ms"] = t.totalCpuMs;
   return j;
 }
 
@@ -228,6 +229,12 @@ ordered_json reportToJson(const Report& r, const Diff* diff) {
     ordered_json list = ordered_json::array();
     for (const FunctionReportRow& f : r.functions) list.push_back(functionToJson(f));
     fns["top"] = std::move(list);
+    if (r.significantFloorPct >= 0) {
+      fns["significant_floor_pct"] = r.significantFloorPct;
+      ordered_json sig = ordered_json::array();
+      for (const FunctionReportRow& f : r.significantFunctions) sig.push_back(functionToJson(f));
+      fns["significant"] = std::move(sig);
+    }
     j["functions"] = std::move(fns);
   }
   {
@@ -306,6 +313,10 @@ Result<Report> reportFromJson(const json& doc) {
     return bad();
   }
 
+  if (const auto it = t->find("total_cpu_ms"); it != t->end()) {  // optional: absent before WP-69
+    if (!rd.get(*t, "$.trace", "total_cpu_ms", ts.totalCpuMs)) return bad();
+  }
+
   const json* s = rd.member(doc, "$", "settings");
   if (s == nullptr) return bad();
   if (!(rd.get(*s, "$.settings", "top_n", r.settings.topN) &&
@@ -375,19 +386,29 @@ Result<Report> reportFromJson(const json& doc) {
     return bad();
   const json* top = rd.array(*fn, "$.functions", "top");
   if (top == nullptr) return bad();
-  for (const json& e : *top) {
-    FunctionReportRow f;
-    std::string kind;
-    if (!(rd.get(e, "$.functions.top[]", "name", f.name) &&
-          rd.get(e, "$.functions.top[]", "module", f.module) &&
-          rd.get(e, "$.functions.top[]", "kind", kind) &&
-          rd.get(e, "$.functions.top[]", "exclusive_ms", f.exclusiveMs) &&
-          rd.get(e, "$.functions.top[]", "inclusive_ms", f.inclusiveMs) &&
-          rd.get(e, "$.functions.top[]", "exclusive_pct", f.exclusivePct) &&
-          rd.get(e, "$.functions.top[]", "samples", f.samples)))
+  auto readFunctions = [&](const json& list, const char* path, std::vector<FunctionReportRow>& dst) {
+    const std::string p = std::string(path) + "[]";
+    for (const json& e : list) {
+      FunctionReportRow f;
+      std::string kind;
+      if (!(rd.get(e, p, "name", f.name) && rd.get(e, p, "module", f.module) && rd.get(e, p, "kind", kind) &&
+            rd.get(e, p, "exclusive_ms", f.exclusiveMs) && rd.get(e, p, "inclusive_ms", f.inclusiveMs) &&
+            rd.get(e, p, "exclusive_pct", f.exclusivePct) && rd.get(e, p, "samples", f.samples)))
+        return false;
+      f.isScope = kind == "scope";
+      dst.push_back(std::move(f));
+    }
+    return true;
+  };
+  if (!readFunctions(*top, "$.functions.top", r.functions)) return bad();
+  if (const auto it = fn->find("significant"); it != fn->end()) {  // optional: absent before WP-69
+    if (!it->is_array()) {
+      rd.fail("$.functions.significant", "expected an array");
       return bad();
-    f.isScope = kind == "scope";
-    r.functions.push_back(std::move(f));
+    }
+    if (!rd.get(*fn, "$.functions", "significant_floor_pct", r.significantFloorPct) ||
+        !readFunctions(*it, "$.functions.significant", r.significantFunctions))
+      return bad();
   }
 
   const json* sc = rd.member(doc, "$", "scopes");

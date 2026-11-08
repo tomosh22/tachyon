@@ -44,7 +44,8 @@ it. Keys appear in the order below. Times are milliseconds rounded to 1e-6, perc
 - `schema_version` (1), `tool` (`"tachyon-report"`).
 - `trace`: `duration_ms`, `platform`, `clock_frequency_hz`, `sampling_hz`, `events_lost`, `partial`
   (unfinalized or torn file), `throttle_events`, `thread_count`, `sample_count`, `has_instrumentation`,
-  `warnings` (CaptureInfo `warnings`, at most 32).
+  `warnings` (CaptureInfo `warnings`, at most 32), `total_cpu_ms` (running time summed over all threads; WP-69,
+  absent in older reports).
 - `settings`: `top_n`, `frame_budget_ms`, `blend_scopes` (effective: requested and the trace has scopes),
   `frame_series` (the filter or `null`).
 - `frames`: `series_total`, `series[]` with `label` (`name@thread`, the baseline matching key), `name`, `thread`
@@ -57,7 +58,11 @@ it. Keys appear in the order below. Times are milliseconds rounded to 1e-6, perc
 - `functions`: `total_exclusive_ms`, `function_count`, `top[]` (by exclusive time, ties by name then module):
   `name`, `module`, `kind` (`function` or `scope`), `exclusive_ms`, `inclusive_ms`, `exclusive_pct` (of
   `total_exclusive_ms`), `samples`. Functions with no exclusive time are not listed. With `blend_scopes`
-  instrumentation scopes appear as `kind: "scope"` rows.
+  instrumentation scopes appear as `kind: "scope"` rows. WP-69 adds the baseline function set: `significant[]`
+  (same row fields; every function with `exclusive_pct >= 0.5`, at most 2000, same order) and
+  `significant_floor_pct` (0.5, or the smallest listed share when the cap cut the list). A function not in
+  `significant` has a share below the floor. Both are absent in reports written before WP-69; the diff then
+  falls back to the top N.
 - `scopes`: `scope_count`, `top[]` (by total time): `name`, `count`, `min_ms`, `median_ms`, `p95_ms`, `max_ms`,
   `total_ms`, `mean_ms`, `unterminated`, `orphan_ends` (`scopeStats`; `p95_ms` from `scopeInstances`).
 - `locks`: `lock_count`, `unparsed_waits`, `top[]` (by total wait): `name`, `address`, `contentions`,
@@ -80,10 +85,19 @@ stable across builds. A thresholds file is a JSON object with any of the keys be
 | `scope_median_rel_pct` | 25 | A scope's median regresses when it grows by more than this percent **and** more than `scope_abs_floor_ms`. |
 | `scope_abs_floor_ms` | 0.05 | Absolute floor for scope medians. |
 | `lost_events_allowed` | 0 | Lost events regress when `current > baseline + this`. |
+| `function_exclusive_rel_pct` | 25 | A function listed exactly in both reports (and not already flagged by share) regresses when its `exclusive_ms` grows by more than this percent **and** more than `function_exclusive_abs_floor_ms` (category `function_exclusive_ms`). |
+| `function_exclusive_abs_floor_ms` | 5 | Absolute floor for per-function exclusive time. |
+| `total_cpu_rel_pct` | 10 | `trace.total_cpu_ms` (all threads) regresses when it grows by more than this percent **and** more than `total_cpu_abs_floor_ms` (category `total_cpu`). Skipped when either report has no total. |
+| `total_cpu_abs_floor_ms` | 10 | Absolute floor for total CPU. |
 
-Only the top N functions and scopes of each report are compared. A function missing from one report's top N is
-assumed to have at most the share of that report's smallest listed function (0 when the list was not full);
-such values are marked `*_is_upper_bound`. Findings are ordered by category, then by the size of the change, then
+Functions are compared through the baseline function set (`functions.significant`, every function with at
+least 0.5% exclusive share), so a function rising from 1% to 4% in a flat profile is flagged even when it is
+outside the top N. A function missing from a report's set is assumed to be below `significant_floor_pct`; such
+values are marked `*_is_upper_bound`. A report without the set (written before WP-69) is compared on its top N
+only: a missing function is assumed to have at most the share of that report's smallest listed function (0 when
+the list was not full). Scopes are compared by their top N. Notes (not failures) list scopes that are new or
+removed, frame series missing from either report, a partial current or baseline trace, and traces whose
+durations differ by more than 25% (absolute milliseconds are then not like for like). Old baselines still load. Findings are ordered by category, then by the size of the change, then
 by subject. Any regression gives exit code 1.
 
 ## Markdown

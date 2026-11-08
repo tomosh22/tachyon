@@ -167,6 +167,9 @@ Result<void> buildThreads(const QueryContext& ctx, Report& out) {
     it.runningTicks = tt.runningTicks;
     items.push_back(std::move(it));
   }
+  uint64_t runningTotal = 0;
+  for (const Item& it : items) runningTotal += it.runningTicks;
+  out.trace.totalCpuMs = roundMs(ticksToMs(runningTotal, hz));
   std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
     if (a.runningTicks != b.runningTicks) return a.runningTicks > b.runningTicks;
     return a.row.tid < b.row.tid;
@@ -205,7 +208,35 @@ Result<void> buildFunctions(const QueryContext& ctx, const ReportOptions& option
   for (const analysis::FunctionRow& r : rows) total += r.exclusiveTicks;
   out.functionCount = rows.size();
   out.totalExclusiveMs = roundMs(ticksToMs(total, hz));
-  if (options.topN == 0 || rows.empty() || total == 0) return {};
+  out.significantFloorPct = kSignificantFunctionPct;
+  if (rows.empty() || total == 0) return {};
+
+  // The baseline function set: independent of topN, so a diff against this report can tell a flat-profile
+  // function at 1% from one at 4%.
+  {
+    std::vector<std::pair<uint64_t, FunctionReportRow>> sig;
+    for (const analysis::FunctionRow& r : rows) {
+      const double pct = roundPct(100.0 * static_cast<double>(r.exclusiveTicks) / static_cast<double>(total));
+      if (r.exclusiveTicks == 0 || pct < kSignificantFunctionPct) break;
+      FunctionReportRow row = describeKey(ctx, r.key);
+      row.exclusiveMs = roundMs(ticksToMs(r.exclusiveTicks, hz));
+      row.inclusiveMs = roundMs(ticksToMs(r.inclusiveTicks, hz));
+      row.exclusivePct = pct;
+      row.samples = r.instances;
+      sig.emplace_back(r.exclusiveTicks, std::move(row));
+    }
+    std::stable_sort(sig.begin(), sig.end(), [](const auto& a, const auto& b) {
+      if (a.first != b.first) return a.first > b.first;
+      if (a.second.name != b.second.name) return a.second.name < b.second.name;
+      return a.second.module < b.second.module;
+    });
+    if (sig.size() > kMaxSignificantFunctions) {
+      sig.resize(kMaxSignificantFunctions);
+      out.significantFloorPct = sig.back().second.exclusivePct;
+    }
+    for (auto& s : sig) out.significantFunctions.push_back(std::move(s.second));
+  }
+  if (options.topN == 0) return {};
 
   // Rows tied with the N-th one compete on their names, so those are named before the final cut.
   const size_t n = std::min<size_t>(options.topN, rows.size());
