@@ -1,11 +1,12 @@
 // LiveEncoder (WP-65a, docs/specs/live.md section 2): turns the raw-identity events of a live capture
 // (capture::ILiveSink) into batches of records with live indices, keeps the last `windowSeconds` of batches
-// and the table definitions for late subscribers, and serves them to subscribers (the agent's `live_subscribe`).
+// and the table definitions for late subscribers, and serves them to subscribers (the agent's
+// `live_subscribe`).
 //
-// INTERNING. Strings, processes, threads, modules, frames (module + RVA, or an absolute address) and callstack
-// nodes (a prefix tree, node 0 = root) get dense live indices in order of first use. All tables are capped
-// (live_wire::kMax*): an identity that does not fit maps to an overflow entry (string 1 "<overflow>", one
-// overflow thread, one overflow frame, a truncated stack) and is counted in LiveEncoderStats::overflows.
+// INTERNING. Strings, processes, threads, modules, frames (module + RVA, or an absolute address) and
+// callstack nodes (a prefix tree, node 0 = root) get dense live indices in order of first use. All tables are
+// capped (live_wire::kMax*): an identity that does not fit maps to an overflow entry (string 1 "<overflow>",
+// one overflow thread, one overflow frame, a truncated stack) and is counted in LiveEncoderStats::overflows.
 // Samples repeat the same callchains, so whole-stack resolutions are cached (direct mapped, validated against
 // the module epoch of the process tables).
 //
@@ -135,7 +136,8 @@ class LiveEncoder final : public capture::ILiveSink {
   // Thread-safe. Cuts a batch now when anything is pending (or the clock moved); returns its sequence number
   // (0: nothing to cut).
   uint64_t flush();
-  // Thread-safe. The capture is over: cuts the last batch and wakes the subscribers; later events are ignored.
+  // Thread-safe. The capture is over: cuts the last batch and wakes the subscribers; later events are
+  // ignored.
   void finish();
   // Thread-safe.
   bool ended() const;

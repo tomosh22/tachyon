@@ -52,3 +52,17 @@ if(TARGET flight_recorder_linux_tests)
                                                                  TACHYON_CLI_EXE="$<TARGET_FILE:tachyon-cli>")
   add_dependencies(flight_recorder_linux_tests tachyon-testbed tachyon-agent tachyon-cli)
 endif()
+
+# WP-65a: the live view's Linux acceptance (docs/specs/live.md section 5): the real agent (--backend perf), the
+# testbed's spin scenario, the client library and a LiveModel. Latency, window, shares vs the final trace, flat
+# memory, no live_gap. $TACHYON_LIVE_ACCEPTANCE_SECONDS shortens the 60 s run. Skips like the tests above.
+tachyon_add_test(live_capture_linux_tests
+  SOURCES live_capture_test.cpp ../../unit/agent/process_util.cpp
+  DEPS tachyon::capture_linux_perf tachyon::capture tachyon::control tachyon::model tachyon::symbols
+       tachyon::trace
+  LABELS linux_privileged)
+if(TARGET live_capture_linux_tests)
+  target_compile_definitions(live_capture_linux_tests PRIVATE TACHYON_TESTBED_EXE="$<TARGET_FILE:tachyon-testbed>"
+                                                              TACHYON_AGENT_EXE="$<TARGET_FILE:tachyon-agent>")
+  add_dependencies(live_capture_linux_tests tachyon-testbed tachyon-agent)
+endif()

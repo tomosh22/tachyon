@@ -1,10 +1,10 @@
-// LiveEncoder -> LiveModel round trips (WP-65a): every record type, keyframes, window trimming, retention gaps,
-// table caps, out-of-order input, and snapshots that the analysis code accepts.
+// LiveEncoder -> LiveModel round trips (WP-65a): every record type, keyframes, window trimming, retention
+// gaps, table caps, out-of-order input, and snapshots that the analysis code accepts.
+#include "control/live_encoder.h"
 #include "analysis/lod.h"
 #include "analysis/query.h"
 #include "analysis/scope_pairing.h"
 #include "analysis/thread_states.h"
-#include "control/live_encoder.h"
 #include "model/live_model.h"
 #include "symbols/symbol_service.h"
 
@@ -177,7 +177,8 @@ TEST(LiveRoundTrip, EveryRecordTypeSurvives) {
   };
   using FrameList = std::vector<std::pair<uint32_t, uint64_t>>;
   EXPECT_EQ(framesOf(cols.callstack[0]), (FrameList{{0, 0x10}, {0, 0x20}, {0, 0x30}}));
-  EXPECT_EQ(framesOf(cols.callstack[1]), (FrameList{{kInvalidIdx, 0xFFFFFFFF81000000ull}, {0, 0x10}, {0, 0x20}}));
+  EXPECT_EQ(framesOf(cols.callstack[1]),
+            (FrameList{{kInvalidIdx, 0xFFFFFFFF81000000ull}, {0, 0x10}, {0, 0x20}}));
   EXPECT_EQ(framesOf(cols.callstack[2]), (FrameList{{1, 0x100}, {kInvalidIdx, 0x500000}}));
 
   ASSERT_EQ(m.contextSwitches.size(), 1u);
@@ -360,10 +361,10 @@ TEST(LiveKeyframe, KeyframeResetsAModelThatHadOtherContent) {
   other.enc.onSample(1, 555, 556, 0, 0, std::vector<uint64_t>{0x400010});
   other.pump();
   ASSERT_TRUE(m.apply(bytesOf(*[&] {
-                LiveBatch b;
-                other.enc.waitBatch(1, b, 0ms);
-                return b.data;
-              }()),
+                        LiveBatch b;
+                        other.enc.waitBatch(1, b, 0ms);
+                        return b.data;
+                      }()),
                       true)
                   .ok());
   EXPECT_EQ(m.snapshot()->processes[0].pid, 555u);
@@ -389,7 +390,8 @@ TEST(LiveRetention, OldBatchesBecomeAGap) {
   enc.onThread(thread(100, 101, "main"));
   for (int b = 0; b < 20; ++b) {
     for (int i = 0; i < 100; ++i)
-      enc.onSample(2000 + b * 1000 + i, 100, 101, 0, 0, std::vector<uint64_t>{0x400010 + static_cast<uint64_t>(i)});
+      enc.onSample(2000 + b * 1000 + i, 100, 101, 0, 0,
+                   std::vector<uint64_t>{0x400010 + static_cast<uint64_t>(i)});
     enc.flush();
   }
   EXPECT_EQ(enc.lastSeq(), 20u);
@@ -475,7 +477,8 @@ TEST(LiveSplit, SplitRecordsCutsOnlyAtRecordBoundaries) {
   std::string blob;
   for (int i = 0; i < 10; ++i) {
     const std::string payload(100, 'x');
-    model::live_wire::putRecord(blob, model::live_wire::RecordType::StringDef, payload.data(), payload.size());
+    model::live_wire::putRecord(blob, model::live_wire::RecordType::StringDef, payload.data(),
+                                payload.size());
   }
   const auto pieces = splitRecords(blob, 350);  // 108 bytes per record: three per piece
   ASSERT_EQ(pieces.size(), 4u);

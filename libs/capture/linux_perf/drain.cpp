@@ -243,6 +243,7 @@ void Drain::process(uint32_t ringId, const std::vector<uint8_t>& bytes) {
         }
       });
   if (walk != ParseStatus::Ok) malformed = true;  // the rest of this read is not a record sequence
+  if (m_tap && (!m_metaBuf.empty() || !m_dataBuf.empty())) m_tap(m_metaBuf, m_dataBuf);
 
   std::lock_guard lock(m_mutex);
   m_stats.bytesDrained += consumed;

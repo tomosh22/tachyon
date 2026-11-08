@@ -54,6 +54,37 @@ tachyon-cli --agent tcp://build-box:7331 fetch /var/tmp/capture-1700000000.tachy
 * Exit codes: a wrong token or an unreachable agent is 2, a missing token file is 3 (usage), a refused fetch or
   launch is 1.
 
+## live
+
+```
+tachyon-cli [--agent ADDRESS] [--token-file FILE] [--json] live (--launch EXE [--args "A B"] | --attach PID | --system)
+            [--duration S] [--window S] [--interval S] [--hz N] [--follow-children] [--child-filter GLOB]
+            [--cwd D] [--env K=V]... [--circular-mb N] [--out PATH]
+```
+
+Starts a **live** capture (the agent decodes events as they arrive and streams them, see
+[docs/specs/live.md](../../docs/specs/live.md)), subscribes to it and prints one line per `--interval` seconds
+(default 1) built from the last `--window` seconds (default 30) of the capture:
+
+```
+[12.0s] window 12.0 s, 95871 samples, latency 0.16 s, gaps 0, dropped 0, top: testbed+0x1a40 39.9% testbed+0x1b80 30.0% ...
+```
+
+* `window` is the span of trace time in the live window, `samples` the samples in it.
+* `top` lists the five functions with the most exclusive samples. No symbols are resolved: a function is its
+  module plus RVA (`testbed+0x1a40`) or an absolute address, so these are frames, not source functions.
+* `latency` is this machine's clock minus the timestamp of the newest sample; it is only shown for a local
+  agent on Linux (the trace clock is `CLOCK_MONOTONIC_RAW`), `n/a` otherwise.
+* `gaps` counts `live_gap` events the CLI survived by resubscribing (a gap means the CLI fell behind: the agent
+  then sends a fresh keyframe); `dropped` is the number of live events the agent dropped because its live path
+  fell behind (the final trace is unaffected).
+* With `--json` every line is an object `{"t","window_s","samples","latency_s","gaps","dropped","top":[{"name",
+  "samples","pct"}]}`.
+
+The capture ends after `--duration` seconds (required for `--attach` and `--system`), when the launched target
+exits, or on an error; the CLI then stops it and prints the path of the normal `.tachyon` trace, which is
+written exactly as without `--live`. Exit codes are those of `capture`.
+
 ## doctor (Linux)
 
 ```

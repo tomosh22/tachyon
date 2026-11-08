@@ -90,9 +90,8 @@ struct SampleStore {
       flags.push_back(f);
       return;
     }
-    const size_t pos =
-        static_cast<size_t>(std::upper_bound(ts.begin() + static_cast<std::ptrdiff_t>(head), ts.end(), t) -
-                            ts.begin());
+    const size_t pos = static_cast<size_t>(
+        std::upper_bound(ts.begin() + static_cast<std::ptrdiff_t>(head), ts.end(), t) - ts.begin());
     const auto at = static_cast<std::ptrdiff_t>(pos);
     ts.insert(ts.begin() + at, t);
     node.insert(node.begin() + at, n);
@@ -100,8 +99,8 @@ struct SampleStore {
     flags.insert(flags.begin() + at, f);
   }
   void trim(uint64_t cutoff) {
-    head = static_cast<size_t>(std::lower_bound(ts.begin() + static_cast<std::ptrdiff_t>(head), ts.end(), cutoff) -
-                               ts.begin());
+    head = static_cast<size_t>(
+        std::lower_bound(ts.begin() + static_cast<std::ptrdiff_t>(head), ts.end(), cutoff) - ts.begin());
     if (head > 4096 && head > ts.size() / 2) {
       const auto h = static_cast<std::ptrdiff_t>(head);
       ts.erase(ts.begin(), ts.begin() + h);
@@ -626,10 +625,10 @@ std::shared_ptr<const TraceModel> LiveModel::Impl::buildSnapshot() const {
   // Facts.
   m.captureInfo.sampling_hz = samplingHz;
   m.captureInfo.events_lost = stats.droppedLive;
-  m.captureInfo.raw_json = "{\"live\":true,\"window_s\":" +
-                           std::to_string(static_cast<double>(options.windowNs) / 1e9) +
-                           ",\"sampling_hz\":" + std::to_string(samplingHz) +
-                           ",\"dropped_live\":" + std::to_string(stats.droppedLive) + "}";
+  m.captureInfo.raw_json =
+      "{\"live\":true,\"window_s\":" + std::to_string(static_cast<double>(options.windowNs) / 1e9) +
+      ",\"sampling_hz\":" + std::to_string(samplingHz) +
+      ",\"dropped_live\":" + std::to_string(stats.droppedLive) + "}";
   if (m.header.clock_frequency_hz != 0 && samplingHz != 0) {
     m.sampleIntervalTicks = static_cast<uint64_t>(
         static_cast<double>(m.header.clock_frequency_hz) / static_cast<double>(samplingHz) + 0.5);

@@ -147,6 +147,23 @@ CLI. The path must be shorter than 108 bytes.
   A capture that shows no scopes while the program was instrumented usually means the SDK never reached the
   agent: look for the sidecar file, and check the socket path both sides use.
 
+## Live view
+
+A `start` with `"live":true` (`tachyon-cli live ...`, or the viewer's Live document) makes the perf backend decode
+the records the drain thread reads as they arrive, in addition to writing the spool for the final trace. The
+decoder (`libs/capture/linux_perf/live_source.h`) runs on its own thread behind a bounded queue (64 MiB of
+sample and switch records, 256 MiB of FORK / COMM / MMAP / EXIT records): when it falls behind it drops live
+sample and switch records, counts them (`dropped` in the live stream, `onDropped` in the sink) and never touches
+the spool, so the final trace is the same with or without `live`. The decoder keeps its own process, thread and
+address-space tables from the same records and the `/proc` rundown the converter uses; a module is reported the
+first time its process shows up, with the same identity rules (GNU build-id, the ELF load base).
+
+`--live-window-seconds N` (default 30) is how much the agent keeps for a client that subscribes late: the
+keyframe it gets holds every table definition plus the last N seconds of batches. Batches are cut every 250 ms
+or 256 KiB; a client that cannot keep up gets `live_gap` and resubscribes. Cost: one more memcpy of the ring
+data per drain read plus the decode (measured: 2.2% of one cpu for the testbed's `spin` at 7.6 kHz of one
+thread), and `window x rate x 20` bytes of retained batches (about 80 MB for 30 s of 16 threads at 8 kHz).
+
 ## Remote capture (TCP)
 
 ```sh

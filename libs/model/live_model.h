@@ -3,7 +3,8 @@
 // The agent's LiveEncoder (libs/control/live_encoder.h) turns the raw-identity events of a running capture
 // into batches of records with LIVE indices (strings, processes, threads, modules, frames, callstack nodes);
 // LiveModel decodes those batches, keeps the table definitions and the events of the last `windowNs` of trace
-// time, and builds ordinary immutable TraceModel snapshots of the window for the existing analysis and UI code.
+// time, and builds ordinary immutable TraceModel snapshots of the window for the existing analysis and UI
+// code.
 //
 // THE BATCH ENCODING (little-endian; this is what the encoder writes and apply() reads). A batch is a
 // sequence of records {uint32 type; uint32 byte_len; payload[byte_len]}; unknown types are skipped by their
@@ -15,7 +16,8 @@
 //    2    ProcessDef       u32 idx; trace::ProcessRec (32 B; name / command_line are string indices)
 //    3    ThreadDef        u32 idx; trace::ThreadRec (32 B; name is a string index; flags bit0 = target)
 //    4    ThreadName       u32 thread idx; u32 string idx   (a rename of an already defined thread)
-//    5    ModuleDef        u32 idx; trace::ModuleRec (78 B; path is a string index; re-sent with unload_ts set
+//    5    ModuleDef        u32 idx; trace::ModuleRec (78 B; path is a string index; re-sent with unload_ts
+//    set
 //                          when the module is unloaded)
 //    6    FrameDef         u32 idx; trace::FrameRec (12 B; module is a module index or kInvalidIdx)
 //    7    NodeDef          u32 idx; trace::CallstackNodeRec (8 B; parent / frame are node / frame indices;
@@ -137,9 +139,9 @@ struct LiveModelStats {
   uint64_t nowTs = 0;          // the capture's newest timestamp seen
   uint64_t windowStartTs = 0;  // now - window (0 while the capture is younger than the window)
   uint64_t samplesInWindow = 0;
-  uint64_t droppedLive = 0;      // sum of Dropped records
-  uint64_t unknownRecords = 0;   // records of an unknown type that were skipped
-  uint64_t residentBytes = 0;    // estimate of the heap held by tables and window events
+  uint64_t droppedLive = 0;     // sum of Dropped records
+  uint64_t unknownRecords = 0;  // records of an unknown type that were skipped
+  uint64_t residentBytes = 0;   // estimate of the heap held by tables and window events
 };
 
 // Thread-safe: every method takes an internal lock (apply() is one writer; snapshot() may run concurrently

@@ -157,7 +157,7 @@ struct LiveEncoder::Impl {
   struct ThreadEntry {
     trace::ThreadRec rec{};
     bool emitted = false;
-    bool dirty = false;       // needs a full ThreadDef
+    bool dirty = false;  // needs a full ThreadDef
     bool renamePending = false;
   };
   std::vector<ThreadEntry> threads;
@@ -300,7 +300,8 @@ struct LiveEncoder::Impl {
       auto it = rangesByPid.find(pid);
       if (it != rangesByPid.end()) {
         const auto& v = it->second;
-        auto r = std::upper_bound(v.begin(), v.end(), ip, [](uint64_t a, const Range& x) { return a < x.base; });
+        auto r =
+            std::upper_bound(v.begin(), v.end(), ip, [](uint64_t a, const Range& x) { return a < x.base; });
         if (r != v.begin()) {
           --r;
           if (ip < r->end) {
@@ -311,9 +312,8 @@ struct LiveEncoder::Impl {
       }
     }
     const uint64_t h = frameHash(module, value);
-    const uint32_t found = frameTable.find(h, [&](uint32_t i) {
-      return frames[i].module.get() == module && frames[i].addr_or_rva == value;
-    });
+    const uint32_t found = frameTable.find(
+        h, [&](uint32_t i) { return frames[i].module.get() == module && frames[i].addr_or_rva == value; });
     if (found != kInvalidIdx) return found;
     if (frames.size() + 1 >= config.maxFrames) {
       ++counters.overflows;
@@ -326,16 +326,16 @@ struct LiveEncoder::Impl {
     }
     frames.push_back(trace::FrameRec{ModuleIdx(module), value});
     const auto idx = static_cast<uint32_t>(frames.size() - 1);
-    frameTable.insert(h, idx, [&](uint32_t i) { return frameHash(frames[i].module.get(), frames[i].addr_or_rva); });
+    frameTable.insert(h, idx,
+                      [&](uint32_t i) { return frameHash(frames[i].module.get(), frames[i].addr_or_rva); });
     pendingBytes += 24;
     return idx;
   }
 
   uint32_t nodeForLocked(uint32_t parent, uint32_t frame) {
     const uint64_t h = core::hashU32Pair(parent, frame);
-    const uint32_t found = nodeTable.find(h, [&](uint32_t i) {
-      return nodes[i].parent.get() == parent && nodes[i].frame.get() == frame;
-    });
+    const uint32_t found = nodeTable.find(
+        h, [&](uint32_t i) { return nodes[i].parent.get() == parent && nodes[i].frame.get() == frame; });
     if (found != kInvalidIdx) return found;
     if (nodes.size() >= config.maxNodes) {
       ++counters.overflows;
@@ -343,7 +343,8 @@ struct LiveEncoder::Impl {
     }
     nodes.push_back(trace::CallstackNodeRec{CallstackIdx(parent), FrameIdx(frame)});
     const auto idx = static_cast<uint32_t>(nodes.size() - 1);
-    nodeTable.insert(h, idx, [&](uint32_t i) { return core::hashU32Pair(nodes[i].parent.get(), nodes[i].frame.get()); });
+    nodeTable.insert(
+        h, idx, [&](uint32_t i) { return core::hashU32Pair(nodes[i].parent.get(), nodes[i].frame.get()); });
     pendingBytes += 20;
     return idx;
   }
@@ -367,9 +368,9 @@ struct LiveEncoder::Impl {
   // batches
 
   bool pendingAny() const {
-    return infoPending || !sTs.empty() || !switches.empty() || !readies.empty() || !scopes.empty() || !frameMarks.empty() ||
-           !markers.empty() || !plots.empty() || pendingDropped != 0 || !dirtyProcs.empty() ||
-           !dirtyThreads.empty() || !renamedThreads.empty() || !dirtyModules.empty() ||
+    return infoPending || !sTs.empty() || !switches.empty() || !readies.empty() || !scopes.empty() ||
+           !frameMarks.empty() || !markers.empty() || !plots.empty() || pendingDropped != 0 ||
+           !dirtyProcs.empty() || !dirtyThreads.empty() || !renamedThreads.empty() || !dirtyModules.empty() ||
            stringsEmitted < strings.size() || framesEmitted < frames.size() || nodesEmitted < nodes.size();
   }
 
@@ -426,8 +427,8 @@ struct LiveEncoder::Impl {
     }
     dirtyModules.clear();
     for (; framesEmitted < frames.size(); ++framesEmitted)
-      putIndexedRecord(defs, RecordType::FrameDef, static_cast<uint32_t>(framesEmitted), &frames[framesEmitted],
-                       sizeof(trace::FrameRec));
+      putIndexedRecord(defs, RecordType::FrameDef, static_cast<uint32_t>(framesEmitted),
+                       &frames[framesEmitted], sizeof(trace::FrameRec));
     for (; nodesEmitted < nodes.size(); ++nodesEmitted)
       putIndexedRecord(defs, RecordType::NodeDef, static_cast<uint32_t>(nodesEmitted), &nodes[nodesEmitted],
                        sizeof(trace::CallstackNodeRec));
@@ -482,8 +483,8 @@ struct LiveEncoder::Impl {
   }
 
   void trimRetainedLocked() {
-    while (batches.size() > 1 && (batches.front().endTs + windowTicks < now ||
-                                  retainedBytes > config.maxRetainedBytes)) {
+    while (batches.size() > 1 &&
+           (batches.front().endTs + windowTicks < now || retainedBytes > config.maxRetainedBytes)) {
       retainedBytes -= batches.front().data->size();
       batches.pop_front();
     }
@@ -575,7 +576,8 @@ void LiveEncoder::onThread(const capture::LiveThread& t) {
   if (idx == m.overflowThread) return;
   Impl::ThreadEntry& e = m.threads[idx];
   const uint32_t targetFlag = t.isTarget ? trace::kThreadFlagTargetProcess : 0;
-  const bool otherChange = (t.endTs != 0 && e.rec.end_ts != t.endTs) || (e.rec.flags | targetFlag) != e.rec.flags;
+  const bool otherChange =
+      (t.endTs != 0 && e.rec.end_ts != t.endTs) || (e.rec.flags | targetFlag) != e.rec.flags;
   if (e.rec.start_ts == 0 || (t.startTs != 0 && t.startTs < e.rec.start_ts)) e.rec.start_ts = t.startTs;
   if (t.endTs != 0) e.rec.end_ts = t.endTs;  // a thread does not come back to life
   e.rec.flags |= targetFlag;
@@ -631,14 +633,16 @@ void LiveEncoder::onModule(const capture::LiveModule& mod) {
   r.load_ts = mod.loadTs;
   r.unload_ts = mod.unloadTs;
   auto& ranges = m.rangesByPid[mod.pid];
-  ranges.erase(std::remove_if(ranges.begin(), ranges.end(), [&](const Impl::Range& x) { return x.idx == idx; }),
-               ranges.end());
+  ranges.erase(
+      std::remove_if(ranges.begin(), ranges.end(), [&](const Impl::Range& x) { return x.idx == idx; }),
+      ranges.end());
   e.loaded = mod.unloadTs == 0;
   if (e.loaded) {
     Impl::Range rg{mod.base, mod.base + std::max<uint64_t>(mod.size, 1), idx};
-    ranges.insert(std::upper_bound(ranges.begin(), ranges.end(), rg,
-                                   [](const Impl::Range& a, const Impl::Range& b) { return a.base < b.base; }),
-                  rg);
+    ranges.insert(
+        std::upper_bound(ranges.begin(), ranges.end(), rg,
+                         [](const Impl::Range& a, const Impl::Range& b) { return a.base < b.base; }),
+        rg);
   }
   ++m.moduleEpoch;
   if (!e.dirty) {
@@ -880,7 +884,8 @@ LiveKeyframe LiveEncoder::beginKeyframe() {
     cut(false);
   }
   for (size_t i = 0; i < m.frames.size(); ++i) {
-    putIndexedRecord(defs, RecordType::FrameDef, static_cast<uint32_t>(i), &m.frames[i], sizeof(trace::FrameRec));
+    putIndexedRecord(defs, RecordType::FrameDef, static_cast<uint32_t>(i), &m.frames[i],
+                     sizeof(trace::FrameRec));
     cut(false);
   }
   for (size_t i = 1; i < m.nodes.size(); ++i) {
