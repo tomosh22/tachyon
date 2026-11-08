@@ -13,11 +13,13 @@
 #include "model/model.h"
 #include "trace/trace_reader.h"
 
+#include <zstd.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -195,6 +197,64 @@ class U32Map {
   std::vector<Slot> m_slots;
   uint32_t m_mask = 0, m_shift = 0;
   size_t m_size = 0;
+};
+
+// Reads the leading `prefixBytes` of a Samples chunk's payload (the ts and tid columns of the SoA layout)
+// without decoding the rest of the zstd frame; the counting pass needs only the tid column. One instance per
+// worker, own file handle. Anything unexpected makes read() return false and the caller falls back to the
+// fully validating TraceReader::readChunk, which also reports the corruption.
+class SamplePrefixReader {
+ public:
+  explicit SamplePrefixReader(const std::filesystem::path& path)
+      : m_file(path, std::ios::in | std::ios::binary) {}
+  ~SamplePrefixReader() {
+    if (m_dctx) ZSTD_freeDCtx(m_dctx);
+  }
+  SamplePrefixReader(const SamplePrefixReader&) = delete;
+  SamplePrefixReader& operator=(const SamplePrefixReader&) = delete;
+
+  // Not thread-safe.
+  bool read(const FooterRec& c, size_t prefixBytes, std::vector<std::byte>& out) {
+    if (!m_file || c.record_count == 0 || c.record_count > trace::kMaxRecordsPerChunk) return false;
+    trace::ChunkHeader h;
+    m_file.clear();
+    m_file.seekg(static_cast<std::streamoff>(c.offset));
+    m_file.read(reinterpret_cast<char*>(&h), sizeof(h));
+    if (!m_file || h.type != c.type || h.record_count != c.record_count) return false;
+    if (h.uncompressed_size != c.record_count * trace::kSampleBytes || prefixBytes > h.uncompressed_size)
+      return false;
+    out.resize(prefixBytes);
+    if (h.compression == trace::kCompressionNone) {
+      if (h.compressed_size != h.uncompressed_size) return false;
+      m_file.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(prefixBytes));
+      return static_cast<bool>(m_file);
+    }
+    if (h.compression != trace::kCompressionZstd || h.compressed_size == 0 ||
+        h.compressed_size > ZSTD_compressBound(static_cast<size_t>(h.uncompressed_size)))
+      return false;
+    m_comp.resize(static_cast<size_t>(h.compressed_size));
+    m_file.read(reinterpret_cast<char*>(m_comp.data()), static_cast<std::streamsize>(m_comp.size()));
+    if (!m_file) return false;
+    const unsigned long long frameSize = ZSTD_getFrameContentSize(m_comp.data(), m_comp.size());
+    if (frameSize != h.uncompressed_size) return false;
+    if (!m_dctx) m_dctx = ZSTD_createDCtx();
+    if (!m_dctx) return false;
+    ZSTD_DCtx_reset(m_dctx, ZSTD_reset_session_only);
+    ZSTD_inBuffer in{m_comp.data(), m_comp.size(), 0};
+    ZSTD_outBuffer dst{out.data(), out.size(), 0};
+    while (dst.pos < dst.size) {
+      const size_t hint = ZSTD_decompressStream(m_dctx, &dst, &in);
+      if (ZSTD_isError(hint)) return false;
+      if (hint == 0) break;                                       // frame complete
+      if (in.pos == in.size && dst.pos < dst.size) return false;  // truncated input
+    }
+    return dst.pos == dst.size;
+  }
+
+ private:
+  std::ifstream m_file;
+  ZSTD_DCtx* m_dctx = nullptr;
+  std::vector<std::byte> m_comp;
 };
 
 // Decoded content of one non-sample chunk.
@@ -496,13 +556,20 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
   // ---- Phase B: count samples per tid in every Samples chunk ----
   std::vector<std::vector<TidCount>> chunkCounts(sampleIdx.size());
   std::vector<std::vector<std::byte>> buffers(runner.workers());
+  std::vector<std::unique_ptr<SamplePrefixReader>> prefixReaders(runner.workers());
   TACHYON_TRY(runner.run(sampleIdx.size(), 0.25f, [&](size_t item, unsigned worker) -> Result<void> {
     const FooterRec& c = chunks[sampleIdx[item]];
-    TACHYON_TRY_ASSIGN(TraceReader * reader, readerFor(worker));
     std::vector<std::byte>& payload = buffers[worker];
-    TACHYON_TRY(reader->readChunk(c, payload));
-    TACHYON_TRY(checkSamplePayload(c, payload));
+    // WP-68: only the ts and tid columns are decoded here (60% of the payload); the scatter pass decodes the
+    // whole chunk, and validates it, afterwards.
+    if (!prefixReaders[worker]) prefixReaders[worker] = std::make_unique<SamplePrefixReader>(path);
     const size_t n = static_cast<size_t>(c.record_count);
+    if (c.record_count > trace::kMaxRecordsPerChunk ||
+        !prefixReaders[worker]->read(c, n * 12, payload)) {  // unexpected: the validating full read
+      TACHYON_TRY_ASSIGN(TraceReader * reader, readerFor(worker));
+      TACHYON_TRY(reader->readChunk(c, payload));
+      TACHYON_TRY(checkSamplePayload(c, payload));
+    }
     const std::byte* tids = payload.data() + n * 8;
     U32Map index;
     std::vector<TidCount>& counts = chunkCounts[item];
@@ -681,6 +748,7 @@ Result<TraceModel> TraceModel::load(const std::filesystem::path& path, const Loa
     return ok();
   }));
   std::vector<std::vector<std::byte>>().swap(buffers);
+  prefixReaders.clear();
   readers.clear();
 
   // Samples whose callstack lies beyond the recovered node table: error, or (partial file) drop the stack.

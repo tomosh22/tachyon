@@ -239,6 +239,9 @@ class App {
   uint64_t m_symbolGeneration = 0;
   std::shared_ptr<SymbolMailbox> m_symbolMailbox;
   std::unique_ptr<SymbolSetupRun> m_symbolSetup;  // WP-67: after m_document, m_symbolMailbox; destroyed first
+  // WP-68: the symbol service of the preview that the complete document of the same stream replaces, held
+  // until the complete document's run adopts its finished modules (SymbolService::adoptRun); null otherwise.
+  std::shared_ptr<symbols::SymbolService> m_adoptSource;
   std::vector<std::string> m_symbolPathProblems;
 
   MemoryGovernor m_memory;

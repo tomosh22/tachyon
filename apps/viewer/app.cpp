@@ -357,7 +357,8 @@ bool App::pumpSymbolEvents() {
 void App::startSymbolResolution(Document& document) {
   std::filesystem::path cacheDir = pathFromUtf8(m_settings.cacheDir);
   if (cacheDir.empty()) cacheDir = defaultSymbolCacheDir();
-  auto service = std::make_shared<symbols::SymbolService>(m_settings.symbolServers, cacheDir);
+  auto service = std::make_shared<symbols::SymbolService>(
+      m_settings.symbolServers, cacheDir, m_adoptSource ? m_adoptSource->sharedStrings() : nullptr);
 #if TACHYON_PLATFORM_WINDOWS && TACHYON_HAVE_DIA
   symbols::registerDiaProvider(*service);  // PDBs through DIA; .symbols.json sidecars keep working
 #endif
@@ -410,6 +411,10 @@ void App::beginSymbolResolve(Document& document) {
   const std::shared_ptr<symbols::SymbolService>& service = document.symbols();
   if (!service) return;
   auto mailbox = m_symbolMailbox;
+  if (m_adoptSource) {  // WP-68: take over what the preview's run finished
+    service->adoptRun(*m_adoptSource);
+    m_adoptSource.reset();
+  }
   // The const overload never writes the model (Module::state is written only by the non-const overload's
   // waitAll()); module states are read with SymbolService::moduleState().
   service->resolveAllAsync(document.model(), [mailbox](ModuleIdx module, symbols::SymbolState state) {
@@ -472,6 +477,7 @@ void App::toast(ToastLevel level, std::string text) {
 void App::rerunSymbolResolution() {
   if (!m_document) return;
   m_symbolSetup.reset();  // WP-67: joins the search-path worker (cancel() below must not overlap it)
+  m_adoptSource.reset();  // a rerun (new search path, Retry) resolves everything again
   // Stop the old run first: snapshots and in-flight queries may keep the old service alive, and its workers
   // would otherwise keep loading providers alongside the new run. cancel() keeps lookups usable.
   if (const std::shared_ptr<symbols::SymbolService>& old = m_document->symbols()) old->cancel();
@@ -522,23 +528,26 @@ void App::onDocumentLoaded(std::shared_ptr<Document> document) {
   // The complete document of a stream replaces its preview: the user's selection stays.
   const bool continuation =
       m_document && document->streamId() != 0 && m_document->streamId() == document->streamId();
-  // WP-67 (e): the complete document gets a fresh SymbolService and resolves every module again; the
-  // preview's results are NOT reused. A resolved module's provider interns its strings into the service's
-  // table and the service memoizes FrameIdx -> ResolvedAddress for the model it was started on (it points
-  // into that model's frame table), so neither can move to a service for another model; sharing them would
-  // need a SymbolService API to adopt the providers of a finished run (libs/symbols, outside this change).
-  // The expensive part is cheap the second time anyway: the symbol files are already located and pinned in
-  // the locator's cache, so the repeat is provider loading only. If the preview's run is still going, it is
-  // cancelled with its service.
+  // WP-68: the complete document of a stream gets a fresh SymbolService that adopts the finished modules of
+  // the preview's (SymbolService::adoptRun): modules whose record is identical keep their providers and are
+  // not located or loaded again; only the new model's frames are resolved through them. The new service
+  // shares the preview's string table, so results of both agree on every StringIdx. If the preview's run is
+  // still going, adoptRun() cancels it and takes what it finished.
+  std::shared_ptr<symbols::SymbolService> previousSymbols =
+      continuation ? m_document->symbols() : std::shared_ptr<symbols::SymbolService>();
   m_symbolMailbox.reset();
   m_symbolSetup.reset();
   // WP-67: the complete model can number the threads differently from the preview (a thread without a
   // ThreadRec that only the later chunks mention): the kept selection is mapped by pid/tid.
   std::function<ThreadIdx(ThreadIdx)> threadMap;
   if (continuation) threadMap = threadMapBetween(m_document->model(), document->model());
+  // The preview's workers read its model's frame table: stop them (cancel() joins them and keeps finished
+  // modules adoptable) before the preview document, and with it that model, can be freed.
+  if (previousSymbols) previousSymbols->cancel();
   m_document = std::move(document);
   ++m_documentGeneration;
   ++m_symbolGeneration;
+  m_adoptSource = std::move(previousSymbols);
   startSymbolResolution(*m_document);
   m_lastError.clear();
   if (!continuation) {
@@ -557,6 +566,7 @@ void App::closeDocument() {
   if (m_openJob != 0 && m_document->streamId() != 0 && m_document->streamId() == m_openStream)
     m_jobs.cancel(m_openJob);
   m_symbolSetup.reset();
+  m_adoptSource.reset();
   m_document.reset();  // joins the symbol workers before the model can go away
   m_symbolMailbox.reset();
   ++m_documentGeneration;

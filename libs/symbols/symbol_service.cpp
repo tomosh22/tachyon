@@ -14,7 +14,13 @@ struct SymbolService::Job {
   // Cache files pinned in the service's SymbolLocator per module (empty = none); released together.
   std::vector<std::filesystem::path> pinned;
   std::vector<std::string> errors;  // written by the owning worker before the final state's release store
-  std::vector<std::unique_ptr<ISymbolProvider>> providers;
+  std::vector<std::shared_ptr<ISymbolProvider>> providers;  // shared: an adopting service keeps them alive
+  // Per module: 0 = resolve normally, 1 = providers[i] was adopted (finished), 2 = adopted failure (state in
+  // adoptedState, error in errors). Written before the workers start.
+  std::vector<uint8_t> adopt;
+  std::vector<uint8_t> adoptedState;
+  std::atomic<uint32_t> adoptedCount{0};
+  std::atomic<uint32_t> loadedCount{0};
   std::vector<ResolvedAddress> memo;  // indexed by FrameIdx; slot written before its module's release store
   // Return-address variant (rva - 1), only for frames that occur in a non-leaf stack position. callerSlot is
   // indexed by FrameIdx (kNoSlot = never non-leaf); memoCaller is indexed by the slot. Written like `memo`.
@@ -30,9 +36,22 @@ struct SymbolService::Job {
   bool applied = false;
 };
 
+// What adoptRun() takes from the previous service, indexed by that run's module index.
+struct SymbolService::Adopted {
+  std::vector<Module> modules;
+  std::vector<uint8_t> state;
+  std::vector<std::shared_ptr<ISymbolProvider>> providers;
+  std::vector<std::string> errors;
+  std::vector<std::filesystem::path> pinned;  // pinned in THIS service's locator (empty = none)
+};
+
 namespace {
 
 constexpr uint32_t kNoSlot = 0xFFFFFFFFu;
+
+bool sameModule(const Module& a, const Module& b) {
+  return a.pid == b.pid && a.base == b.base && a.size == b.size && a.path == b.path && a.id == b.id;
+}
 
 bool isFinal(SymbolState s) {
   return s == SymbolState::Resolved || s == SymbolState::NotFound || s == SymbolState::Failed;
@@ -41,16 +60,27 @@ bool isFinal(SymbolState s) {
 }  // namespace
 
 SymbolService::SymbolService(std::vector<std::string> servers, std::filesystem::path cacheDir)
-    : m_servers(std::move(servers)), m_cacheDir(std::move(cacheDir)), m_locator(m_servers, m_cacheDir) {
+    : SymbolService(std::move(servers), std::move(cacheDir), nullptr) {}
+
+SymbolService::SymbolService(std::vector<std::string> servers, std::filesystem::path cacheDir,
+                             std::shared_ptr<SymbolStringTable> strings)
+    : m_servers(std::move(servers)),
+      m_cacheDir(std::move(cacheDir)),
+      m_locator(m_servers, m_cacheDir),
+      m_strings(strings ? std::move(strings) : std::make_shared<SymbolStringTable>()) {
   m_locate = [this](const Module& m, const std::atomic<bool>* cancel) { return m_locator.locate(m, cancel); };
   m_factory = [this](const Module&, const std::filesystem::path& file) -> std::unique_ptr<ISymbolProvider> {
-    if (file.extension() == ".json") return std::make_unique<JsonSymbolProvider>(m_strings);
+    if (file.extension() == ".json") return std::make_unique<JsonSymbolProvider>(*m_strings);
     return nullptr;
   };
 }
 
 SymbolService::~SymbolService() {
   cancel();
+  if (m_adopted) {  // adopted but never used: give the pins back
+    for (const std::filesystem::path& p : m_adopted->pinned)
+      if (!p.empty()) m_locator.unpin(p);
+  }
 }
 
 void SymbolService::cancel() {
@@ -100,6 +130,41 @@ Result<void> SymbolService::addSymbolFileOverride(const std::filesystem::path& s
   return ok();
 }
 
+size_t SymbolService::adoptRun(SymbolService& previous) {
+  if (&previous == this || !previous.m_job || previous.m_strings != m_strings) return 0;
+  // Stop the previous run (its workers abandon unfinished modules back to Pending), then take what it
+  // finished.
+  previous.m_job->cancel.store(true, std::memory_order_release);
+  for (std::thread& t : previous.m_job->threads)
+    if (t.joinable()) t.join();
+  Job& pj = *previous.m_job;
+  if (m_adopted) {  // an earlier adoption that was never used
+    for (const std::filesystem::path& p : m_adopted->pinned)
+      if (!p.empty()) m_locator.unpin(p);
+  }
+  auto adopted = std::make_unique<Adopted>();
+  adopted->modules = pj.modules;
+  const size_t n = pj.modules.size();
+  adopted->state.resize(n);
+  adopted->errors = pj.errors;
+  adopted->providers = pj.providers;
+  adopted->pinned.resize(n);
+  size_t count = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const SymbolState st = static_cast<SymbolState>(pj.state[i].load(std::memory_order_acquire));
+    adopted->state[i] = static_cast<uint8_t>(isFinal(st) ? st : SymbolState::Pending);
+    if (!isFinal(st)) continue;
+    ++count;
+    if (st == SymbolState::Resolved && !pj.pinned[i].empty()) {
+      m_locator.pin(pj.pinned[i]);  // this service now holds the file for the adopted provider
+      adopted->pinned[i] = pj.pinned[i];
+    }
+  }
+  m_adopted = std::move(adopted);
+  previous.releasePins();
+  return count;
+}
+
 void SymbolService::resolveAllAsync(model::TraceModel& model,
                                     std::function<void(ModuleIdx, SymbolState)> onModule) {
   resolveAllAsync(static_cast<const model::TraceModel&>(model), std::move(onModule));
@@ -121,6 +186,8 @@ void SymbolService::resolveAllAsync(const model::TraceModel& model,
   job->errors.resize(moduleCount);
   job->providers.resize(moduleCount);
   job->pinned.resize(moduleCount);
+  job->adopt.assign(moduleCount, 0);
+  job->adoptedState.assign(moduleCount, 0);
   job->memo.resize(model.frames.size());
   job->framesOfModule.resize(moduleCount);
   // A frame is non-leaf when some callstack node referencing it has a child: the child's parent is that node.
@@ -143,6 +210,31 @@ void SymbolService::resolveAllAsync(const model::TraceModel& model,
     if (!job->framesOfModule[m].empty()) job->referenced.push_back(static_cast<uint32_t>(m));
   }
   job->onModule = std::move(onModule);
+
+  // Adopt the finished modules of the previous run whose record is identical (adoptRun).
+  if (m_adopted) {
+    Adopted& a = *m_adopted;
+    for (const uint32_t m : job->referenced) {
+      if (m >= a.modules.size() || a.state[m] == static_cast<uint8_t>(SymbolState::Pending) ||
+          !sameModule(a.modules[m], job->modules[m]))
+        continue;
+      const SymbolState st = static_cast<SymbolState>(a.state[m]);
+      if (st == SymbolState::Resolved) {
+        if (!a.providers[m]) continue;
+        job->providers[m] = std::move(a.providers[m]);
+        job->pinned[m] = std::move(a.pinned[m]);
+        a.pinned[m].clear();
+        job->adopt[m] = 1;
+      } else {
+        job->errors[m] = a.errors[m];
+        job->adoptedState[m] = a.state[m];
+        job->adopt[m] = 2;
+      }
+    }
+    for (const std::filesystem::path& p : a.pinned)  // pins of modules that were not adopted
+      if (!p.empty()) m_locator.unpin(p);
+    m_adopted.reset();
+  }
 
   // Publish the per-run view for lookup(); no worker is running yet.
   m_frames = model.frames.data();
@@ -183,6 +275,24 @@ void SymbolService::processModule(Job& job, uint32_t idx) {
   setState(job, idx, SymbolState::Loading, {});
   const Module& module = job.modules[idx];
 
+  if (job.adopt[idx] == 2) {  // adopted failure: not retried
+    job.adoptedCount.fetch_add(1, std::memory_order_relaxed);
+    setState(job, idx, static_cast<SymbolState>(job.adoptedState[idx]), {});
+    return;
+  }
+  if (job.adopt[idx] == 1) {  // adopted provider: only the new model's frames are resolved through it
+    job.adoptedCount.fetch_add(1, std::memory_order_relaxed);
+    ISymbolProvider& adopted = *job.providers[idx];
+    for (const uint32_t f : job.framesOfModule[idx]) {
+      const uint64_t addr = m_frames[f].addr_or_rva;
+      job.memo[f] = adopted.resolve(addr);
+      if (job.callerSlot[f] != kNoSlot)
+        job.memoCaller[job.callerSlot[f]] = adopted.resolve(addr != 0 ? addr - 1 : 0);
+    }
+    setState(job, idx, SymbolState::Resolved, {});
+    return;
+  }
+
   // Overrides first (id match preferred over path match), then the locate function.
   Result<std::filesystem::path> located = makeError(ErrorCode::NotFound, "no symbol file for " + module.path);
   bool found = false;
@@ -222,6 +332,7 @@ void SymbolService::processModule(Job& job, uint32_t idx) {
     setState(job, idx, SymbolState::Failed, "no symbol provider for " + located.value().string());
     return;
   }
+  job.loadedCount.fetch_add(1, std::memory_order_relaxed);
   Result<void> loaded = provider->load(module, located.value());
   if (!loaded.ok()) {
     const SymbolState s =
@@ -274,6 +385,14 @@ SymbolProgress SymbolService::progress() const {
   if (!m_job) return {};
   return SymbolProgress{m_job->done.load(std::memory_order_acquire),
                         static_cast<uint32_t>(m_job->referenced.size())};
+}
+
+uint32_t SymbolService::modulesAdopted() const {
+  return m_job ? m_job->adoptedCount.load(std::memory_order_acquire) : 0;
+}
+
+uint32_t SymbolService::modulesLoaded() const {
+  return m_job ? m_job->loadedCount.load(std::memory_order_acquire) : 0;
 }
 
 SymbolState SymbolService::moduleState(ModuleIdx module) const {

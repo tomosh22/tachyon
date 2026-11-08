@@ -38,6 +38,11 @@ class SymbolService {
   // Thread-safe (constructor). `servers` and `cacheDir` configure the default SymbolLocator (WP-21),
   // consulted after the symbol file overrides.
   SymbolService(std::vector<std::string> servers, std::filesystem::path cacheDir);
+  // Same, interning into `strings` (null = a new table of its own) instead of a private table. A service that
+  // is going to adopt the finished run of another one (adoptRun) must be built with that service's
+  // sharedStrings(), so that every StringIdx in a result, old or new, indexes the same table. Thread-safe.
+  SymbolService(std::vector<std::string> servers, std::filesystem::path cacheDir,
+                std::shared_ptr<SymbolStringTable> strings);
   // Cancels pending module loads and in-flight downloads, joins the workers (returns promptly even against a
   // stalled symbol server), unpins cache files. Does not touch the model.
   ~SymbolService();
@@ -73,6 +78,28 @@ class SymbolService {
   // starts a fresh run.
   void cancel();
 
+  // WP-68. Adopts the symbol results of `previous`, the service of an earlier run over a model with the same
+  // module table (a streaming preview that the complete document replaces), so that resolveAllAsync() does
+  // not locate and load again what that run already finished. Both services must share one string table
+  // (this one was constructed with previous.sharedStrings()), otherwise nothing is adopted. Takes effect at
+  // the next resolveAllAsync(): a module is adopted when `previous` finished it (Resolved, NotFound or
+  // Failed) and the module record of the new model is identical (pid, base, size, path, id; the load
+  // timestamps and the state are not compared). An adopted Resolved module shares `previous`'s provider
+  // (reference counted: it outlives `previous`), re-resolves the new model's frames through it and counts in
+  // modulesAdopted(); an adopted NotFound / Failed module keeps its error text and is not retried. Modules
+  // `previous` had not finished (its run is cancelled here) and modules whose record differs are resolved
+  // normally. Returns the number of finished modules of `previous`. It cancels `previous`'s run first
+  // (joining its workers, like cancel()), takes over the cache-file pins of the adopted modules, and leaves
+  // `previous` usable for lookups while the model it resolved is alive (lookups read that model's frames;
+  // its workers must be stopped, e.g. by cancel(), before that model is freed). Call once, before
+  // resolveAllAsync(), after the configuration calls and after any configureLocator() (it pins in this
+  // service's locator). Not thread-safe against anything else of this service; against `previous` it follows
+  // cancel() (the owning thread, no concurrent resolveAllAsync/waitAll). `previous`'s const queries on other
+  // threads stay valid meanwhile and afterwards, and `previous` may be destroyed at once. The providers are
+  // shared by both services: they are thread-safe after load() (ISymbolProvider), so queries through either
+  // service may overlap.
+  size_t adoptRun(SymbolService& previous);
+
   // Starts resolution of every module referenced by a frame of `model` and returns immediately. Workers
   // transition each module Pending -> Loading -> Resolved / NotFound / Failed and call `onModule` from the
   // WORKER threads at each transition (Loading, then the final state); the callback must be thread-safe and
@@ -98,6 +125,10 @@ class SymbolService {
 
   // Thread-safe, lock-free. Modules done / total (total = modules referenced by frames).
   SymbolProgress progress() const;
+  // Thread-safe, lock-free. Of the current run's modules: how many were adopted (adoptRun), and how many
+  // were located and loaded by this run's workers (provider instances that reached load()).
+  uint32_t modulesAdopted() const;
+  uint32_t modulesLoaded() const;
   // Thread-safe, lock-free. Current state; Pending for unknown modules and modules no frame references.
   SymbolState moduleState(ModuleIdx module) const;
   // Thread-safe. Error text of a NotFound / Failed module (empty otherwise).
@@ -125,9 +156,11 @@ class SymbolService {
   // The symbol string table that every StringIdx from lookup() / providers indexes (not the trace's table).
   // Guarantee: safe to read (get/find/size) concurrently with resolution; views stay valid for the lifetime
   // of the service (see SymbolStringTable).
-  const SymbolStringTable& symbolStrings() const { return m_strings; }
+  const SymbolStringTable& symbolStrings() const { return *m_strings; }
   // Thread-safe. For provider factories (DIA / DWARF) that must intern into the service's table.
-  SymbolStringTable& stringSink() { return m_strings; }
+  SymbolStringTable& stringSink() { return *m_strings; }
+  // Thread-safe. The table itself, for building a service that adopts this one's run (adoptRun).
+  std::shared_ptr<SymbolStringTable> sharedStrings() const { return m_strings; }
 
   // Thread-safe after the module reached Resolved; the provider of a resolved module (for lines /
   // function bounds queries), or nullptr.
@@ -155,7 +188,12 @@ class SymbolService {
   unsigned m_workerThreads = 0;
   std::vector<Override> m_overrides;
 
-  SymbolStringTable m_strings;
+  std::shared_ptr<SymbolStringTable> m_strings;
+
+  // Results taken over from another service's finished run (adoptRun), consumed by the next
+  // resolveAllAsync().
+  struct Adopted;
+  std::unique_ptr<Adopted> m_adopted;
 
   // Per-run state. Rebuilt by resolveAllAsync() while no workers run.
   std::unique_ptr<Job> m_job;
