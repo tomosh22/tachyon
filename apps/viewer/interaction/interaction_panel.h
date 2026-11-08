@@ -4,6 +4,7 @@
 // waits of the current filter range with their wakers.
 #pragma once
 
+#include "viewer/common/live_stream.h"
 #include "viewer/interaction/interaction_model.h"
 #include "viewer/interaction/longest_waits_runner.h"
 #include "viewer/panel.h"
@@ -59,6 +60,7 @@ class ThreadInteractionPanel final : public IPanel {
   std::vector<interaction::StackLine> m_blocking, m_unblocking;
 
   interaction::LongestWaitsRunner m_waits;
+  common::LiveStreamTracker m_live;  // WP-65c
   interaction::WaitQuery m_requestedQuery;
   uint64_t m_requestedDocGeneration = ~0ull;
   bool m_everRequested = false;

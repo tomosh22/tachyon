@@ -25,6 +25,7 @@
 #include "symbols/source_locator.h"
 #include "viewer/analysis_context.h"
 #include "viewer/common/latest_query.h"
+#include "viewer/common/live_stream.h"
 #include "viewer/panel.h"
 #include "viewer/source/source_model.h"
 #include "viewer/status/path_picker.h"
@@ -200,6 +201,7 @@ class SourcePanel final : public IPanel {
   uint64_t m_delivered = 0;
   uint64_t m_documentGeneration = 0;
   bool m_haveDocument = false;
+  common::LiveStreamTracker m_live;  // WP-65c
   double m_clockHz = 1e9;
   std::string m_message;
 

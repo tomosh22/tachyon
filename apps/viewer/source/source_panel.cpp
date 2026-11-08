@@ -95,7 +95,15 @@ void SourcePanel::resetDocumentState() {
   m_pickerDebugPath.clear();
 }
 
-void SourcePanel::onDocumentChanged(const Document*) {
+void SourcePanel::onDocumentChanged(const Document* document) {
+  // WP-65c: the next snapshot of a live capture keeps the shown source, the selected row, the expanded lines
+  // and the scroll position; the view is built again from the new snapshot.
+  if (m_live.onDocument(document) && m_haveDocument) {
+    m_query.cancel();
+    m_haveRequested = false;
+    m_requested = {};
+    return;
+  }
   resetDocumentState();  // the in-flight task is cancelled; a late result is dropped as stale
 }
 
@@ -175,8 +183,10 @@ void SourcePanel::update(const PanelContext& context) {
     return;
   }
   if (!m_haveDocument || context.documentGeneration != m_documentGeneration) {
-    resetDocumentState();
-    m_haveDocument = true;
+    if (!(m_haveDocument && m_live.consumeKeep())) {
+      resetDocumentState();
+      m_haveDocument = true;
+    }
     m_documentGeneration = context.documentGeneration;
   }
   const model::TraceModel& model = context.document->model();

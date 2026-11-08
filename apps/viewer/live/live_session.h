@@ -46,13 +46,15 @@ struct LivePublished {
   std::chrono::steady_clock::time_point publishedAt;
 };
 
-// Thread-safe: pure function on `model` (which must not be shared yet). WP-65b: drops the threads that have
-// nothing in the window from a LiveModel snapshot: no samples, no context-switch / ready / scope event, no
-// frame mark or marker, and not a thread of the target. LiveModel keeps every thread it has ever heard of
-// (system-wide scheduling events name every thread of the machine, and a viewer that profiles the machine it
-// runs on keeps creating threads of its own), and each thread costs the timeline index a few hundred KiB
-// whether or not it has samples; unpruned, the cost would grow for as long as the capture runs. The threads
-// that remain keep their relative order; ThreadIdx values after the first dropped thread shift down, which
+// Thread-safe: pure function on `model` (which must not be shared yet). WP-65b/c: drops, from a LiveModel
+// snapshot, the threads that have no sample in the window, are not a thread of the target and carry no scope
+// event, frame mark or marker. LiveModel keeps every thread it has ever heard of (system-wide scheduling
+// events name every thread of the machine, a busy machine runs hundreds of short-lived ones, and a viewer
+// that profiles the machine it runs on keeps creating threads of its own); each costs the timeline index
+// about a megabyte at the 30 s window whether or not it has samples, so unpruned the index (and the build
+// time) would be set by the machine's noise rather than by the program. A thread that only switched is not
+// a row worth drawing; the target's threads stay even when they are blocked all window. The threads that
+// remain keep their relative order; ThreadIdx values after the first dropped thread shift down, which
 // the viewer maps by (pid, tid) as for any model replacement (threadMapBetween). Returns the number of
 // threads dropped.
 size_t pruneIdleThreads(model::TraceModel& model);

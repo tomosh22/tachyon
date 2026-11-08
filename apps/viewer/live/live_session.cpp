@@ -35,15 +35,7 @@ double msSince(Clock::time_point t) {
 size_t pruneIdleThreads(model::TraceModel& m) {
   const size_t count = m.threads.size();
   std::vector<uint8_t> keep(count, 0);
-  std::unordered_set<uint32_t> active;  // tids named by an event of the window
-  for (const trace::ContextSwitchRec& cs : m.contextSwitches) {
-    active.insert(cs.old_tid);
-    active.insert(cs.new_tid);
-  }
-  for (const trace::ReadyRec& r : m.readyEvents) {
-    active.insert(r.readied_tid);
-    active.insert(r.readying_tid);
-  }
+  std::unordered_set<uint32_t> active;  // tids with scope events (instrumented threads)
   for (const trace::ScopeEventRec& e : m.scopeEvents) active.insert(e.tid);
   for (const model::FrameMark& f : m.frameMarks)
     if (f.thread.valid() && f.thread.get() < count) keep[f.thread.get()] = 1;
@@ -291,6 +283,11 @@ void LiveSession::workerMain(std::shared_ptr<model::LiveModel> model,
       analysis::LodOptions lodOptions;
       lodOptions.threads = m_options.buildThreads;
       lodOptions.maxBytes = m_options.lodMaxBytes;
+      // Buckets of at least 8 sample intervals (1 ms at 8 kHz): at the 30 s window the base level has ~30k
+      // buckets per thread instead of ~60k, and zooms finer than that are answered from the samples.
+      lodOptions.minSamplesPerBaseBucket = 8;
+      lodOptions.maxStacksPerBucket = 8;
+      lodOptions.fineStrip = false;  // the half-width strip level costs a pass of its own: not worth it here
       timeline::buildLodShared(*lod, lodOptions, &m_cancel, {});
       lod->finished.store(true, std::memory_order_release);
       bundle->lod = std::move(lod);

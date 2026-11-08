@@ -29,6 +29,7 @@
 #include "symbols/function_key.h"
 #include "viewer/analysis_context.h"
 #include "viewer/common/latest_query.h"
+#include "viewer/common/live_stream.h"
 #include "viewer/panel.h"
 #include "viewer/stats/stats_model.h"
 
@@ -177,6 +178,7 @@ class FunctionStatsPanel final : public IPanel {
   common::LatestQuery<StatsResult> m_statsQuery;
   SelectionBus* m_bus = nullptr;  // the app's bus, remembered for onVisibilityChanged (outlives the panel)
   bool m_haveDocument = false;
+  common::LiveStreamTracker m_live;  // WP-65c
   uint64_t m_documentGeneration = 0;
   uint64_t m_requestedIndexSymbols = 0;
   uint64_t m_shownIndexSymbols = 0;

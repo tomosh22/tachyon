@@ -87,12 +87,16 @@ class TestLauncher final : public IProcessLauncher {
 class AgentProcess {
  public:
   explicit AgentProcess(const std::string& address, int mockDurationMs = 0,
-                        const fs::path& mockFixture = fixture("tiny.tachyon"))
+                        const fs::path& mockFixture = fixture("tiny.tachyon"),
+                        std::vector<std::string> extraArgs = {})
       : m_address(address) {
-    m_process = agent::testing_util::Process::spawn(
-        TACHYON_AGENT_EXE,
-        {"--backend", "mock", "--socket", address, "--mock-fixture", pathToUtf8(mockFixture),
-         "--mock-duration-ms", std::to_string(mockDurationMs), "--log-level", "error"});
+    std::vector<std::string> args = {"--backend",          "mock",
+                                     "--socket",           address,
+                                     "--mock-fixture",     pathToUtf8(mockFixture),
+                                     "--mock-duration-ms", std::to_string(mockDurationMs),
+                                     "--log-level",        "error"};
+    args.insert(args.end(), extraArgs.begin(), extraArgs.end());
+    m_process = agent::testing_util::Process::spawn(TACHYON_AGENT_EXE, args);
     EXPECT_TRUE(m_process.valid());
     // Ready when it accepts a connection.
     auto c = control::Client::connectWithRetry(address, 10000);

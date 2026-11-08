@@ -38,7 +38,8 @@ class LivePanel final : public IPanel {
           ImGui::TextColored(kRed, "LIVE");
         break;
       case LiveUiState::Phase::Ended:
-        ImGui::TextDisabled("ENDED - static snapshot of the last window");
+        ImGui::TextDisabled(s.paused ? "ENDED - paused; Resume shows the final window"
+                                     : "ENDED - static snapshot of the last window");
         break;
       case LiveUiState::Phase::Failed: ImGui::TextColored(kRed, "LIVE VIEW STOPPED"); break;
       case LiveUiState::Phase::None: break;
@@ -46,7 +47,9 @@ class LivePanel final : public IPanel {
     if (!s.error.empty()) ImGui::TextColored(kRed, "%s", s.error.c_str());
 
     const bool running = s.phase == LiveUiState::Phase::Running || s.phase == LiveUiState::Phase::Waiting;
-    ImGui::BeginDisabled(!running);
+    // A paused view can always be resumed, also after the capture ended while it was frozen: Resume then
+    // shows the final snapshot.
+    ImGui::BeginDisabled(!running && !s.paused);
     if (ImGui::Button(s.paused ? "Resume" : "Pause") && m_host.setPaused) m_host.setPaused(!s.paused);
     ImGui::EndDisabled();
     ImGui::SameLine();

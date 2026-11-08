@@ -45,6 +45,9 @@ struct LiveSymbolsConfig {
   std::function<void(symbols::SymbolService&)> configure;
   // Called from the symbol workers at each module state change; thread-safe.
   std::function<void(ModuleIdx, symbols::SymbolState)> onModule;
+  // A new epoch for frames / nodes that grew without a change of the module table starts at most this often
+  // (a new or changed module starts one at once); 0 = at every snapshot with new frames.
+  int frameEpochIntervalMs = 3000;
 };
 
 struct LiveSymbolStats {
@@ -78,6 +81,7 @@ class LiveSymbols {
 
  private:
   struct Epoch;
+  bool sameModules(const Epoch& epoch, const model::TraceModel& snapshot) const;
   bool sameTables(const Epoch& epoch, const model::TraceModel& snapshot,
                   const std::vector<uint8_t>& nonLeaf) const;
   std::shared_ptr<Epoch> startEpoch(const model::TraceModel& snapshot, std::vector<uint8_t> nonLeaf,

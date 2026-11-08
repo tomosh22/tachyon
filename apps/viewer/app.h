@@ -98,6 +98,9 @@ struct AppOptions {
   uint32_t liveRefreshMs = 500;
   // WP-65b: the live window the viewer keeps (the agent's own window, --live-window-seconds, is separate).
   uint32_t liveWindowSeconds = 30;
+  // WP-65c: new frames of a live capture get a new symbol service at most this often (see LiveSymbols); 0 =
+  // at every snapshot that has new frames (tests).
+  int liveFrameEpochMs = 3000;
   // WP-65b (tests): called on the snapshot worker before each snapshot starts.
   std::function<void()> liveBeforeSnapshot;
 };

@@ -3,11 +3,11 @@
 // App (Null renderer, real ImGui frames). Label linux_privileged: skips itself, with the reason, when the
 // kernel refuses system-wide perf_event_open (the CI privileged step fails when anything skips).
 //
-// A live run of $TACHYON_LIVE_VIEWER_SECONDS (default 20) seconds at 8 kHz is checked for:
+// A live run of $TACHYON_LIVE_VIEWER_SECONDS (default 60) seconds at 8 kHz is checked for:
 //   * the Live document shows samples within 1 s of their timestamp (p95 of the age of the newest sample on
 //     screen, sampled every ~50 ms, asserted at 2 s; the local clock is the trace clock);
-//   * the window of the shown document never exceeds the viewer's window (5 s here, so that it fills and
-//     the memory check can run inside the 20 s);
+//   * the window of the shown document never exceeds the viewer's window (the default 30 s; 5 s in a run
+//     shortened below 50 s, so that it still fills);
 //   * the viewer's memory is flat once the window is full (RSS growth < 10% between the second after the
 //     window filled and the end);
 //   * every module is located and its symbol file loaded at most once over the whole run, although the
@@ -33,6 +33,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -49,8 +50,6 @@ using status_test::TempDir;
 namespace fs = std::filesystem;
 
 namespace {
-
-constexpr uint32_t kViewerWindowSeconds = 5;
 
 double heapMiB() {
   const struct mallinfo2 mi = mallinfo2();
@@ -117,8 +116,10 @@ TEST(LiveViewerLinux, SpinLiveDocumentLatencyWindowMemorySymbolsAndShares) {
     if (in >> maxRate && maxRate > 0 && maxRate < 8000)
       GTEST_SKIP() << "kernel.perf_event_max_sample_rate is " << maxRate << ", below 8000 Hz";
   }
-  int seconds = 20;
+  int seconds = 60;
   if (const char* env = std::getenv("TACHYON_LIVE_VIEWER_SECONDS")) seconds = std::max(14, std::atoi(env));
+  // The default run exercises the default 30 s window; a run shortened below 50 s uses a 5 s one so it fills.
+  const uint32_t windowSeconds = seconds >= 50 ? 30 : 5;
 
   TempDir dir("live_viewer_linux");
   const std::string address = control::testing_util::testAddress("liveviewer");  // private, short
@@ -136,9 +137,32 @@ TEST(LiveViewerLinux, SpinLiveDocumentLatencyWindowMemorySymbolsAndShares) {
     }
   } reaper{agentProc};
 
+  // Noise: a busy machine creates and ends threads all the time (compiler jobs, other programs). Here ~150
+  // short-lived threads a second of this very process; they are scheduled, so a system-wide capture names
+  // them all, but they have no samples and are not the target: the live view must not carry them.
+  std::atomic<bool> noiseStop{false};
+  std::thread noise([&] {
+    while (!noiseStop.load()) {
+      std::thread t([] {
+        volatile uint64_t x = 0;
+        for (int i = 0; i < 20000; ++i) x = x + static_cast<uint64_t>(i);
+      });
+      t.join();
+      std::this_thread::sleep_for(std::chrono::milliseconds(6));
+    }
+  });
+  struct NoiseJoin {
+    std::atomic<bool>& stop;
+    std::thread& t;
+    ~NoiseJoin() {
+      stop.store(true);
+      if (t.joinable()) t.join();
+    }
+  } noiseJoin{noiseStop, noise};
+
   AppOptions options = status_test::headlessOptions("live_linux");
   options.autoConnectAgent = false;
-  options.liveWindowSeconds = kViewerWindowSeconds;
+  options.liveWindowSeconds = windowSeconds;
   Harness h(std::move(options));
   App& app = h.app;
   app.settings().capture.agentAddress = address;
@@ -174,7 +198,7 @@ TEST(LiveViewerLinux, SpinLiveDocumentLatencyWindowMemorySymbolsAndShares) {
   double heapFillRef = 0;
   double maxWindow = 0, firstDocSeconds = -1;
   uint64_t maxSamplesShown = 0;
-  uint32_t maxGaps = 0, maxEpochsAlive = 0;
+  uint32_t maxGaps = 0, maxEpochsAlive = 0, maxModelThreads = 0;
   const bool trace = std::getenv("TACHYON_LIVE_VIEWER_TRACE") != nullptr;
   double nextTrace = 0;
   auto nextSample = began;
@@ -198,6 +222,7 @@ TEST(LiveViewerLinux, SpinLiveDocumentLatencyWindowMemorySymbolsAndShares) {
         maxWindow = std::max(maxWindow, ui.windowSeconds);
         maxSamplesShown = std::max(maxSamplesShown, ui.samples);
         maxGaps = std::max(maxGaps, ui.gaps);
+        maxModelThreads = std::max(maxModelThreads, ui.threads);
         maxEpochsAlive = std::max(maxEpochsAlive, app.live().stats().symbols.epochsAlive);
         if (trace && elapsed >= nextTrace) {
           nextTrace = elapsed + 2.0;
@@ -218,7 +243,7 @@ TEST(LiveViewerLinux, SpinLiveDocumentLatencyWindowMemorySymbolsAndShares) {
                   ? static_cast<double>(app.live().model()->stats().residentBytes) / (1024.0 * 1024.0)
                   : 0.0);
         }
-        if (elapsed >= kViewerWindowSeconds + 3) {
+        if (elapsed >= windowSeconds + 5) {
           rssEnd.push_back(rssMiB());
           heapEnd.push_back(heapMiB());
         }
@@ -265,14 +290,20 @@ TEST(LiveViewerLinux, SpinLiveDocumentLatencyWindowMemorySymbolsAndShares) {
   // ---- the assertions ----
   EXPECT_GE(app.liveSwaps(), static_cast<uint64_t>(seconds));  // about two a second
   ASSERT_GT(latencies.size(), 100u);
-  EXPECT_LT(p95, 2.0) << "p95 age of the newest sample on screen (target: 1 s)";
-  EXPECT_LE(maxWindow, kViewerWindowSeconds + 0.6) << "the window never exceeds the viewer's window";
-  EXPECT_GE(maxWindow, kViewerWindowSeconds - 0.5) << "the window fills up";
+  EXPECT_LT(p95, 2.0) << "p95 age of the newest sample on screen (asserted at 2 s; the target is 1 s)";
+  std::printf("LIVE-VIEWER latency p95=%.3f s against the 1 s target: %s\n", p95,
+              p95 <= 1.0 ? "met" : "NOT met");
+  EXPECT_LE(maxWindow, windowSeconds + 0.6) << "the window never exceeds the viewer's window";
+  EXPECT_GE(maxWindow, windowSeconds - 0.5) << "the window fills up";
   EXPECT_EQ(maxGaps, 0u) << "no live_gap at 8 kHz";
+  std::printf("LIVE-VIEWER threads in the live document: max %u\n", maxModelThreads);
+  EXPECT_LE(maxModelThreads, 16u) << "threads of the machine's noise are not carried by the live view";
   EXPECT_EQ(lastLive->live().droppedLive, 0u) << "nothing dropped by the live path";
   ASSERT_GT(rssFillRef, 0.0);
   EXPECT_LT(rssLast, rssFillRef * 1.10)
       << "memory is flat once the window is full: " << rssFillRef << " MiB -> " << rssLast << " MiB";
+  if (windowSeconds >= 30)
+    EXPECT_LT(rssLast, 200.0) << "viewer memory with the full 30 s window (target < 200 MiB)";
   EXPECT_LT(heapLast, heapFillRef * 1.10 + 2.0)
       << "heap in use is flat once the window is full: " << heapFillRef << " MiB -> " << heapLast << " MiB";
   EXPECT_GE(stats.symbols.epochs, 2u) << "the tables grew while the capture ran";
