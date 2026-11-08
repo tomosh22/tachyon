@@ -331,9 +331,11 @@ TEST_F(LiveCapture, SpinLiveLatencyWindowSharesMemoryAndNoGaps) {
                 bytesPerSample.back());
     EXPECT_LT(bytesPerSample.back(), 64.0) << "live model bytes per sample in the window";
     EXPECT_LT(bytesPerSampleRef, 64.0);
+#if !TACHYON_TEST_ASAN  // the sanitizer's allocator quarantine makes the process size meaningless
     if (rss.size() > static_cast<size_t>(kMemoryReferenceSecond) + 3)
       EXPECT_LT(rss.back(), rss[static_cast<size_t>(kMemoryReferenceSecond)] * 1.5)
           << "process memory is not flat";
+#endif
   }
   EXPECT_EQ(session.model.stats().droppedLive, 0u) << "the live path dropped events";
 
