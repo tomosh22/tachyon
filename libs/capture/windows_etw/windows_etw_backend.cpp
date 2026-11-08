@@ -131,10 +131,10 @@ void WindowsEtwBackend::shutdownLive(std::unique_ptr<etw::RealTimeConsumer>& con
     live->finish();
     const etw::LiveEtwSourceStats ls = live->stats();
     TACHYON_LOG_INFO(
-        "etw: live: {} events seen, {} samples / {} switches / {} readies decoded, {} dropped, decode cpu "
-        "{:.2f} s, consumer cpu {:.2f} s",
+        "etw: live: {} events seen, {} samples / {} switches / {} readies decoded, {} dropped, decoder busy "
+        "{:.2f} s, consumer callbacks {:.2f} s",
         cs.events, ls.decoder.samples, ls.decoder.switches, ls.decoder.readies, ls.droppedEvents,
-        ls.decodeCpuSeconds, cs.cpuSeconds);
+        ls.decodeSeconds, cs.callbackSeconds);
     std::lock_guard lock(m_mutex);
     m_diag.live = ls;
     m_diag.liveConsumer = cs;
@@ -482,6 +482,14 @@ Result<CaptureResult> WindowsEtwBackend::stop() {
     return e;
   };
 
+  if (consumer) {
+    // Events still in the session's buffers reach a real-time consumer only when they are flushed first.
+    auto flushed = session->flushBuffers();
+    if (flushed.ok())
+      consumer->waitQuiet(std::chrono::milliseconds(250), std::chrono::seconds(3));
+    else
+      TACHYON_LOG_WARN("etw: flush before stop failed: {}", flushed.error().toString());
+  }
   auto counters = session->stop();
   // The session has stopped (or could not): the consumer drains what is left, then the source decodes the
   // rest and ends the live stream, before the (slow) conversion starts.
@@ -552,6 +560,8 @@ Result<CaptureResult> WindowsEtwBackend::flush(std::string name, uint32_t second
   // 1. Write everything buffered, then stop. The stopped file is a complete ETL (end rundown included).
   auto flushed = old->flushBuffers();
   if (!flushed.ok()) TACHYON_LOG_WARN("etw: flush before stop failed: {}", flushed.error().toString());
+  if (flushed.ok() && oldConsumer)
+    oldConsumer->waitQuiet(std::chrono::milliseconds(250), std::chrono::seconds(3));
   auto counters = old->stop();
   const auto stoppedAt = std::chrono::steady_clock::now();
   const fs::path oldEtl = oldCfg.etlPath;

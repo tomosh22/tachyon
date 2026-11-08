@@ -51,6 +51,7 @@ struct RealTimeConsumer::Impl {
   std::atomic<uint64_t> events{0};
   std::atomic<uint64_t> buffers{0};
   std::atomic<uint64_t> cpuMicros{0};
+  std::atomic<uint64_t> callbackTicks{0};  // traceClock ticks spent in onEventRecord
   std::atomic<uint32_t> status{0};
   uint64_t perfFreq = 0;
 };
@@ -59,6 +60,7 @@ namespace {
 
 void WINAPI onEventRecord(PEVENT_RECORD record) {
   auto* impl = static_cast<RealTimeConsumer::Impl*>(record->UserContext);
+  const uint64_t began = traceClockNow();
   impl->events.fetch_add(1, std::memory_order_relaxed);
   etlconvert::EtwEvent e;
   std::memcpy(&e.provider, &record->EventHeader.ProviderId, sizeof(GUID));
@@ -70,6 +72,7 @@ void WINAPI onEventRecord(PEVENT_RECORD record) {
   e.cpu = record->BufferContext.ProcessorIndex;
   e.payload = etlconvert::Bytes(static_cast<const std::byte*>(record->UserData), record->UserDataLength);
   impl->source->submit(e);
+  impl->callbackTicks.fetch_add(traceClockNow() - began, std::memory_order_relaxed);
 }
 
 // Called after each ETW buffer: the events of one buffer go to the decoder thread together.
@@ -133,6 +136,28 @@ Result<std::unique_ptr<RealTimeConsumer>> RealTimeConsumer::start(const std::str
   return std::unique_ptr<RealTimeConsumer>(new RealTimeConsumer(std::move(impl)));
 }
 
+void RealTimeConsumer::waitQuiet(std::chrono::milliseconds quiet, std::chrono::milliseconds maxWait) {
+  Impl& s = *m_impl;
+  using Clock = std::chrono::steady_clock;
+  const auto deadline = Clock::now() + maxWait;
+  uint64_t seen = s.buffers.load();
+  auto lastChange = Clock::now();
+  while (Clock::now() < deadline) {
+    {
+      std::lock_guard lock(s.mutex);
+      if (s.done) return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const uint64_t now = s.buffers.load();
+    if (now != seen) {
+      seen = now;
+      lastChange = Clock::now();
+    } else if (Clock::now() - lastChange >= quiet) {
+      return;
+    }
+  }
+}
+
 void RealTimeConsumer::stop(std::chrono::milliseconds drain) {
   Impl& s = *m_impl;
   {
@@ -160,6 +185,8 @@ RealTimeConsumerStats RealTimeConsumer::stats() const {
   st.events = s.events.load();
   st.buffers = s.buffers.load();
   st.cpuSeconds = static_cast<double>(s.cpuMicros.load()) * 1e-6;
+  st.callbackSeconds =
+      static_cast<double>(s.callbackTicks.load()) / static_cast<double>(traceClockFrequency());
   st.perfFreq = s.perfFreq;
   st.status = s.status.load();
   {
@@ -201,6 +228,8 @@ void RealTimeConsumer::stop(std::chrono::milliseconds) {}
 RealTimeConsumerStats RealTimeConsumer::stats() const {
   return {};
 }
+
+void RealTimeConsumer::waitQuiet(std::chrono::milliseconds, std::chrono::milliseconds) {}
 
 }  // namespace tachyon::capture::etw
 

@@ -22,12 +22,13 @@ uint64_t traceClockNow();
 uint64_t traceClockFrequency();
 
 struct RealTimeConsumerStats {
-  uint64_t events = 0;    // all events the callback saw
-  uint64_t buffers = 0;   // ETW buffers processed
-  double cpuSeconds = 0;  // cpu time of the ProcessTrace thread
-  uint64_t perfFreq = 0;  // LogfileHeader.PerfFreq of the opened session (0 when unknown)
-  uint32_t status = 0;    // ProcessTrace's return value once it returned
-  bool finished = false;  // ProcessTrace returned
+  uint64_t events = 0;         // all events the callback saw
+  uint64_t buffers = 0;        // ETW buffers processed
+  double cpuSeconds = 0;       // cpu time of the ProcessTrace thread (GetThreadTimes: coarse, can read 0)
+  double callbackSeconds = 0;  // wall time spent inside the event callbacks (the consumer's real cost)
+  uint64_t perfFreq = 0;       // LogfileHeader.PerfFreq of the opened session (0 when unknown)
+  uint32_t status = 0;         // ProcessTrace's return value once it returned
+  bool finished = false;       // ProcessTrace returned
 };
 
 class RealTimeConsumer {
@@ -42,6 +43,10 @@ class RealTimeConsumer {
   RealTimeConsumer(const RealTimeConsumer&) = delete;
   RealTimeConsumer& operator=(const RealTimeConsumer&) = delete;
 
+  // Thread-safe. Waits until no ETW buffer has reached the consumer for `quiet`, at most `maxWait`. Call it
+  // after ControlTrace(FLUSH): the events still sitting in the session's buffers are then delivered, and
+  // without the flush a session that is stopped right away does not hand them to a real-time consumer.
+  void waitQuiet(std::chrono::milliseconds quiet, std::chrono::milliseconds maxWait);
   // Thread-safe, idempotent. Waits up to `drain` for ProcessTrace to return by itself (the session was
   // stopped, so it delivers the buffers that are left first), then closes the trace and joins the thread.
   void stop(std::chrono::milliseconds drain);

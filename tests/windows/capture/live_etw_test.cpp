@@ -322,6 +322,7 @@ struct TraceCounts {
   uint64_t targetSamples = 0;
   uint64_t switches = 0;
   uint64_t readies = 0;
+  uint64_t firstSampleTs = ~uint64_t{0}, lastSampleTs = 0;
 };
 
 TraceCounts countTrace(const fs::path& path) {
@@ -331,8 +332,15 @@ TraceCounts countTrace(const fs::path& path) {
     ADD_FAILURE() << "cannot load " << path << ": " << m.error().toString();
     return c;
   }
-  for (size_t t = 0; t < m->threads.size(); ++t)
-    if (m->threads[t].is_target) c.targetSamples += m->samplesByThread[t].ts.size();
+  for (size_t t = 0; t < m->threads.size(); ++t) {
+    if (!m->threads[t].is_target) continue;
+    const auto& ts = m->samplesByThread[t].ts;
+    c.targetSamples += ts.size();
+    if (!ts.empty()) {
+      c.firstSampleTs = std::min<uint64_t>(c.firstSampleTs, ts.front());
+      c.lastSampleTs = std::max<uint64_t>(c.lastSampleTs, ts.back());
+    }
+  }
   c.switches = m->contextSwitches.size();
   c.readies = m->readyEvents.size();
   return c;
@@ -547,7 +555,7 @@ TEST_F(EtwLiveTest, LiveDoesNotChangeTheFinalTrace) {
                 static_cast<unsigned long long>(d.live.decoder.readies), p50, p95, d.live.maxEventAgeSeconds);
   report(buf);
   EXPECT_LT(p95, 3.0);
-  EXPECT_LT(decodePct, 100.0);
+  EXPECT_LT(decodePct, 50.0);
 }
 
 // ---- attach: the rundown
@@ -702,6 +710,15 @@ TEST_F(EtwLiveTest, CliLiveAgainstAWindowsAgent) {
   EXPECT_EQ(gapRows, 0u);
   EXPECT_GE(withLatency, 3u) << "latency is printed for a local Windows agent";
   for (double l : lateLatencies) EXPECT_LT(l, 4.0) << "latency of the newest sample in the window";
+}
+
+// TEMPORARY (removed before the final push): ctest hides the output of passing tests, so this prints the
+// numbers the tests above collected.
+TEST(EtwLiveSummaryDump, PrintsTheNumbersOfThisRun) {
+  std::ifstream f(fs::path(TACHYON_BINARY_DIR) / "etw_live_summary.txt");
+  std::stringstream ss;
+  ss << f.rdbuf();
+  ADD_FAILURE() << "SUMMARY-BEGIN\n" << ss.str() << "SUMMARY-END";
 }
 
 }  // namespace
