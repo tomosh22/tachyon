@@ -56,7 +56,9 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-64 | Large-trace performance pass | C | merged (partial: 4 ms LOD frame, flame-on-4-rows and WP-54 median budgets not met) | wp/64-perf-pass | 2026-11-03 |
 | WP-66 | Agent, remote and flight-recorder hardening (WP-60/61/73/QA1 follow-ups) | A | merged | wp/66-agent-hardening | 2026-11-03 |
 | WP-67 | Viewer polish and correctness follow-ups (WP-41/48/33b/64) | C | merged | wp/67-viewer-polish | 2026-11-03 |
-| WP-65 | Real-time live view (optional) | — | not started (gated: rest of M6 first) | wp/65-live | |
+| WP-65 | Real-time live view (Linux + Windows; split 65a core / 65w ETW / 65b viewer; design in docs/specs/live.md) | A/W/C | in progress (65a) | wp/65a-live-core | 2026-11-08 |
+| WP-68 | Viewer performance pass 2 (LOD direct zoom, flame, WP-54 draw lists, single-decode load, preview symbol reuse) | C | in progress | wp/68-perf-pass2 | 2026-11-08 |
+| WP-69 | Report/export/doctor follow-ups and test flakes (WP-62b, symbol-setup helper, Windows doctor) | D | in progress | wp/69-tooling | 2026-11-08 |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
 | WP-71 | Scheduler events | A | merged (tracepoint path verified on CI's privileged step) | wp/71-sched-events | 2026-11-02 |
 | WP-72 | DWARF symbol provider | B | merged (WP-72b follow-up) | wp/72-dwarf-provider | 2026-10-25 |
