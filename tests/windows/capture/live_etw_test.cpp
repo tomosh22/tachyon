@@ -804,14 +804,5 @@ TEST_F(EtwLiveTest, CliLiveAgainstAWindowsAgent) {
   for (double l : lateLatencies) EXPECT_LT(l, 4.0) << "latency of the newest sample in the window";
 }
 
-// TEMPORARY (removed before the final push): ctest hides the output of passing tests, so this prints the
-// numbers the tests above collected.
-TEST(EtwLiveSummaryDump, PrintsTheNumbersOfThisRun) {
-  std::ifstream f(fs::path(TACHYON_BINARY_DIR) / "etw_live_summary.txt");
-  std::stringstream ss;
-  ss << f.rdbuf();
-  ADD_FAILURE() << "SUMMARY-BEGIN\n" << ss.str() << "SUMMARY-END";
-}
-
 }  // namespace
 }  // namespace tachyon::capture

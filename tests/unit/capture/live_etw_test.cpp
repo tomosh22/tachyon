@@ -161,6 +161,20 @@ class RecordingSink final : public ILiveSink {
     dropped += n;
   }
 
+  // Thread-safe counterparts for tests that look while the source's thread is still running.
+  size_t sampleCount() const {
+    std::lock_guard lock(m);
+    return samples.size();
+  }
+  bool hasProcess(uint32_t pid) const {
+    std::lock_guard lock(m);
+    return process(pid) != nullptr;
+  }
+  uint64_t droppedCount() const {
+    std::lock_guard lock(m);
+    return dropped;
+  }
+
   const LiveThread* thread(uint32_t tid) const {
     const LiveThread* last = nullptr;
     for (const LiveThread& t : threads)
@@ -612,7 +626,7 @@ TEST(LiveEtwSource, NothingIsDecodedBeforeArm) {
   source.start();
   submitAll(source, multiProcessScenario());
   std::this_thread::sleep_for(std::chrono::milliseconds(60));
-  EXPECT_TRUE(sink->samples.empty());
+  EXPECT_EQ(sink->sampleCount(), 0u);
   source.arm({100});  // the launched pid is known now
   source.finish();
   EXPECT_EQ(sink->samples.size(), 3u);
@@ -627,11 +641,21 @@ TEST(LiveEtwSource, FinishWithoutArmIsHarmless) {
   EXPECT_TRUE(sink->samples.empty());
 }
 
+template <typename Pred>
+bool waitUntil(Pred pred, std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (pred()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return pred();
+}
+
 TEST(LiveEtwSource, HoldsDataBackAndDropsWhatIsTooOld) {
   auto sink = std::make_shared<RecordingSink>();
   LiveEtwSourceConfig cfg = sourceConfig(sink);
-  cfg.holdBack = std::chrono::milliseconds(150);
-  cfg.maxLag = std::chrono::milliseconds(1000);
+  cfg.holdBack = std::chrono::milliseconds(600);
+  cfg.maxLag = std::chrono::seconds(30);
   LiveEtwSource source(cfg);
   source.start();
   source.arm({100});
@@ -642,17 +666,19 @@ TEST(LiveEtwSource, HoldsDataBackAndDropsWhatIsTooOld) {
   data.sample(10, 101, 100, 0, 0x1000);
   data.sample(50'000, 101, 100, 0,
               0x1001);  // 5 ms of trace clock later: releases the first (stack window 1 ms)
+  const auto submitted = std::chrono::steady_clock::now();
   submitAll(source, meta);
   submitAll(source, data);
   // Metadata is decoded at once; the sample waits for the hold-back.
-  std::this_thread::sleep_for(std::chrono::milliseconds(60));
-  EXPECT_NE(sink->process(100), nullptr);
-  EXPECT_TRUE(sink->samples.empty());
-  std::this_thread::sleep_for(std::chrono::milliseconds(250));
-  EXPECT_EQ(sink->samples.size(), 1u) << "the newest sample still waits for its stack";
+  ASSERT_TRUE(waitUntil([&] { return sink->hasProcess(100); }, std::chrono::seconds(5)));
+  if (std::chrono::steady_clock::now() - submitted < std::chrono::milliseconds(500))
+    EXPECT_EQ(sink->sampleCount(), 0u) << "held back";
+  ASSERT_TRUE(waitUntil([&] { return sink->sampleCount() == 1u; }, std::chrono::seconds(10)))
+      << "the newest sample still waits for its stack";
+  EXPECT_GE(std::chrono::steady_clock::now() - submitted, std::chrono::milliseconds(600));
   source.finish();
-  EXPECT_EQ(sink->samples.size(), 2u);
-  EXPECT_EQ(sink->dropped, 0u);
+  EXPECT_EQ(sink->sampleCount(), 2u);
+  EXPECT_EQ(sink->droppedCount(), 0u);
 }
 
 TEST(LiveEtwSource, StaleDataIsDroppedAndReportedMetadataIsNot) {
@@ -660,7 +686,6 @@ TEST(LiveEtwSource, StaleDataIsDroppedAndReportedMetadataIsNot) {
   LiveEtwSourceConfig cfg = sourceConfig(sink);
   cfg.holdBack = std::chrono::milliseconds(0);
   cfg.maxLag = std::chrono::milliseconds(50);
-  cfg.period = std::chrono::milliseconds(300);  // the thread sleeps past maxLag before it looks at the queue
   LiveEtwSource source(cfg);
   source.start();
   // Not armed yet: the thread does not drain. Submit, wait past maxLag, then arm: the data is stale.
@@ -672,10 +697,10 @@ TEST(LiveEtwSource, StaleDataIsDroppedAndReportedMetadataIsNot) {
   submitAll(source, s);
   std::this_thread::sleep_for(std::chrono::milliseconds(120));
   source.arm({100});
-  std::this_thread::sleep_for(std::chrono::milliseconds(700));
+  ASSERT_TRUE(waitUntil([&] { return sink->droppedCount() == 2u; }, std::chrono::seconds(10)));
   source.finish();
-  EXPECT_TRUE(sink->samples.empty());
-  EXPECT_EQ(sink->dropped, 2u);
+  EXPECT_EQ(sink->sampleCount(), 0u);
+  EXPECT_EQ(sink->droppedCount(), 2u);
   EXPECT_NE(sink->process(100), nullptr) << "metadata is never dropped";
   EXPECT_NE(sink->thread(101), nullptr);
   EXPECT_EQ(source.stats().droppedEvents, 2u);
