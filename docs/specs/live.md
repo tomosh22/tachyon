@@ -97,3 +97,14 @@ Windows (ETW real-time consumer) both feed it. The capture still produces its no
 - Windows: the same with `--backend etw` on the elevated CI runner (latency asserted at 3 s: ETW real-time
   buffers flush about once a second).
 - Mock backend: deterministic tests of encoder/decoder, keyframes, gaps, window trimming, remote subscribe.
+
+## Clarifications added with WP-65a (2026-11-08, binding)
+
+- Encoding: the authoritative table is the header comment of `libs/model/live_model.h` (record types 1–17 in the order of section 2; type 17 `Info` = `u64 clock_frequency_hz; u32 platform; u32 sampling_hz; u64 start_ts`, the first record of every keyframe and of the first batch). String 0 is `""`, string 1 is reserved as `<overflow>`, node 0 is the root. Table caps (`live_wire::kMax*`) are shared by encoder and model; the model refuses definitions beyond them, and `apply` returns CorruptData on a malformed batch after applying what precedes it (the client resubscribes).
+- A keyframe may span several `live` events with the same `seq`; only the first carries `keyframe:true` (the client passes `keyframe=false` to `LiveModel::apply` for the rest). `live_subscribe` replies `{"seq":N}`: without `from_seq`, N is the last batch inside the keyframe (the next event is N+1); with a retained `from_seq`, N = `from_seq` and no keyframe is sent; a `from_seq` that is not retained or lies in the future gets a keyframe.
+- Each subscriber is served by its own agent thread, which waits while the client's outbound queue is above 1.5 MiB (below the 2 MiB cap, so other traffic is never dropped) and sends `live_gap` and stops after 5 s stalled (`AgentConfig::liveStallMs`) or when it falls behind the retained window.
+- `ICaptureBackend::supportsLive()`; a live `start` on a backend without it is refused (EINTERNAL "not supported"). `ILiveSink` adds `onSessionInfo` and `onDropped`; switch/ready callbacks carry the pids of the new/readied thread. Instrumentation callbacks may arrive concurrently from the agent's per-process connection threads; `LiveEncoder` is fully synchronised and `LiveModel` is internally locked (`snapshot()` blocks `apply()` while it copies).
+- The perf live decoder drops sample and switch chunks that waited more than 2 s (`LiveSourceConfig::maxLag`) and reports them as `Dropped`; metadata is never dropped. The final trace is unaffected.
+- `libs/control` (which holds `LiveEncoder`) links `libs/model` (which holds the wire format).
+- Acceptance memory criterion: flat from second 35 (the 30 s window is still filling before that); bytes per window sample < 64.
+- Measured (dev VM, Linux perf, 8 kHz): latency p50 0.16 s / p95 0.27 s (spin, 60 s); window ≤ 30.00 s; shares live vs final identical to 0.01 points; snapshot of 3.84 M samples 34–47 ms; encoder 174 ns/sample.
