@@ -104,9 +104,9 @@ std::vector<std::string_view> splitRecords(std::string_view blob, size_t maxByte
 }
 
 bool LiveKeyframe::next(std::string& chunk) {
-  if (m_defIndex < m_defs.size()) {
-    chunk = std::move(m_defs[m_defIndex++]);
-    return true;
+  if (m_defGen) {
+    if (m_defGen(chunk)) return true;
+    m_defGen = nullptr;
   }
   while (m_batchIndex < m_batches.size()) {
     const LiveBatch& b = m_batches[m_batchIndex];
@@ -144,6 +144,7 @@ struct LiveEncoder::Impl {
   bool haveInfo = false;
   bool infoPending = false;  // the Info record has not gone out in a batch yet
   uint64_t windowTicks = 30ull * 1'000'000'000ull;
+  uint64_t clockHz = 1'000'000'000ull;
 
   // ---- tables ----
   std::deque<std::string> strings;
@@ -365,8 +366,23 @@ struct LiveEncoder::Impl {
     return node;
   }
 
-  void noteTsLocked(uint64_t ts) {
+  // The capture's own clock (samples, switches, TimeAdvance, session facts): moves "now".
+  void noteTrustedLocked(uint64_t ts) {
     if (ts > now) now = ts;
+  }
+  // True when `ts` is more than a few seconds ahead of the capture's clock: a skewed or hostile client
+  // timestamp, which must not move "now" (it would blind the live window for everybody).
+  bool farAheadLocked(uint64_t ts) const { return now != 0 && ts > now && ts - now > 5 * clockHz; }
+  // Other timestamps (processes, threads, modules, instrumentation): move "now" only when plausible.
+  void noteTsLocked(uint64_t ts) {
+    if (!farAheadLocked(ts)) noteTrustedLocked(ts);
+  }
+  // Instrumentation event with an implausible timestamp: dropped and counted, like a lost live event.
+  bool dropFarAheadLocked(uint64_t ts) {
+    if (!farAheadLocked(ts)) return false;
+    pendingDropped += 1;
+    ++counters.droppedLive;
+    return true;
   }
 
   // ---------------------------------------------------------------------------------------------------
@@ -515,7 +531,7 @@ struct LiveEncoder::Impl {
 
 // ---------------------------------------------------------------------------------------------------------
 
-LiveEncoder::LiveEncoder(LiveEncoderConfig config) : m_impl(std::make_unique<Impl>(std::move(config))) {
+LiveEncoder::LiveEncoder(LiveEncoderConfig config) : m_impl(std::make_shared<Impl>(std::move(config))) {
   if (m_impl->config.autoTick) m_impl->ticker = std::thread([this] { m_impl->tickLoop(); });
 }
 
@@ -536,10 +552,11 @@ void LiveEncoder::onSessionInfo(const capture::LiveSessionInfo& info) {
   m.info = info;
   m.haveInfo = true;
   m.infoPending = true;
-  if (info.clockFrequencyHz != 0)
-    m.windowTicks = static_cast<uint64_t>(static_cast<double>(m.config.windowSeconds) *
-                                          static_cast<double>(info.clockFrequencyHz));
-  m.noteTsLocked(info.startTs);
+  if (info.clockFrequencyHz >= 1 && info.clockFrequencyHz <= 1'000'000'000'000ull) {
+    m.clockHz = info.clockFrequencyHz;
+    m.windowTicks = static_cast<uint64_t>(m.config.windowSeconds) * info.clockFrequencyHz;
+  }
+  m.noteTrustedLocked(info.startTs);
 }
 
 void LiveEncoder::onProcess(const capture::LiveProcess& p) {
@@ -680,7 +697,7 @@ void LiveEncoder::onSample(uint64_t ts, uint32_t pid, uint32_t tid, uint32_t cpu
   m.sFlags.push_back(flags);
   ++m.counters.samples;
   m.pendingBytes += 20;
-  m.noteTsLocked(ts);
+  m.noteTrustedLocked(ts);
   m.maybeFlushLocked();
 }
 
@@ -703,7 +720,7 @@ void LiveEncoder::onContextSwitch(const capture::LiveContextSwitch& c) {
   r.reserved = c.flags;
   m.switches.push_back(r);
   m.pendingBytes += 32;
-  m.noteTsLocked(c.ts);
+  m.noteTrustedLocked(c.ts);
   m.maybeFlushLocked();
 }
 
@@ -724,7 +741,7 @@ void LiveEncoder::onReady(const capture::LiveReady& rd) {
   r.flags = rd.flags;
   m.readies.push_back(r);
   m.pendingBytes += 28;
-  m.noteTsLocked(rd.ts);
+  m.noteTrustedLocked(rd.ts);
   m.maybeFlushLocked();
 }
 
@@ -732,6 +749,7 @@ void LiveEncoder::onScopeEvent(const capture::LiveScopeEvent& e) {
   std::lock_guard lock(m_impl->mutex);
   Impl& m = *m_impl;
   if (m.ended) return;
+  if (m.dropFarAheadLocked(e.ts)) return;
   if (e.tid != 0 && e.pid != 0) (void)m.internThreadLocked(e.pid, e.tid);
   alignas(8) trace::ScopeEventRec r{};
   r.ts = e.ts;
@@ -751,6 +769,7 @@ void LiveEncoder::onFrameMark(const capture::LiveFrameMark& f) {
   std::lock_guard lock(m_impl->mutex);
   Impl& m = *m_impl;
   if (m.ended) return;
+  if (m.dropFarAheadLocked(f.ts)) return;
   if (f.tid != 0 && f.pid != 0) (void)m.internThreadLocked(f.pid, f.tid);
   alignas(8) trace::FrameMarkRec r{};
   r.ts = f.ts;
@@ -767,6 +786,7 @@ void LiveEncoder::onMarker(const capture::LiveMarker& mk) {
   std::lock_guard lock(m_impl->mutex);
   Impl& m = *m_impl;
   if (m.ended) return;
+  if (m.dropFarAheadLocked(mk.ts)) return;
   if (mk.tid != 0 && mk.pid != 0) (void)m.internThreadLocked(mk.pid, mk.tid);
   alignas(8) trace::MarkerRec r{};
   r.ts = mk.ts;
@@ -784,6 +804,7 @@ void LiveEncoder::onPlot(const capture::LivePlot& p) {
   std::lock_guard lock(m_impl->mutex);
   Impl& m = *m_impl;
   if (m.ended) return;
+  if (m.dropFarAheadLocked(p.ts)) return;
   alignas(8) trace::PlotSampleRec r{};
   r.ts = p.ts;
   r.name = StringIdx(m.internStringLocked(p.name));
@@ -798,7 +819,7 @@ void LiveEncoder::onTimeAdvance(uint64_t ts) {
   std::lock_guard lock(m_impl->mutex);
   Impl& m = *m_impl;
   if (m.ended) return;
-  m.noteTsLocked(ts);
+  m.noteTrustedLocked(ts);
   m.timeDirty = true;
 }
 
@@ -861,21 +882,32 @@ LiveKeyframe LiveEncoder::beginKeyframe() {
   using namespace model::live_wire;
   LiveKeyframe kf;
   kf.m_seq = m.seq;
+
+  // The small tables are copied now (consistent with the batches the keyframe ends at); strings, frames and
+  // nodes only record their size and are encoded lazily by the generator below.
+  struct State {
+    std::shared_ptr<Impl> impl;
+    size_t strings = 0, frames = 0, nodes = 0;
+    std::string info;
+    std::vector<std::string> small;
+    size_t stage = 0, index = 0, smallIndex = 0;
+  };
+  auto st = std::make_shared<State>();
+  st->impl = m_impl;
+  st->strings = m.strings.size();
+  st->frames = m.frames.size();
+  st->nodes = m.nodes.size();
+  if (m.haveInfo) {
+    InfoPayload p{m.info.clockFrequencyHz, m.info.platform, m.info.samplingHz, m.info.startTs};
+    putRecord(st->info, RecordType::Info, &p, sizeof(p));
+  }
   std::string defs;
   auto cut = [&](bool force) {
     if (!defs.empty() && (force || defs.size() >= kMaxEventBytes - 4096)) {
-      kf.m_defs.push_back(std::move(defs));
+      st->small.push_back(std::move(defs));
       defs = std::string();
     }
   };
-  if (m.haveInfo) {
-    InfoPayload p{m.info.clockFrequencyHz, m.info.platform, m.info.samplingHz, m.info.startTs};
-    putRecord(defs, RecordType::Info, &p, sizeof(p));
-  }
-  for (size_t i = 0; i < m.strings.size(); ++i) {
-    Impl::putStringDef(defs, static_cast<uint32_t>(i), m.strings[i]);
-    cut(false);
-  }
   for (size_t i = 0; i < m.procs.size(); ++i) {
     putIndexedRecord(defs, RecordType::ProcessDef, static_cast<uint32_t>(i), &m.procs[i].rec,
                      sizeof(trace::ProcessRec));
@@ -891,17 +923,68 @@ LiveKeyframe LiveEncoder::beginKeyframe() {
                      sizeof(trace::ModuleRec));
     cut(false);
   }
-  for (size_t i = 0; i < m.frames.size(); ++i) {
-    putIndexedRecord(defs, RecordType::FrameDef, static_cast<uint32_t>(i), &m.frames[i],
-                     sizeof(trace::FrameRec));
-    cut(false);
-  }
-  for (size_t i = 1; i < m.nodes.size(); ++i) {
-    putIndexedRecord(defs, RecordType::NodeDef, static_cast<uint32_t>(i), &m.nodes[i],
-                     sizeof(trace::CallstackNodeRec));
-    cut(false);
-  }
   cut(true);
+
+  kf.m_defGen = [st](std::string& chunk) -> bool {
+    Impl& im = *st->impl;
+    std::string out;
+    const size_t limit = kMaxEventBytes - 4096;
+    for (;;) {
+      switch (st->stage) {
+        case 0: {  // strings (the Info record rides in front)
+          if (st->index == 0) out = st->info;
+          std::lock_guard lock(im.mutex);
+          while (st->index < st->strings && out.size() < limit) {
+            Impl::putStringDef(out, static_cast<uint32_t>(st->index), im.strings[st->index]);
+            ++st->index;
+          }
+          if (st->index >= st->strings) {
+            st->stage = 1;
+            st->index = 0;
+          }
+          break;
+        }
+        case 1:  // processes, threads, modules (copied when the keyframe began)
+          if (out.empty() && st->smallIndex < st->small.size()) {
+            chunk = std::move(st->small[st->smallIndex++]);
+            return true;
+          }
+          if (st->smallIndex >= st->small.size()) {
+            st->stage = 2;
+            st->index = 0;
+          }
+          break;
+        case 2: {  // frames
+          std::lock_guard lock(im.mutex);
+          while (st->index < st->frames && out.size() < limit) {
+            putIndexedRecord(out, RecordType::FrameDef, static_cast<uint32_t>(st->index),
+                             &im.frames[st->index], sizeof(trace::FrameRec));
+            ++st->index;
+          }
+          if (st->index >= st->frames) {
+            st->stage = 3;
+            st->index = 1;  // the root is implicit
+          }
+          break;
+        }
+        case 3: {  // callstack nodes
+          std::lock_guard lock(im.mutex);
+          while (st->index < st->nodes && out.size() < limit) {
+            putIndexedRecord(out, RecordType::NodeDef, static_cast<uint32_t>(st->index), &im.nodes[st->index],
+                             sizeof(trace::CallstackNodeRec));
+            ++st->index;
+          }
+          if (st->index >= st->nodes) st->stage = 4;
+          break;
+        }
+        default: return false;
+      }
+      if (!out.empty()) {
+        chunk = std::move(out);
+        return true;
+      }
+    }
+  };
   kf.m_batches.assign(m.batches.begin(), m.batches.end());
   return kf;
 }

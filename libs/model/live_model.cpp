@@ -47,27 +47,41 @@ size_t vecBytes(const std::vector<T>& v) {
   return v.capacity() * sizeof(T);
 }
 
-// Events of one kind, kept sorted by timestamp. head: index of the first record inside the window.
+// Events of one kind, kept sorted by timestamp. head: index of the first record inside the window. Records
+// are appended as they come; one that arrives out of order starts an unsorted tail (from `sortedEnd`) that
+// settle() sorts and merges once per batch, so hostile or skewed input costs O(n log n), not O(n) per record.
 template <typename T>
 struct EventStore {
   std::vector<T> v;
   size_t head = 0;
+  bool dirty = false;
+  size_t sortedEnd = 0;
 
   size_t size() const { return v.size() - head; }
   void clear() {
     v.clear();
     head = 0;
+    dirty = false;
+    sortedEnd = 0;
   }
   void add(const T& r) {
-    const uint64_t t = tsOf(r);
-    if (v.size() == head || t >= tsOf(v.back())) {
-      v.push_back(r);
-      return;
+    if (!dirty && v.size() > head && tsOf(r) < tsOf(v.back())) {
+      dirty = true;
+      sortedEnd = v.size();
     }
-    // Rings of different cpus are drained at different moments: a record can arrive a little late.
-    auto it = std::upper_bound(v.begin() + static_cast<std::ptrdiff_t>(head), v.end(), t,
-                               [](uint64_t ts, const T& x) { return ts < tsOf(x); });
-    v.insert(it, r);
+    v.push_back(r);
+  }
+  void settle() {
+    if (!dirty) return;
+    dirty = false;
+    auto cmp = [](const T& a, const T& b) { return tsOf(a) < tsOf(b); };
+    const auto first = v.begin() + static_cast<std::ptrdiff_t>(head);
+    const auto mid = v.begin() + static_cast<std::ptrdiff_t>(sortedEnd);
+    std::stable_sort(mid, v.end(), cmp);
+    // Only the part of the sorted prefix that is newer than the earliest tail record has to move.
+    const auto from =
+        std::upper_bound(first, mid, tsOf(*mid), [](uint64_t ts, const T& x) { return ts < tsOf(x); });
+    std::inplace_merge(from, mid, v.end(), cmp);
   }
   void trim(uint64_t cutoff) {
     auto it = std::lower_bound(v.begin() + static_cast<std::ptrdiff_t>(head), v.end(), cutoff,
@@ -85,6 +99,14 @@ struct SampleStore {
   std::vector<CallstackIdx> node;
   std::vector<uint16_t> cpu, flags;
   size_t head = 0;
+  bool dirty = false;
+  size_t sortedEnd = 0;
+
+  struct Row {
+    uint64_t ts;
+    CallstackIdx node;
+    uint16_t cpu, flags;
+  };
 
   size_t size() const { return ts.size() - head; }
   void clear() {
@@ -93,22 +115,43 @@ struct SampleStore {
     cpu.clear();
     flags.clear();
     head = 0;
+    dirty = false;
+    sortedEnd = 0;
   }
   void add(uint64_t t, CallstackIdx n, uint16_t c, uint16_t f) {
-    if (ts.size() == head || t >= ts.back()) {
-      ts.push_back(t);
-      node.push_back(n);
-      cpu.push_back(c);
-      flags.push_back(f);
-      return;
+    if (!dirty && ts.size() > head && t < ts.back()) {
+      dirty = true;
+      sortedEnd = ts.size();
     }
-    const size_t pos = static_cast<size_t>(
-        std::upper_bound(ts.begin() + static_cast<std::ptrdiff_t>(head), ts.end(), t) - ts.begin());
-    const auto at = static_cast<std::ptrdiff_t>(pos);
-    ts.insert(ts.begin() + at, t);
-    node.insert(node.begin() + at, n);
-    cpu.insert(cpu.begin() + at, c);
-    flags.insert(flags.begin() + at, f);
+    ts.push_back(t);
+    node.push_back(n);
+    cpu.push_back(c);
+    flags.push_back(f);
+  }
+  // Sorts the unsorted tail and merges it into the sorted part (see EventStore::settle).
+  void settle() {
+    if (!dirty) return;
+    dirty = false;
+    std::vector<Row> tail;
+    tail.reserve(ts.size() - sortedEnd);
+    for (size_t i = sortedEnd; i < ts.size(); ++i) tail.push_back({ts[i], node[i], cpu[i], flags[i]});
+    auto cmp = [](const Row& a, const Row& b) { return a.ts < b.ts; };
+    std::stable_sort(tail.begin(), tail.end(), cmp);
+    const size_t from = static_cast<size_t>(
+        std::upper_bound(ts.begin() + static_cast<std::ptrdiff_t>(head),
+                         ts.begin() + static_cast<std::ptrdiff_t>(sortedEnd), tail.front().ts) -
+        ts.begin());
+    std::vector<Row> prefix;
+    prefix.reserve(sortedEnd - from);
+    for (size_t i = from; i < sortedEnd; ++i) prefix.push_back({ts[i], node[i], cpu[i], flags[i]});
+    std::vector<Row> out(prefix.size() + tail.size());
+    std::merge(prefix.begin(), prefix.end(), tail.begin(), tail.end(), out.begin(), cmp);
+    for (size_t i = 0; i < out.size(); ++i) {
+      ts[from + i] = out[i].ts;
+      node[from + i] = out[i].node;
+      cpu[from + i] = out[i].cpu;
+      flags[from + i] = out[i].flags;
+    }
   }
   void trim(uint64_t cutoff) {
     head = static_cast<size_t>(
@@ -160,7 +203,6 @@ struct LiveModel::Impl {
   EventStore<trace::PlotSampleRec> plots;
 
   uint64_t now = 0;
-  uint64_t lastTrimNow = 0;
   LiveModelStats stats;
   std::vector<std::byte> stringScratch;
 
@@ -168,7 +210,9 @@ struct LiveModel::Impl {
 
   uint64_t windowTicks() const {
     const uint64_t hz = clockHz != 0 ? clockHz : 1'000'000'000ull;
-    return static_cast<uint64_t>(static_cast<double>(options.windowNs) * static_cast<double>(hz) / 1e9);
+    const double ticks = static_cast<double>(options.windowNs) * static_cast<double>(hz) / 1e9;
+    return ticks >= 9.0e18 ? uint64_t{9'000'000'000'000'000'000ull}
+                           : static_cast<uint64_t>(ticks);  // saturate
   }
 
   void reset() {
@@ -190,7 +234,7 @@ struct LiveModel::Impl {
     frameMarks.clear();
     markers.clear();
     plots.clear();
-    now = lastTrimNow = 0;
+    now = 0;
     const uint64_t batches = stats.batches, keyframes = stats.keyframes;
     stats = LiveModelStats{};
     stats.batches = batches;
@@ -221,16 +265,30 @@ struct LiveModel::Impl {
     return n.valid() && n.get() >= nodes.size() ? CallstackIdx::invalid() : n;
   }
 
+  // Backend time (samples, TimeAdvance, Info): moves "now".
   void noteTs(uint64_t ts) {
     if (ts > now) now = ts;
   }
+  // The timestamp of an event that does not come from the backend's own clock (instrumentation): false when
+  // it is implausibly far ahead of now, so that one skewed or hostile timestamp cannot blind the window for
+  // everyone. Such an event is dropped.
+  bool plausible(uint64_t ts) const {
+    if (now == 0) return true;
+    const uint64_t hz = clockHz != 0 ? clockHz : 1'000'000'000ull;
+    return ts <= now || ts - now <= 60 * hz;
+  }
 
-  void trim() {
+  void settleAndTrim() {
+    for (SampleStore& s : samples) s.settle();
+    switches.settle();
+    readies.settle();
+    scopes.settle();
+    frameMarks.settle();
+    markers.settle();
+    plots.settle();
     const uint64_t window = windowTicks();
     if (now <= window) return;
     const uint64_t cutoff = now - window;
-    if (cutoff == lastTrimNow) return;
-    lastTrimNow = cutoff;
     for (SampleStore& s : samples) s.trim(cutoff);
     switches.trim(cutoff);
     readies.trim(cutoff);
@@ -295,7 +353,7 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         pr.end_ts = r.end_ts;
         pr.name = str(r.name);
         pr.command_line = str(r.command_line);
-        noteTs(r.start_ts);
+        if (plausible(r.start_ts)) noteTs(r.start_ts);
         break;
       }
       case RecordType::ThreadDef: {
@@ -418,8 +476,11 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         for (size_t off = 0; off < n; off += sizeof(trace::ScopeEventRec)) {
           const Aligned<trace::ScopeEventRec> ra(p + off);
           const auto& r = ra.v;
+          if (!plausible(r.ts)) {
+            ++stats.droppedLive;
+            continue;
+          }
           scopes.add(r);
-          noteTs(r.ts);
         }
         break;
       }
@@ -428,8 +489,11 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         for (size_t off = 0; off < n; off += sizeof(trace::FrameMarkRec)) {
           const Aligned<trace::FrameMarkRec> ra(p + off);
           const auto& r = ra.v;
+          if (!plausible(r.ts)) {
+            ++stats.droppedLive;
+            continue;
+          }
           frameMarks.add(r);
-          noteTs(r.ts);
         }
         break;
       }
@@ -438,8 +502,11 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         for (size_t off = 0; off < n; off += sizeof(trace::MarkerRec)) {
           const Aligned<trace::MarkerRec> ra(p + off);
           const auto& r = ra.v;
+          if (!plausible(r.ts)) {
+            ++stats.droppedLive;
+            continue;
+          }
           markers.add(r);
-          noteTs(r.ts);
         }
         break;
       }
@@ -448,8 +515,11 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         for (size_t off = 0; off < n; off += sizeof(trace::PlotSampleRec)) {
           const Aligned<trace::PlotSampleRec> ra(p + off);
           const auto& r = ra.v;
+          if (!plausible(r.ts)) {
+            ++stats.droppedLive;
+            continue;
+          }
           plots.add(r);
-          noteTs(r.ts);
         }
         break;
       }
@@ -471,6 +541,8 @@ Result<void> LiveModel::Impl::applyLocked(std::span<const std::byte> data, bool&
         if (n < sizeof(InfoPayload)) return corrupt("short Info");
         const Aligned<InfoPayload> ra(p);
         const auto& r = ra.v;
+        if (r.clock_frequency_hz < 1 || r.clock_frequency_hz > 1'000'000'000'000ull)
+          return corrupt("implausible clock frequency");
         clockHz = r.clock_frequency_hz;
         platform = r.platform;
         samplingHz = r.sampling_hz;
@@ -512,7 +584,7 @@ Result<void> LiveModel::apply(std::span<const std::byte> data, bool keyframe) {
   bool applied = false;
   auto result = m.applyLocked(data, applied);
   if (applied || keyframe) {
-    m.trim();
+    m.settleAndTrim();
     ++m.stats.batches;
     m.generation.fetch_add(1, std::memory_order_release);
   }

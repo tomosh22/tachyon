@@ -33,6 +33,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -47,7 +48,7 @@ struct LiveEncoderConfig {
   int batchMs = 250;
   size_t batchBytes = 256 * 1024;
   // Retained batch bytes over all batches; the oldest are dropped beyond it.
-  uint64_t maxRetainedBytes = 1ull << 30;
+  uint64_t maxRetainedBytes = 256ull << 20;
   // Run the timer thread that cuts batches every batchMs. Tests that drive flush() themselves turn it off.
   bool autoTick = true;
   // Table caps (tests lower them).
@@ -102,8 +103,9 @@ class LiveKeyframe {
  private:
   friend class LiveEncoder;
   uint64_t m_seq = 0;
-  std::vector<std::string> m_defs;  // table definitions, already split
-  size_t m_defIndex = 0;
+  // Produces the table definitions piece by piece (lazily: a keyframe of a big capture never holds them all);
+  // empty / returns false when done.
+  std::function<bool(std::string&)> m_defGen;
   std::vector<LiveBatch> m_batches;
   size_t m_batchIndex = 0;
   size_t m_offset = 0;  // inside the events part of m_batches[m_batchIndex]
@@ -157,7 +159,7 @@ class LiveEncoder final : public capture::ILiveSink {
 
  private:
   struct Impl;
-  std::unique_ptr<Impl> m_impl;
+  std::shared_ptr<Impl> m_impl;
 };
 
 }  // namespace tachyon::control

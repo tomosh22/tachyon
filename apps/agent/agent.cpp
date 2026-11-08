@@ -1126,6 +1126,7 @@ Response Agent::handleLiveSubscribe(ClientId client, const LiveSubscribeRequest&
   }
   if (!encoder)
     return makeErrorResponse(std::nullopt, makeError(ErrorCode::NotFound, "no live capture is running"));
+  reapFinishedSubscribers();
   stopLiveSubscriber(client);  // a second subscribe replaces the first
   auto sub = std::make_unique<LiveSubscriber>();
   sub->client = client;
@@ -1208,11 +1209,44 @@ bool Agent::sendLiveLine(LiveSubscriber& sub, std::string line, bool& stalled) {
 }
 
 void Agent::liveSubscriberLoop(LiveSubscriber& sub) {
+  liveSubscriberBody(sub);
+  sub.finished.store(
+      true);  // the slot is free again (reaped by the next subscribe or the client's disconnect)
+}
+
+void Agent::reapFinishedSubscribers() {
+  std::vector<std::unique_ptr<LiveSubscriber>> done;
+  {
+    std::lock_guard lock(m_subMutex);
+    for (auto it = m_subscribers.begin(); it != m_subscribers.end();) {
+      if (it->second->finished.load()) {
+        done.push_back(std::move(it->second));
+        it = m_subscribers.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (auto& sub : done)
+    if (sub->thread.joinable()) sub->thread.join();  // already exiting: instant
+}
+
+void Agent::liveSubscriberBody(LiveSubscriber& sub) {
   control::LiveEncoder& encoder = *sub.encoder;
+  // live_gap / live_end are small but must arrive: wait (bounded) while the queue is full.
   auto sendSmall = [&](const Event& event) {
-    std::lock_guard lock(m_serverMutex);
-    if (m_server != nullptr)
-      (void)m_server->trySendLine(sub.client, encodeEvent(event), kMaxQueuedBytesPerClient);
+    const std::string line = encodeEvent(event);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(m_config.liveStallMs);
+    while (!sub.stop.load()) {
+      Server::SendStatus status;
+      {
+        std::lock_guard lock(m_serverMutex);
+        if (m_server == nullptr) return;
+        status = m_server->trySendLine(sub.client, line, kMaxQueuedBytesPerClient);
+      }
+      if (status != Server::SendStatus::Full || std::chrono::steady_clock::now() >= deadline) return;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
   };
   bool stalled = false;
   if (sub.keyframe) {

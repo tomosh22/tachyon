@@ -566,5 +566,46 @@ TEST(LiveBackend, InProcessBackendFeedsTheEncoderAndTheLiveModelHoldsWhatTheTrac
   EXPECT_TRUE(found);
 }
 
+// Measurement, not a check (run with --gtest_also_run_disabled_tests): does a live capture end up with fewer
+// samples in the final trace than a plain one? Three interleaved pairs of 5 s spin captures.
+TEST(LiveBackend, DISABLED_LiveOverheadOnTheFinalTraceSampleCount) {
+  {
+    LinuxPerfBackend probe;
+    if (!probe.checkPrivileges().ok()) GTEST_SKIP() << "no perf";
+  }
+  TempDir dir;
+  auto run = [&](bool live, int n) {
+    LinuxPerfBackendConfig cfg;
+    cfg.ringPages = 2048;
+    LinuxPerfBackend backend(cfg);
+    auto encoder = std::make_shared<LiveEncoder>();
+    backend.setLiveSink(encoder);
+    CaptureOptions o;
+    o.mode = CaptureMode::Launch;
+    o.exe = TACHYON_TESTBED_EXE;
+    o.args = {"--scenario", "spin", "--duration", "5"};
+    o.samplingHz = 8000;
+    o.live = live;
+    o.outPath = dir.path() / ("ov" + std::to_string(n) + (live ? "L" : "P") + ".tachyon");
+    EXPECT_TRUE(backend.start(o).ok());
+    while (!backend.targetExited()) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    auto result = backend.stop();
+    encoder->finish();
+    EXPECT_TRUE(result.ok());
+    auto m = model::TraceModel::load(result->tracePath);
+    uint64_t samples = 0, throttle = 0;
+    for (const auto& c : m->samplesByThread) samples += c.ts.size();
+    for (const auto& w : result->warnings) throttle += w.find("throttl") != std::string::npos;
+    std::printf("LIVE-OVERHEAD %s run %d: samples=%llu throttle_warnings=%llu lost=%llu\n",
+                live ? "live " : "plain", n, static_cast<unsigned long long>(samples),
+                static_cast<unsigned long long>(throttle),
+                static_cast<unsigned long long>(result->eventsLost));
+  };
+  for (int i = 0; i < 3; ++i) {
+    run(false, i);
+    run(true, i);
+  }
+}
+
 }  // namespace
 }  // namespace tachyon::capture

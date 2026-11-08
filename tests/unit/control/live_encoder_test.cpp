@@ -556,5 +556,135 @@ TEST(LiveSnapshot, AnalysisAcceptsTheSnapshot) {
   EXPECT_TRUE(lod->build().ok());
 }
 
+// ---- hostile and skewed input (verifier findings) ----
+
+std::string infoBatch(uint64_t clockHz) {
+  std::string b;
+  model::live_wire::InfoPayload info{clockHz, 2, 1000, 1};
+  model::live_wire::putRecord(b, model::live_wire::RecordType::Info, &info, sizeof(info));
+  return b;
+}
+
+TEST(LiveHostile, ImplausibleClockFrequenciesAreRejected) {
+  for (uint64_t hz :
+       {uint64_t{0}, uint64_t{1'000'000'000'001ull}, ~uint64_t{0}, uint64_t{700'000'000'000'000'000ull}}) {
+    LiveModel m;
+    const std::string b = infoBatch(hz);
+    EXPECT_FALSE(m.apply(bytesOf(b), true).ok()) << hz;
+    EXPECT_NE(m.snapshot(), nullptr);  // still usable, no overflow in the window computation
+  }
+  LiveModel ok;
+  const std::string good = infoBatch(10'000'000);
+  EXPECT_TRUE(ok.apply(bytesOf(good), true).ok());
+}
+
+TEST(LiveHostile, OneSkewedInstrumentationTimestampDoesNotBlindTheWindow) {
+  Pipe p;
+  sessionAndTarget(p.enc);
+  p.enc.onThread(thread(100, 101, "main"));
+  p.enc.onSample(2'000'000'000ull, 100, 101, 0, 0, std::vector<uint64_t>{0x400010});
+  p.enc.onScopeEvent({~uint64_t{0} - 5, 100, 101, trace::kScopeBegin, "evil", "", 0, 0});
+  p.enc.onFrameMark({~uint64_t{0} - 5, 100, 101, "evil", 1});
+  p.enc.onMarker({~uint64_t{0} - 5, 100, 101, "evil", "", 0});
+  p.enc.onPlot({~uint64_t{0} - 5, "evil", 1.0});
+  p.enc.onSample(3'000'000'000ull, 100, 101, 0, 0, std::vector<uint64_t>{0x400010});
+  p.pump();
+  EXPECT_EQ(p.enc.stats().nowTs, 3'000'000'000ull);
+  auto m = p.model.snapshot();
+  EXPECT_EQ(m->header.end_ts, 3'000'000'000ull);
+  EXPECT_TRUE(m->scopeEvents.empty());
+  EXPECT_EQ(m->samplesByThread[0].ts.size(), 2u);
+  EXPECT_EQ(p.model.stats().droppedLive, 4u);
+
+  // A model fed such events directly (a hostile agent) ignores them too.
+  std::string wire = infoBatch(kSec);
+  const uint64_t t = 5 * kSec;
+  model::live_wire::putRecord(wire, model::live_wire::RecordType::TimeAdvance, &t, 8);
+  alignas(8) trace::ScopeEventRec sc{};
+  sc.ts = ~uint64_t{0} - 5;
+  model::live_wire::putRecord(wire, model::live_wire::RecordType::Scopes, &sc, sizeof(sc));
+  LiveModel direct;
+  ASSERT_TRUE(direct.apply(bytesOf(wire), true).ok());
+  EXPECT_EQ(direct.stats().nowTs, t);
+  EXPECT_TRUE(direct.snapshot()->scopeEvents.empty());
+}
+
+TEST(LiveHostile, DescendingSamplesAreAcceptedInNLogN) {
+  LiveModel m;
+  std::string wire = infoBatch(kSec);
+  trace::ThreadRec tr{};
+  tr.tid = 1;
+  tr.pid = 1;
+  model::live_wire::putIndexedRecord(wire, model::live_wire::RecordType::ThreadDef, 0, &tr, sizeof(tr));
+  constexpr uint32_t kN = 260000;
+  std::vector<uint64_t> ts(kN);
+  std::vector<uint32_t> th(kN, 0), node(kN, 0);
+  std::vector<uint16_t> cpu(kN, 0), flags(kN, 0);
+  for (uint32_t i = 0; i < kN; ++i) ts[i] = 1'000'000'000ull + (kN - i);
+  std::string rec;
+  const uint32_t count = kN;
+  rec.append(reinterpret_cast<const char*>(&count), 4);
+  rec.append(reinterpret_cast<const char*>(ts.data()), kN * 8ull);
+  rec.append(reinterpret_cast<const char*>(th.data()), kN * 4ull);
+  rec.append(reinterpret_cast<const char*>(node.data()), kN * 4ull);
+  rec.append(reinterpret_cast<const char*>(cpu.data()), kN * 2ull);
+  rec.append(reinterpret_cast<const char*>(flags.data()), kN * 2ull);
+  model::live_wire::putRecord(wire, model::live_wire::RecordType::Samples, rec.data(), rec.size());
+  const auto t0 = std::chrono::steady_clock::now();
+  ASSERT_TRUE(m.apply(bytesOf(wire), true).ok());
+  // A second descending batch merges into the first.
+  for (uint32_t i = 0; i < kN; ++i) ts[i] = 1'000'000'000ull + (kN - i) + 1;
+  std::string rec2 = rec;
+  std::memcpy(rec2.data() + 4, ts.data(), kN * 8ull);
+  std::string wire2;
+  model::live_wire::putRecord(wire2, model::live_wire::RecordType::Samples, rec2.data(), rec2.size());
+  ASSERT_TRUE(m.apply(bytesOf(wire2), false).ok());
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  EXPECT_LT(secs, 1.0) << "descending input must not be quadratic";
+  auto snap = m.snapshot();
+  const auto& c = snap->samplesByThread[0].ts;
+  EXPECT_EQ(c.size(), 2u * kN);
+  EXPECT_TRUE(std::is_sorted(c.begin(), c.end()));
+}
+
+TEST(LiveHostile, LateOldSamplesAreTrimmedEvenWhileTimeStandsStill) {
+  LiveModelOptions o;
+  o.windowNs = kSec;
+  Pipe p(testConfig(), o);
+  sessionAndTarget(p.enc);
+  p.enc.onThread(thread(100, 101, "main"));
+  p.enc.onSample(10 * kSec, 100, 101, 0, 0, std::vector<uint64_t>{0x400010});
+  p.enc.onTimeAdvance(10 * kSec);
+  p.pump();
+  for (int i = 0; i < 1000; ++i)
+    p.enc.onSample(2 * kSec + static_cast<uint64_t>(i), 100, 101, 0, 0, std::vector<uint64_t>{0x400010});
+  p.pump();  // now did not move: these are far older than the window
+  EXPECT_EQ(p.model.snapshot()->samplesByThread[0].ts.size(), 1u);
+}
+
+TEST(LiveKeyframe, LazyKeyframeOfALargeTableStaysWithinPieceLimits) {
+  LiveEncoderConfig c = testConfig();
+  LiveEncoder enc(c);
+  sessionAndTarget(enc);
+  enc.onThread(thread(100, 101, "main"));
+  for (uint32_t i = 0; i < 60000; ++i)
+    enc.onSample(2000 + i, 100, 101, 0, 0, std::vector<uint64_t>{0x400000 + i * 4ull, 0x400100});
+  enc.flush();
+  LiveKeyframe kf = enc.beginKeyframe();
+  LiveModel m;
+  std::string chunk;
+  bool first = true;
+  size_t pieces = 0;
+  while (kf.next(chunk)) {
+    EXPECT_LE(chunk.size(), model::live_wire::kMaxEventBytes);
+    ASSERT_TRUE(m.apply(bytesOf(chunk), first).ok());
+    first = false;
+    ++pieces;
+  }
+  EXPECT_GT(pieces, 10u);
+  EXPECT_EQ(m.snapshot()->frames.size(), enc.stats().frames);
+  EXPECT_EQ(m.snapshot()->nodes.size(), enc.stats().nodes);
+}
+
 }  // namespace
 }  // namespace tachyon::control

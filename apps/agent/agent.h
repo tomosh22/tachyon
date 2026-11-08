@@ -303,9 +303,13 @@ class Agent final : public control::IRequestHandler {
     std::optional<control::LiveKeyframe> keyframe;  // to send first (absent: a continuation from `next`)
     uint64_t next = 0;                              // the next batch to send
     std::atomic<bool> stop{false};
+    std::atomic<bool> finished{false};  // the thread is done: the slot may be reused
     std::thread thread;
   };
   void liveSubscriberLoop(LiveSubscriber& sub);
+  void liveSubscriberBody(LiveSubscriber& sub);
+  // Joins and forgets the subscribers whose thread has ended, so their slots count no more.
+  void reapFinishedSubscribers();
   // Queues one line for the subscriber, waiting while its queue is full. False: stop (gone, stopped,
   // stalled); `stalled` says it was the stall limit.
   bool sendLiveLine(LiveSubscriber& sub, std::string line, bool& stalled);

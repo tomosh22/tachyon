@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include <map>
+#include <optional>
 
 namespace tachyon::agent {
 namespace {
@@ -144,6 +145,7 @@ struct LiveClient {
   uint64_t gapSeq = 0, endSeq = 0;
   std::string applyError;
   bool keyframePending = false;
+  std::optional<CaptureSummary> done;  // capture_done may arrive before or after live_end
 
   explicit LiveClient(Client c, model::LiveModelOptions o = {}) : client(std::move(c)), model(o) {
     client.setLiveHandler([this](const Event& e) { onEvent(e); });
@@ -172,8 +174,9 @@ struct LiveClient {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     while (!pred()) {
       if (std::chrono::steady_clock::now() >= deadline) return false;
-      auto ev = client.nextEvent(50);  // non-live events are returned and dropped here
-      (void)ev;
+      auto ev = client.nextEvent(50);  // non-live events are returned here
+      if (ev.ok())
+        if (const auto* d = std::get_if<CaptureDoneEvent>(&*ev)) done = d->summary;
     }
     return true;
   }
@@ -361,12 +364,10 @@ TEST(LiveAgent, KeyframeThenBatchesThenEndAndTheLiveModelMatchesTheFinalTrace) {
   ASSERT_TRUE(lc.until([&] { return lc.end; }));
   EXPECT_EQ(lc.endSeq, lc.lastSeq);
   EXPECT_FALSE(lc.gap);
-  auto done = lc.client.waitForEvent(
-      [](const Event& e) { return std::holds_alternative<CaptureDoneEvent>(e); }, 10000);
-  ASSERT_TRUE(done.ok());
+  ASSERT_TRUE(lc.until([&] { return lc.done.has_value(); }));
 
   // The live model of the whole replay equals the final trace: same samples, same shares (+-1 point).
-  auto finalModel = model::TraceModel::load(std::get<CaptureDoneEvent>(*done).summary.path);
+  auto finalModel = model::TraceModel::load(lc.done->path);
   ASSERT_TRUE(finalModel.ok());
   auto live = lc.model.snapshot();
   EXPECT_EQ(sampleCount(*live), sampleCount(*finalModel));
@@ -474,6 +475,7 @@ TEST(LiveAgent, TooManySubscribersAreRefused) {
 TEST(LiveAgent, AClientThatDoesNotReadGetsALiveGapAndCanResubscribe) {
   AgentConfig ac;
   ac.liveStallMs = 300;
+  ac.maxLiveSubscribers = 1;
   // 60 s of 1 kHz x 2 threads: 2.4 MB of samples, well over the 1.5 MiB queue limit plus the socket buffers.
   LiveHarness h(/*ms=*/60000, 0.0, ac);
   Client driver = h.connect();
@@ -492,6 +494,9 @@ TEST(LiveAgent, AClientThatDoesNotReadGetsALiveGapAndCanResubscribe) {
   // Now read: events up to the gap, then live_gap.
   ASSERT_TRUE(lc.until([&] { return lc.gap; }, 20000)) << "no live_gap after " << lc.seqs.size() << " events";
   EXPECT_FALSE(lc.end);
+  // The slot of the subscriber that got its gap is free again (one slot only).
+  EXPECT_TRUE(callOk(other, LiveSubscribeRequest{}));
+  EXPECT_TRUE(callOk(other, LiveUnsubscribeRequest{}));
   const size_t before = lc.seqs.size();
   // Resubscribe: the next event is a keyframe.
   lc.gap = false;
