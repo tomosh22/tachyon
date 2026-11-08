@@ -9,6 +9,7 @@
 #include "control/transport.h"
 #include "core/platform.h"
 #include "model/live_model.h"
+#include "trace/trace_format.h"
 
 #include <algorithm>
 #include <charconv>
@@ -161,14 +162,22 @@ std::string jsonEscape(const std::string& in) {
   return out;
 }
 
-// The trace clock of a local Linux agent is CLOCK_MONOTONIC_RAW nanoseconds, the same as ours.
-bool localClockNs(uint64_t& out) {
+// The trace clock of a local agent is ours too: CLOCK_MONOTONIC_RAW on Linux; on Windows the ETW session is
+// started with ClientContext = 1, i.e. QueryPerformanceCounter ticks, and the MSVC STL's steady_clock is the
+// same counter (scaled to nanoseconds, same epoch). `out` is now in seconds of that clock.
+bool localClockSeconds(uint32_t platform, double& out) {
 #if TACHYON_PLATFORM_LINUX
+  if (platform != trace::kPlatformLinux) return false;
   timespec ts{};
   if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) return false;
-  out = static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ull + static_cast<uint64_t>(ts.tv_nsec);
+  out = static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) / 1e9;
+  return true;
+#elif TACHYON_PLATFORM_WINDOWS
+  if (platform != trace::kPlatformWindows) return false;
+  out = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   return true;
 #else
+  (void)platform;
   (void)out;
   return false;
 #endif
@@ -312,9 +321,9 @@ int runLive(const std::vector<std::string>& args, bool json, std::ostream& out, 
     for (const auto& c : m.samplesByThread)
       if (!c.ts.empty()) newest = std::max(newest, c.ts.back());
     double latency = -1.0;
-    uint64_t now = 0;
-    if (!remote && newest != 0 && localClockNs(now) && m.header.clock_frequency_hz == 1'000'000'000ull)
-      latency = static_cast<double>(now >= newest ? now - newest : 0) / 1e9;
+    double nowS = 0;
+    if (!remote && newest != 0 && hz > 0 && localClockSeconds(m.header.platform, nowS))
+      latency = std::max(0.0, nowS - static_cast<double>(newest) / hz);
     droppedLive = m.captureInfo.events_lost;
     if (json) {
       out << "{\"t\":" << std::fixed << std::setprecision(2) << elapsed << ",\"window_s\":" << windowS

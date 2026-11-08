@@ -36,6 +36,18 @@
 // the next segment. Events between the stop completing and the new session being configured are not
 // recorded. The gap is measured (QPC-based steady clock) and reported by diagnostics().lastFlushGapSeconds.
 // The stopped segment is converted after the new session is running, so conversion time does not widen it.
+//
+// Live view (WP-65w, docs/specs/live.md): with CaptureOptions::live the SAME kernel session also runs in
+// EVENT_TRACE_REAL_TIME_MODE, so the ETL is written as before and a RealTimeConsumer thread (OpenTrace /
+// ProcessTrace on the session name) hands the events to a LiveEtwSource, which decodes them into the
+// ILiveSink. A slow consumer loses real-time buffers (RealTimeBuffersLost), never the file's. The consumer
+// connects right after the session starts, before a launched process is created (its process / thread / image
+// events are what names its modules), and the source is armed with the root pid afterwards. Attach and system
+// captures also take a Toolhelp rundown (processes, threads, modules at the start: the kernel's own rundown
+// only comes when the session ends). A circular flush restarts the session, so the consumer is re-attached
+// to the new one; the source and the sink carry on. Known limitation: with start_immediately=false the
+// launched process was created before the session, so the modules it had mapped by then are not known live.
+//
 // Proposal to remove the gap entirely: start the next session BEFORE stopping the old one (up to 8 system
 // loggers may coexist); not done here because the work package prescribes stop-then-restart.
 #pragma once
@@ -43,7 +55,9 @@
 #include "capture/capture_backend.h"
 #include "capture/windows_etw/etw_session.h"
 #include "capture/windows_etw/launch.h"
+#include "capture/windows_etw/live_etw_source.h"
 #include "capture/windows_etw/process_tree.h"
+#include "capture/windows_etw/rt_consumer.h"
 #include "capture/windows_etw/session_config.h"
 #include "capture/windows_etw/session_lifecycle.h"
 #include "capture/windows_etw/target_watch.h"
@@ -78,6 +92,10 @@ struct WindowsEtwDiagnostics {
   uint32_t rootPid = 0;                              // launched or attached pid of the last start (0: system)
   std::vector<etw::FollowedChild> followedChildren;  // children found by the last conversion scan
   std::vector<uint32_t> targetPids;                  // pids handed to the last conversion
+  // WP-65w: the live source of the running (or last) live capture.
+  etw::LiveEtwSourceStats live;
+  etw::RealTimeConsumerStats liveConsumer;  // of the current / last session segment
+  bool liveActive = false;
 };
 
 // Thread-safe: all members may be called from any thread. start / stop / flush are serialised through the
@@ -96,6 +114,11 @@ class WindowsEtwBackend final : public ICaptureBackend, public ITargetWatch {
   Result<CaptureResult> flush(std::string name, uint32_t seconds) override;
   CaptureState state() const override;
   void setProgressCallback(std::function<void(CaptureState, float)> callback) override;
+  // WP-65w. With CaptureOptions::live the session also runs in real-time mode, a consumer thread reads it,
+  // and a LiveEtwSource decodes the events for `sink` (see live_etw_source.h): the ETL, and so the final
+  // trace, is written exactly as without it. Call before start().
+  void setLiveSink(std::shared_ptr<ILiveSink> sink) override;
+  bool supportsLive() const override { return true; }
 
   // Thread-safe. A copy of the diagnostics.
   WindowsEtwDiagnostics diagnostics() const;
@@ -114,6 +137,13 @@ class WindowsEtwBackend final : public ICaptureBackend, public ITargetWatch {
   // process (launchNow) or takes the parked one, and resumes it.
   Result<void> startRecording(const CaptureOptions& options, std::unique_ptr<etw::TargetProcess> target,
                               bool launchNow);
+  // Creates the live source and connects the real-time consumer to the running session (WP-65w).
+  Result<void> openLive(const CaptureOptions& options, const etw::SessionConfig& cfg,
+                        std::unique_ptr<etw::LiveEtwSource>& live,
+                        std::unique_ptr<etw::RealTimeConsumer>& consumer);
+  // Drains and closes the consumer (the session must be stopped), then finishes the source.
+  void shutdownLive(std::unique_ptr<etw::RealTimeConsumer>& consumer,
+                    std::unique_ptr<etw::LiveEtwSource>& live);
   etlconvert::ConvertOptions convertOptionsFor(const CaptureOptions& options, const etw::SessionConfig& cfg,
                                                const etw::SessionCounters& counters);
 
@@ -131,6 +161,9 @@ class WindowsEtwBackend final : public ICaptureBackend, public ITargetWatch {
   std::atomic<uint32_t> m_nameCounter{0};
   std::chrono::steady_clock::time_point m_startTime;
   std::function<void(CaptureState, float)> m_callback;
+  std::shared_ptr<ILiveSink> m_liveSink;
+  std::unique_ptr<etw::LiveEtwSource> m_live;         // live capture only
+  std::unique_ptr<etw::RealTimeConsumer> m_consumer;  // reads the current session segment
   WindowsEtwDiagnostics m_diag;
 };
 

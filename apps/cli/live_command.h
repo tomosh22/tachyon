@@ -15,8 +15,9 @@
 //
 // One line per interval: elapsed time, the window span, samples in the window, the five functions with the
 // most exclusive samples (module+RVA, or the absolute address; no symbols are resolved), the latency of the
-// newest sample (this machine's clock minus its timestamp: only for a local agent on Linux, "n/a" otherwise),
-// the number of live gaps survived and events the agent dropped. With --json each line is a JSON object
+// newest sample (this machine's clock minus its timestamp: only for a local agent, Linux or Windows, "n/a"
+// otherwise), the number of live gaps survived and events the agent dropped. With --json each line is a JSON
+// object
 // {"t","window_s","samples","latency_s","gaps","dropped","top":[{"name","samples","pct"}]}. At the end the
 // capture is stopped and the path of the final trace is printed. Exit codes as in cli.h.
 #pragma once

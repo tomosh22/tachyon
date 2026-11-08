@@ -136,6 +136,9 @@ struct SessionConfig {
   uint32_t enableFlags = 0;
   uint32_t profileIntervalUnits = 0;
   std::vector<StackEventId> stackEvents;
+  // WP-65w: EVENT_TRACE_REAL_TIME_MODE next to the file mode, so a consumer can read the same session while
+  // it keeps writing the ETL (CaptureOptions::live).
+  bool realTime = false;
 };
 
 inline constexpr uint32_t kMinCircularMb = 4;
