@@ -513,6 +513,7 @@ WindowsDoctorEnv makeSystemWindowsDoctorEnv(uint32_t requestedHz, const std::str
     std::error_code e;
     return fs::is_directory(p, e);
   };
+#if defined(TACHYON_HAVE_DIA)
   env.diaAvailable = [](std::string& why) {
     std::string err;
     const auto opener = symbols::makeComDiaOpener(&err);
@@ -520,6 +521,7 @@ WindowsDoctorEnv makeSystemWindowsDoctorEnv(uint32_t requestedHz, const std::str
     why = err;
     return false;
   };
+#endif  // a build without DIA leaves the check "not checked" (WARN) instead of failing it
   return env;
 }
 
