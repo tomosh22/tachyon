@@ -73,7 +73,7 @@ struct EventStore {
     auto it = std::lower_bound(v.begin() + static_cast<std::ptrdiff_t>(head), v.end(), cutoff,
                                [](const T& x, uint64_t ts) { return tsOf(x) < ts; });
     head = static_cast<size_t>(it - v.begin());
-    if (head > 4096 && head > v.size() / 2) {
+    if (head > 4096 && head > v.size() / 4) {
       v.erase(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(head));
       head = 0;
     }
@@ -113,7 +113,7 @@ struct SampleStore {
   void trim(uint64_t cutoff) {
     head = static_cast<size_t>(
         std::lower_bound(ts.begin() + static_cast<std::ptrdiff_t>(head), ts.end(), cutoff) - ts.begin());
-    if (head > 4096 && head > ts.size() / 2) {
+    if (head > 4096 && head > ts.size() / 4) {
       const auto h = static_cast<std::ptrdiff_t>(head);
       ts.erase(ts.begin(), ts.begin() + h);
       node.erase(node.begin(), node.begin() + h);

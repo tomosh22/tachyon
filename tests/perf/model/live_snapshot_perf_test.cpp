@@ -142,11 +142,11 @@ TEST(LiveModelPerf, WindowTrimmingKeepsMemoryFlatAndApplyFast) {
     for (uint64_t done = 0; done < n; done += kBatch, first += kBatch)
       ASSERT_TRUE(m.apply(bytesOf(samples(first, kBatch)), false).ok());
   };
-  feed(40);  // past the window
+  feed(50);  // past the window, and past the first compaction (at 40 s: the trimmed head reaches a quarter)
   const uint64_t atFull = m.stats().residentBytes;
-  feed(40);  // and a lot more: the window slides, memory must not grow
+  feed(30);  // and a lot more: the window slides, memory must not grow
   const LiveModelStats st = m.stats();
-  std::printf("[live perf] resident after 40 s: %.1f MiB, after 80 s: %.1f MiB, samples in window %llu\n",
+  std::printf("[live perf] resident after 50 s: %.1f MiB, after 80 s: %.1f MiB, samples in window %llu\n",
               static_cast<double>(atFull) / (1024.0 * 1024.0),
               static_cast<double>(st.residentBytes) / (1024.0 * 1024.0),
               static_cast<unsigned long long>(st.samplesInWindow));
