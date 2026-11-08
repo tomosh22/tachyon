@@ -110,8 +110,10 @@ struct Geometry {
   std::vector<LodLevelInfo> levels;
   uint32_t step = 2;
   uint32_t platform = 0;
-  // Fine strip level (see lod.h): half the base bucket width, strip data only. fineCount == 0 when absent.
+  // Fine strip level (see lod.h): 1/fineSplit of the base bucket width (a quarter, or a half when the base
+  // level is L1), strip data only. fineCount == 0 when absent.
   uint32_t fineLevel = 0;
+  uint32_t fineSplit = 4;  // fine buckets per base bucket (power of two)
   uint64_t fineWidth = 0;
   uint32_t fineCount = 0;
 };
@@ -347,7 +349,7 @@ class ThreadBuilder {
     m_out = &out;
     m_acc.assign(levels, Agg{});
     const bool fine = m_g.fineCount > 0;
-    const uint64_t half = fine ? m_g.fineWidth : 0;
+    const uint64_t fineW = fine ? m_g.fineWidth : 0;
 
     const SampleView sv = sampleView(m_m, m_g, thread);
     const auto& ivs = statesOf(m_m, thread);
@@ -355,8 +357,7 @@ class ThreadBuilder {
     const uint32_t n0 = m_g.levels[0].bucketCount;
     size_t k = 0, j = 0;
     Agg cur;
-    fineHist[0].reserve(8);
-    fineHist[1].reserve(8);
+    for (auto& h : fineHist) h.reserve(8);
     for (uint32_t b = 0; b < n0; ++b) {
       if ((b & 4095u) == 0 && m_cancel && m_cancel->load(std::memory_order_relaxed))
         return makeError(ErrorCode::Cancelled, "LOD build cancelled");
@@ -364,9 +365,10 @@ class ThreadBuilder {
       const uint64_t be = std::min(bs + w0, m_g.end);
       cur.reset();
       if (fine) {
-        fineHist[0].clear();
-        fineHist[1].clear();
-        fineCover[0] = fineCover[1] = 0;
+        for (uint32_t q = 0; q < m_g.fineSplit; ++q) {
+          fineHist[q].clear();
+          fineCover[q] = 0;
+        }
       }
       while (j < ivs.size() && ivs[j].end <= bs) ++j;
       for (size_t q = j; q < ivs.size() && ivs[q].start < be; ++q) {
@@ -397,16 +399,18 @@ class ThreadBuilder {
         else if (!m_nt.isAncestor(cur.lca, leaf))
           cur.lca = m_nt.lca(cur.lca, leaf);
         cur.maxDepth = std::max(cur.maxDepth, m_nt.depth[leaf]);
-        if (fine) {  // the same piece split at the middle of the base bucket
-          const uint64_t mid = bs + half;
-          if (lo < mid) addFine(0, leaf, std::min(hi, mid) - lo);
-          if (hi > mid) addFine(1, leaf, hi - std::max(lo, mid));
+        if (fine) {  // the same piece split at the fine bucket edges of the base bucket
+          const uint32_t q0 = static_cast<uint32_t>((lo - bs) / fineW);
+          const uint32_t q1 = static_cast<uint32_t>((hi - 1 - bs) / fineW);
+          for (uint32_t q = q0; q <= q1; ++q) {
+            const uint64_t qs = bs + q * fineW;
+            addFine(q, leaf, std::min(hi, qs + fineW) - std::max(lo, qs));
+          }
         }
       }
       std::sort(cur.hist.begin(), cur.hist.end(), [](const Entry& a, const Entry& c) { return a.cs < c.cs; });
       if (fine) {
-        emitFine(2ull * b, 0);
-        emitFine(2ull * b + 1, 1);
+        for (uint32_t q = 0; q < m_g.fineSplit; ++q) emitFine(static_cast<uint64_t>(b) * m_g.fineSplit + q, q);
       }
       propagate(0, b, cur);
     }
@@ -428,7 +432,7 @@ class ThreadBuilder {
     }
   }
 
-  void addFine(int half, uint32_t leaf, uint64_t ticks) {
+  void addFine(uint32_t half, uint32_t leaf, uint64_t ticks) {
     fineCover[half] += ticks;
     for (Entry& e : fineHist[half]) {
       if (e.cs == leaf) {
@@ -439,9 +443,9 @@ class ThreadBuilder {
     fineHist[half].push_back({ticks, leaf});
   }
 
-  // Writes fine bucket `idx` (no-op beyond the trace) from the tallies of half 0 or 1 of the current base
-  // bucket.
-  void emitFine(uint64_t idx, int half) {
+  // Writes fine bucket `idx` (no-op beyond the trace) from the tallies of part `half` (0..fineSplit-1) of the
+  // current base bucket.
+  void emitFine(uint64_t idx, uint32_t half) {
     if (idx >= m_g.fineCount || fineCover[half] == 0) return;
     const Entry* best = &fineHist[half][0];
     for (const Entry& e : fineHist[half])
@@ -537,8 +541,8 @@ class ThreadBuilder {
   ThreadLod* m_out = nullptr;
   std::vector<Agg> m_acc;
   std::vector<Entry> m_scratch;
-  std::vector<Entry> fineHist[2];
-  uint64_t fineCover[2] = {0, 0};
+  std::vector<Entry> fineHist[4];
+  uint64_t fineCover[4] = {0, 0, 0, 0};
 };
 
 // Stable counting sort of the closed spans by depth (closing order is time order within a depth).
@@ -968,7 +972,8 @@ Result<TimelineLod> TimelineLod::prepare(const TraceModel& model, const LodOptio
   // Fine strip level: half the base bucket, for pixel spans between half the base width and the base width.
   if (!degraded && options.fineStrip && options.forceBaseLevel < 0 && base >= 1 &&
       model.nodes.size() < kFineMaxNodes) {
-    g.fineLevel = base - 1;
+    g.fineLevel = base >= 2 ? base - 2 : base - 1;  // a quarter of the base bucket (WP-68), a half at L1
+    g.fineSplit = 1u << (base - g.fineLevel);
     g.fineWidth = widthOf(g.fineLevel);
     g.fineCount = static_cast<uint32_t>(countAt(g.total, g.fineLevel));
   }
@@ -1318,6 +1323,115 @@ struct StripAcc {
   }
 };
 
+// Strip columns from the fine strip level (packed 32-bit cells, bucket width 1 << shift), the strip half of
+// fusedLevelPass: a fixed-trip masked loop of K slots per column (a column holds at most K bucket starts),
+// no data-dependent branch. Buckets weigh their effective width (w, except the last bucket of the level when
+// the trace end clips it: the column holding that one takes `slow`).
+template <uint32_t K, class Slow>
+void fineStripPass(const uint32_t* fine, uint64_t start, uint64_t end, uint64_t bucketCount, uint32_t shift,
+                   uint64_t t0, uint64_t t1, uint32_t pixels, StripColumn* cols, Slow&& slow) {
+  const uint64_t w = 1ull << shift;
+  const uint64_t lo = std::max(t0, start), hi = std::max(lo, std::min(t1, end));
+  const uint64_t first = (lo - start + w - 1) >> shift;
+  const uint64_t last = std::min<uint64_t>(bucketCount, (hi - start + w - 1) >> shift);
+  const bool partialTail = bucketCount > 0 && start + bucketCount * w > end;
+
+  Sweep sw(t0, t1, pixels);
+  uint32_t c = 0;
+  uint64_t i = first;
+  if (first < last) {
+    sw.seek(start + first * w);
+    c = sw.cur.column();
+  }
+  for (uint32_t k = 0; k < c; ++k) cols[k] = StripColumn{};
+  while (i < last) {
+    const uint64_t colEnd = sw.colEnd;
+    const uint64_t bj = std::min<uint64_t>(last, (colEnd - start + w - 1) >> shift);
+    const uint32_t n = static_cast<uint32_t>(bj > i ? bj - i : 0);
+    if (n == 0) {
+      cols[c] = StripColumn{};
+    } else if (partialTail && bj == bucketCount) {
+      slow(i, n, sw.cur, cols[c]);
+    } else {
+      uint32_t doms[K], ests[K], covs[K];
+      uint32_t coverSum = 0;
+      for (uint32_t j = 0; j < K; ++j) {
+        const uint64_t idx = i + std::min<uint64_t>(j, n - 1);
+        const uint32_t v = fine[idx];
+        const uint32_t dom = v & kFineNone;
+        const uint32_t vmask = (j < n && dom != kFineNone) ? 0xFFFFFFFFu : 0u;
+        const uint32_t cov = (v >> 28) & vmask;
+        doms[j] = dom;
+        covs[j] = vmask;
+        ests[j] = cov * ((v >> 24) & 15u);
+        coverSum += cov;
+      }
+      StripColumn column;
+      if (coverSum > 0) {
+        uint64_t bestKey = 0;
+        for (uint32_t x = 0; x < K; ++x) {
+          uint32_t e = 0;
+          for (uint32_t y = 0; y < K; ++y) e += doms[y] == doms[x] ? (ests[y] & covs[y]) : 0u;
+          const uint64_t key = (static_cast<uint64_t>(e) << 32) | (0xFFFFFFFFu - doms[x]);
+          bestKey = (covs[x] != 0 && key > bestKey) ? key : bestKey;
+        }
+        column.stack = CallstackIdx(0xFFFFFFFFu - static_cast<uint32_t>(bestKey));
+        column.share =
+            std::min(1.0f, static_cast<float>(bestKey >> 32) / (15.0f * static_cast<float>(coverSum)));
+        column.coverage =
+            std::min(1.0f, static_cast<float>(coverSum) * toFloat(w) / (15.0f * toFloat(sw.cur.width())));
+      }
+      cols[c] = column;
+    }
+    i = std::max<uint64_t>(i, bj);
+    ++c;
+    if (i < last) sw.advance();
+  }
+  for (; c < pixels; ++c) cols[c] = StripColumn{};
+}
+
+// Fine-level strip of one query through fineStripPass. False (nothing written) when a column could hold more
+// than 4 bucket starts, which the zoom rule excludes; the caller then uses its generic pass.
+bool fineStripColumns(const Geometry& g, const uint32_t* fine, uint64_t t0, uint64_t t1, uint32_t pixels,
+                      StripColumn* cols) {
+  const uint32_t shift = 6 + g.fineLevel;
+  const uint64_t k = ((t1 - t0) / pixels + 1 + g.fineWidth - 1) >> shift;
+  if (k > 4) return false;
+  auto slow = [&](uint64_t i, uint32_t n, const ColumnCursor& cur, StripColumn& out) {
+    const uint64_t w = g.fineWidth;
+    StripAcc acc;
+    for (uint32_t j = 0; j < n; ++j) {
+      const uint64_t idx = i + j;
+      const uint32_t v = fine[idx];
+      if ((v & kFineNone) == kFineNone) continue;
+      const uint64_t ew = std::min(w, g.end - (g.start + idx * w));
+      const uint64_t cover = ew * fineCoverage15(v);
+      acc.add(v & kFineNone, cover * fineShare15(v));
+      acc.cover += cover;
+    }
+    out = StripColumn{};
+    if (acc.n > 0 && acc.cover > 0) {
+      uint32_t best = 0;
+      for (uint32_t x = 1; x < acc.n; ++x)
+        if (acc.est[x] > acc.est[best] || (acc.est[x] == acc.est[best] && acc.cs[x] < acc.cs[best])) best = x;
+      out.stack = CallstackIdx(acc.cs[best]);
+      out.share = std::min(1.0f, toFloat(acc.est[best]) / (15.0f * toFloat(acc.cover)));
+      out.coverage = std::min(1.0f, toFloat(acc.cover) / (15.0f * toFloat(cur.width())));
+    }
+  };
+  auto run = [&](auto kTag) {
+    fineStripPass<decltype(kTag)::value>(fine, g.start, g.end, g.fineCount, shift, t0, t1, pixels, cols, slow);
+  };
+  switch (k) {
+    case 0:
+    case 1: run(std::integral_constant<uint32_t, 1>{}); break;
+    case 2: run(std::integral_constant<uint32_t, 2>{}); break;
+    case 3: run(std::integral_constant<uint32_t, 3>{}); break;
+    default: run(std::integral_constant<uint32_t, 4>{}); break;
+  }
+  return true;
+}
+
 }  // namespace
 
 Result<void> TimelineLod::stateBands(const StateBandQuery& q, StateBandResult& out) const {
@@ -1453,8 +1567,14 @@ Result<void> TimelineLod::sampleStrip(const SampleStripQuery& q, SampleStripResu
   const size_t t = q.thread.get();
   out.pending = false;
   out.level = kDirectLevel;
-  out.columns.assign(q.pixelWidth, StripColumn{});
   const int lv = q.mode == QueryMode::Direct ? -1 : im.selectLevel(q.t1 - q.t0, q.pixelWidth);
+  const bool useFine = lv < 0 && q.mode == QueryMode::Auto && im.geo.fineCount > 0 &&
+                       !im.fineDropped.load(std::memory_order_relaxed) &&
+                       (q.t1 - q.t0) / q.pixelWidth >= im.geo.fineWidth && im.isReady(t);
+  if (useFine)  // the fast fine pass writes every column
+    out.columns.resize(q.pixelWidth);
+  else
+    out.columns.assign(q.pixelWidth, StripColumn{});
   Sweep sw(q.t0, q.t1, q.pixelWidth);
   StripColumn* const cols = out.columns.data();
 
@@ -1515,12 +1635,14 @@ Result<void> TimelineLod::sampleStrip(const SampleStripQuery& q, SampleStripResu
     return {};
   }
 
-  // Fine strip level: pixel spans between half the base width and the base width (an approximation like every
-  // level; the exact direct path below serves narrower pixels and threads that are not built yet).
-  if (q.mode == QueryMode::Auto && im.geo.fineCount > 0 && !im.fineDropped.load(std::memory_order_relaxed) &&
-      (q.t1 - q.t0) / q.pixelWidth >= im.geo.fineWidth && im.isReady(t)) {
-    out.level = static_cast<uint8_t>(im.geo.fineLevel);
+  // Fine strip level: pixel spans between the fine bucket width and the base width (a quarter of it, WP-68; an
+  // approximation like every level; the exact direct path below serves narrower pixels and threads that are
+  // not built yet).
+  if (useFine) {
     const uint32_t* fine = im.threads[t].fine.data();
+    out.level = static_cast<uint8_t>(im.geo.fineLevel);
+    if (fineStripColumns(im.geo, fine, q.t0, q.t1, q.pixelWidth, cols)) return {};
+    std::fill(out.columns.begin(), out.columns.end(), StripColumn{});
     lodPass(im.geo.fineWidth, im.geo.fineCount,
             [&](uint64_t i, uint32_t& dom, uint64_t& coverage, uint64_t& share) {
               const uint32_t v = fine[i];

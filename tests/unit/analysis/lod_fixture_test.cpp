@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <map>
 #include <string>
 #include <tuple>
@@ -586,7 +587,13 @@ TEST(LodPasses, BandAndStripMatchBucketReferenceOnMedium) {
   checkLodPassesAgainstBuckets(fixture("medium"), 3);
 }
 
-// ---- WP-36b: fine strip level ----
+// ---- WP-36b / WP-68: fine strip level (a quarter of the base bucket; a half when the base level is L1) ----
+namespace {
+uint32_t fineLevelOf(uint32_t baseLevel) {
+  return baseLevel >= 2 ? baseLevel - 2 : baseLevel - 1;
+}
+}  // namespace
+
 TEST(LodFine, StripOfOneFineBucketPerColumnMatchesBruteForce) {
   for (const char* name : {"tiny", "medium"}) {
     const TraceModel& m = fixture(name);
@@ -594,7 +601,7 @@ TEST(LodFine, StripOfOneFineBucketPerColumnMatchesBruteForce) {
     ASSERT_TRUE(lod.ok());
     const uint32_t baseLevel = lod->levels().front().level;
     ASSERT_GE(baseLevel, 1u) << name;
-    const uint64_t fineW = (64ull << baseLevel) / 2;
+    const uint64_t fineW = 64ull << fineLevelOf(baseLevel);
     const uint64_t start = m.header.start_ts;
     const uint32_t n = 200;
     ASSERT_GT(m.header.end_ts - start, (n + 2) * fineW);
@@ -608,7 +615,7 @@ TEST(LodFine, StripOfOneFineBucketPerColumnMatchesBruteForce) {
       SampleStripResult r;
       ASSERT_TRUE(lod->sampleStrip(sq, r).ok());
       EXPECT_FALSE(r.pending);
-      EXPECT_EQ(r.level, baseLevel - 1) << name;
+      EXPECT_EQ(r.level, fineLevelOf(baseLevel)) << name;
       for (uint32_t c = 0; c < n; ++c) {
         const uint64_t a = t0 + c * fineW, b = a + fineW;
         const BruteStrip s = bruteStrip(m, ext, a, b);
@@ -630,12 +637,69 @@ TEST(LodFine, StripOfOneFineBucketPerColumnMatchesBruteForce) {
   }
 }
 
+// WP-68: pixel spans of 1.5 .. 3.9 fine buckets (between a quarter and the whole base width) are answered
+// from the fine level; each fine bucket goes to the column containing its start (like every stored level),
+// so the answer is approximate: the dominant leaf must agree with the exact tally on most columns and the
+// sampled fraction stay close. The window reaching the trace end exercises the clipped last bucket.
+TEST(LodFine, WiderPixelsAreAnsweredFromTheFineLevelWithinTheErrorBound) {
+  for (const char* name : {"tiny", "medium"}) {
+    const TraceModel& m = fixture(name);
+    auto lod = buildLod(m);
+    ASSERT_TRUE(lod.ok());
+    const uint32_t baseLevel = lod->levels().front().level;
+    ASSERT_GE(baseLevel, 2u) << name;
+    const uint64_t fineW = 64ull << fineLevelOf(baseLevel);
+    const uint64_t start = m.header.start_ts, end = m.header.end_ts;
+    const uint32_t n = 120;
+    size_t checked = 0, agree = 0;
+    double coverageError = 0;
+    for (const double f : {1.5, 2.0, 2.7, 3.3, 3.9}) {
+      const uint64_t pixel = static_cast<uint64_t>(static_cast<double>(fineW) * f);
+      ASSERT_LT(pixel, 64ull << baseLevel);
+      ASSERT_GT(end - start, (n + 4) * pixel);
+      for (const bool atEnd : {false, true}) {
+        const uint64_t t0 = atEnd ? end - n * pixel + pixel / 3 : start + (end - start) / 3, t1 = t0 + n * pixel;
+        for (size_t t = 0; t < std::min<size_t>(m.threads.size(), 6); ++t) {
+          const ThreadIdx th(static_cast<uint32_t>(t));
+          const auto ext = extents(m, t);
+          SampleStripQuery sq{th, t0, t1, n, QueryMode::Auto};
+          SampleStripResult r;
+          ASSERT_TRUE(lod->sampleStrip(sq, r).ok());
+          ASSERT_EQ(r.level, fineLevelOf(baseLevel)) << name << " f " << f;
+          RowQuery rq{th, t0, t1, n, QueryMode::Auto};
+          StateBandResult band;
+          SampleStripResult fused;
+          ASSERT_TRUE(lod->rowColumns(rq, band, fused).ok());
+          for (uint32_t c = 0; c < n; ++c) {
+            ASSERT_EQ(fused.columns[c].stack, r.columns[c].stack);
+            ASSERT_EQ(fused.columns[c].share, r.columns[c].share);
+            const uint64_t a = pixelEdge(t0, t1, n, c), b = pixelEdge(t0, t1, n, c + 1);
+            const BruteStrip s = bruteStrip(m, ext, a, std::min(b, end));
+            if (s.cover == 0) continue;
+            ++checked;
+            agree += r.columns[c].stack.get() == s.dominant;
+            coverageError += std::abs(r.columns[c].coverage -
+                                      static_cast<double>(s.cover) / static_cast<double>(b - a));
+            EXPECT_LE(r.columns[c].coverage, 1.0f);
+            EXPECT_LE(r.columns[c].share, 1.0f);
+          }
+        }
+      }
+    }
+    ASSERT_GT(checked, 500u) << name;
+    EXPECT_GT(static_cast<double>(agree) / static_cast<double>(checked), 0.4) << name;  // measured 0.51 .. 0.62 (synthetic stacks are flat)
+    EXPECT_LT(coverageError / static_cast<double>(checked), 0.1) << name;
+    std::printf("[lod fine] %s: dominant agrees on %zu of %zu columns, mean coverage error %.4f\n", name, agree,
+                checked, coverageError / static_cast<double>(checked));
+  }
+}
+
 TEST(LodFine, ThreadNotBuiltYetIsAnsweredDirectlyAndOptionsDisableTheLevel) {
   const TraceModel& m = fixture("tiny");
   auto prepared = TimelineLod::prepare(m);
   ASSERT_TRUE(prepared.ok());
   const uint32_t baseLevel = prepared->levels().front().level;
-  const uint64_t fineW = (64ull << baseLevel) / 2;
+  const uint64_t fineW = 64ull << fineLevelOf(baseLevel);
   SampleStripQuery sq{ThreadIdx(0), m.header.start_ts + fineW, m.header.start_ts + fineW + 50 * fineW, 50,
                       QueryMode::Auto};
   SampleStripResult before;
@@ -645,7 +709,7 @@ TEST(LodFine, ThreadNotBuiltYetIsAnsweredDirectlyAndOptionsDisableTheLevel) {
   ASSERT_TRUE(prepared->build().ok());
   SampleStripResult after;
   ASSERT_TRUE(prepared->sampleStrip(sq, after).ok());
-  EXPECT_EQ(after.level, baseLevel - 1);
+  EXPECT_EQ(after.level, fineLevelOf(baseLevel));
 
   LodOptions off;
   off.fineStrip = false;

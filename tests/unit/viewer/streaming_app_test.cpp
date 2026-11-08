@@ -143,6 +143,44 @@ TEST(StreamingApp, ThePreviewIsShownFirstAndTheCompleteDocumentReplacesItKeeping
   EXPECT_EQ(h.app.selection().state().selectedThread, ThreadIdx(2));
 }
 
+// WP-68: the complete document's symbol run adopts what the preview's run finished (same module table):
+// nothing is located or loaded again, and both services index one string table.
+TEST(StreamingApp, TheCompleteDocumentAdoptsThePreviewsFinishedSymbols) {
+  auto gate = std::make_shared<Gate>();
+  Harness h(gate);
+  h.app.openFile(fixture("medium.tachyon"));
+  ASSERT_TRUE(h.until([&] { return h.app.document() != nullptr && h.app.document()->symbols() != nullptr; }));
+  const std::shared_ptr<Document> preview = h.app.document();
+  ASSERT_TRUE(preview->isPreview());
+  const std::shared_ptr<symbols::SymbolService> previewSymbols = preview->symbols();
+  ASSERT_TRUE(h.until([&] {
+    const symbols::SymbolProgress p = previewSymbols->progress();
+    return p.total > 0 && p.done == p.total;
+  }));
+  const uint32_t modules = previewSymbols->progress().total;
+  EXPECT_GT(previewSymbols->modulesLoaded(), 0u);
+  EXPECT_EQ(previewSymbols->modulesAdopted(), 0u);
+
+  gate->open();
+  ASSERT_TRUE(h.until([&] { return h.app.document() && !h.app.document()->isPreview(); }));
+  const std::shared_ptr<Document> full = h.app.document();
+  ASSERT_TRUE(h.until([&] { return full->symbols() != nullptr; }));
+  const std::shared_ptr<symbols::SymbolService> fullSymbols = full->symbols();
+  EXPECT_NE(fullSymbols.get(), previewSymbols.get());
+  ASSERT_TRUE(h.until([&] {
+    const symbols::SymbolProgress p = fullSymbols->progress();
+    return p.total > 0 && p.done == p.total;
+  }));
+  EXPECT_EQ(fullSymbols->progress().total, modules);
+  EXPECT_EQ(fullSymbols->modulesLoaded(), 0u) << "no module is located or loaded again";
+  EXPECT_EQ(fullSymbols->modulesAdopted(), modules);
+  EXPECT_EQ(&fullSymbols->symbolStrings(), &previewSymbols->symbolStrings());
+  // The frames of the complete model resolve through the adopted providers.
+  size_t resolved = 0;
+  for (uint32_t f = 0; f < full->model().frames.size(); ++f) resolved += fullSymbols->lookup(FrameIdx(f)).resolved;
+  EXPECT_GT(resolved, 0u);
+}
+
 TEST(StreamingApp, AViewThatShowedTheWholePreviewShowsTheWholeTraceOnceItIsComplete) {
   auto gate = std::make_shared<Gate>();
   Harness h(gate);
