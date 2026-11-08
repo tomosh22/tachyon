@@ -90,12 +90,14 @@ class SymbolService {
   // `previous` had not finished (its run is cancelled here) and modules whose record differs are resolved
   // normally. Returns the number of finished modules of `previous`. It cancels `previous`'s run first
   // (joining its workers, like cancel()), takes over the cache-file pins of the adopted modules, and leaves
-  // `previous` usable for lookups. Call once, before resolveAllAsync(), after the configuration calls and
-  // after any configureLocator() (it pins in this service's locator). Not thread-safe against anything else
-  // of this service; against `previous` it follows cancel() (the owning thread, no concurrent
-  // resolveAllAsync/waitAll). `previous`'s const queries on other threads stay valid meanwhile and
-  // afterwards, and `previous` may be destroyed at once. The providers are shared by both services: they
-  // are thread-safe after load() (ISymbolProvider), so queries through either service may overlap.
+  // `previous` usable for lookups while the model it resolved is alive (lookups read that model's frames;
+  // its workers must be stopped, e.g. by cancel(), before that model is freed). Call once, before
+  // resolveAllAsync(), after the configuration calls and after any configureLocator() (it pins in this
+  // service's locator). Not thread-safe against anything else of this service; against `previous` it follows
+  // cancel() (the owning thread, no concurrent resolveAllAsync/waitAll). `previous`'s const queries on other
+  // threads stay valid meanwhile and afterwards, and `previous` may be destroyed at once. The providers are
+  // shared by both services: they are thread-safe after load() (ISymbolProvider), so queries through either
+  // service may overlap.
   size_t adoptRun(SymbolService& previous);
 
   // Starts resolution of every module referenced by a frame of `model` and returns immediately. Workers

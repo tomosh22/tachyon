@@ -541,6 +541,9 @@ void App::onDocumentLoaded(std::shared_ptr<Document> document) {
   // ThreadRec that only the later chunks mention): the kept selection is mapped by pid/tid.
   std::function<ThreadIdx(ThreadIdx)> threadMap;
   if (continuation) threadMap = threadMapBetween(m_document->model(), document->model());
+  // The preview's workers read its model's frame table: stop them (cancel() joins them and keeps finished
+  // modules adoptable) before the preview document, and with it that model, can be freed.
+  if (previousSymbols) previousSymbols->cancel();
   m_document = std::move(document);
   ++m_documentGeneration;
   ++m_symbolGeneration;

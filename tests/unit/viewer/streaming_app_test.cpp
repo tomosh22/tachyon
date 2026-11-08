@@ -2,6 +2,8 @@
 // complete document replaces it with the user's place kept, closing the preview abandons the load, and a
 // newer open supersedes a load in flight. The loading thread is held at a gate while the test looks at the
 // preview.
+#include "symbols/json_symbol_provider.h"
+#include "symbols/symbol_service.h"
 #include "viewer/app.h"
 #include "viewer/timeline/timeline_panel.h"
 
@@ -22,6 +24,9 @@ using namespace tachyon::viewer::timeline;
 namespace fs = std::filesystem;
 
 namespace {
+
+// Optional symbol configuration for the next Harness (set by a test, cleared by it).
+std::function<void(symbols::SymbolService&)> g_configureSymbols;
 
 fs::path fixture(const char* name) {
   return fs::path(TACHYON_GENERATED_FIXTURE_DIR) / name;
@@ -77,6 +82,7 @@ class Harness {
     o.streamMinFileBytes = 0;  // stream even the small fixtures
     o.streamStages = std::move(stages);
     o.streamGate = [gate] { gate->block(); };
+    if (g_configureSymbols) o.configureSymbols = g_configureSymbols;
     return o;
   }
   bool until(const std::function<bool()>& pred, int seconds = 60) {
@@ -267,3 +273,60 @@ TEST(StreamingApp, SmallFilesAndDisabledStreamingLoadInOneGo) {
 }
 
 }  // namespace
+
+// WP-68 regression: the preview's symbol workers are still loading when the complete document replaces the
+// preview. They read the preview model's frame table, so they must be stopped before that model is freed
+// (heap-use-after-free under ASan before the fix). Panels are closed so nothing else keeps the model alive.
+TEST(StreamingApp, APreviewSymbolRunStillLoadingIsStoppedBeforeThePreviewIsFreed) {
+  std::atomic<int> loads{0};
+  // A provider load of the preview's run waits until the preview model is gone (the window the bug needs) or
+  // 5 s pass (with the fix, the swap joins the run first, so the wait ends by its timeout).
+  std::mutex watchMutex;
+  std::weak_ptr<const model::TraceModel> watched;
+  std::atomic<bool> armed{false};
+  g_configureSymbols = [&](symbols::SymbolService& svc) {
+    symbols::SymbolService* sp = &svc;
+    svc.setProviderFactory(
+        [sp, &loads, &watchMutex, &watched, &armed](
+            const symbols::Module&, const fs::path& file) -> std::unique_ptr<symbols::ISymbolProvider> {
+          ++loads;
+          const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+          while (std::chrono::steady_clock::now() < until) {
+            if (armed.load()) {
+              const std::lock_guard<std::mutex> lock(watchMutex);
+              if (watched.expired()) break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+          }
+          if (file.extension() == ".json")
+            return std::make_unique<symbols::JsonSymbolProvider>(sp->stringSink());
+          return nullptr;
+        });
+  };
+  {
+    auto gate = std::make_shared<Gate>();
+    Harness h(gate);
+    for (PanelEntry& e : h.app.panels().entries()) e.open = false;
+    h.app.openFile(fixture("medium.tachyon"));
+    ASSERT_TRUE(
+        h.until([&] { return h.app.document() != nullptr && h.app.document()->symbols() != nullptr; }));
+    ASSERT_TRUE(h.until([&] { return loads.load() > 0; }, 20)) << "the preview's run is loading a provider";
+    std::weak_ptr<const model::TraceModel> previewModel = h.app.document()->sharedModel();
+    {
+      const std::lock_guard<std::mutex> lock(watchMutex);
+      watched = previewModel;
+    }
+    armed = true;
+    gate->open();
+    ASSERT_TRUE(h.until([&] { return h.app.document() && !h.app.document()->isPreview(); }));
+    EXPECT_TRUE(previewModel.expired()) << "nothing else holds the preview model in this test";
+    h.frames(20);
+    ASSERT_TRUE(h.until(
+        [&] {
+          return h.app.document()->symbols()->progress().done ==
+                 h.app.document()->symbols()->progress().total;
+        },
+        60));
+  }
+  g_configureSymbols = nullptr;
+}
