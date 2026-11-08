@@ -119,12 +119,14 @@ Result<void> WindowsEtwBackend::openLive(const CaptureOptions& options, const Se
 }
 
 void WindowsEtwBackend::shutdownLive(std::unique_ptr<etw::RealTimeConsumer>& consumer,
-                                     std::unique_ptr<etw::LiveEtwSource>& live) {
+                                     std::unique_ptr<etw::LiveEtwSource>& live,
+                                     WindowsEtwDiagnostics::LiveStop* stop) {
   etw::RealTimeConsumerStats cs;
   if (consumer) {
     // The session is stopped: ProcessTrace delivers what is left and returns by itself.
     consumer->stop(std::chrono::seconds(10));
     cs = consumer->stats();
+    if (stop != nullptr) stop->eventsFinal = cs.events;
     consumer.reset();
   }
   if (live) {
@@ -138,6 +140,7 @@ void WindowsEtwBackend::shutdownLive(std::unique_ptr<etw::RealTimeConsumer>& con
     std::lock_guard lock(m_mutex);
     m_diag.live = ls;
     m_diag.liveConsumer = cs;
+    if (stop != nullptr) m_diag.liveStop = *stop;
     m_diag.liveActive = false;
   }
 }
@@ -482,18 +485,24 @@ Result<CaptureResult> WindowsEtwBackend::stop() {
     return e;
   };
 
+  WindowsEtwDiagnostics::LiveStop liveStop;
   if (consumer) {
     // Events still in the session's buffers reach a real-time consumer only when they are flushed first.
+    liveStop.eventsBeforeFlush = consumer->stats().events;
+    const auto flushBegan = std::chrono::steady_clock::now();
     auto flushed = session->flushBuffers();
     if (flushed.ok())
-      consumer->waitQuiet(std::chrono::milliseconds(250), std::chrono::seconds(3));
+      consumer->waitQuiet(std::chrono::milliseconds(250), std::chrono::milliseconds(1500),
+                          std::chrono::seconds(4));
     else
       TACHYON_LOG_WARN("etw: flush before stop failed: {}", flushed.error().toString());
+    liveStop.flushWaitSeconds = secondsSince(flushBegan);
+    liveStop.eventsAfterFlushWait = consumer->stats().events;
   }
   auto counters = session->stop();
   // The session has stopped (or could not): the consumer drains what is left, then the source decodes the
   // rest and ends the live stream, before the (slow) conversion starts.
-  shutdownLive(consumer, live);
+  shutdownLive(consumer, live, &liveStop);
   if (!counters.ok()) return finishFailed(counters.error());
   const fs::path etl = session->config().etlPath;
   session.reset();
@@ -561,7 +570,8 @@ Result<CaptureResult> WindowsEtwBackend::flush(std::string name, uint32_t second
   auto flushed = old->flushBuffers();
   if (!flushed.ok()) TACHYON_LOG_WARN("etw: flush before stop failed: {}", flushed.error().toString());
   if (flushed.ok() && oldConsumer)
-    oldConsumer->waitQuiet(std::chrono::milliseconds(250), std::chrono::seconds(3));
+    oldConsumer->waitQuiet(std::chrono::milliseconds(250), std::chrono::milliseconds(1500),
+                           std::chrono::seconds(4));
   auto counters = old->stop();
   const auto stoppedAt = std::chrono::steady_clock::now();
   const fs::path oldEtl = oldCfg.etlPath;

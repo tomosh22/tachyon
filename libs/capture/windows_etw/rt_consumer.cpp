@@ -136,24 +136,31 @@ Result<std::unique_ptr<RealTimeConsumer>> RealTimeConsumer::start(const std::str
   return std::unique_ptr<RealTimeConsumer>(new RealTimeConsumer(std::move(impl)));
 }
 
-void RealTimeConsumer::waitQuiet(std::chrono::milliseconds quiet, std::chrono::milliseconds maxWait) {
+void RealTimeConsumer::waitQuiet(std::chrono::milliseconds quiet, std::chrono::milliseconds firstWait,
+                                 std::chrono::milliseconds maxWait) {
   Impl& s = *m_impl;
   using Clock = std::chrono::steady_clock;
-  const auto deadline = Clock::now() + maxWait;
+  const auto began = Clock::now();
+  const auto deadline = began + maxWait;
   uint64_t seen = s.buffers.load();
-  auto lastChange = Clock::now();
+  bool changed = false;
+  auto lastChange = began;
   while (Clock::now() < deadline) {
     {
       std::lock_guard lock(s.mutex);
       if (s.done) return;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    const uint64_t now = s.buffers.load();
-    if (now != seen) {
-      seen = now;
-      lastChange = Clock::now();
-    } else if (Clock::now() - lastChange >= quiet) {
+    const auto now = Clock::now();
+    const uint64_t buffers = s.buffers.load();
+    if (buffers != seen) {
+      seen = buffers;
+      changed = true;
+      lastChange = now;
+    } else if (changed && now - lastChange >= quiet) {
       return;
+    } else if (!changed && now - began >= firstWait) {
+      return;  // nothing was pending
     }
   }
 }
@@ -229,7 +236,8 @@ RealTimeConsumerStats RealTimeConsumer::stats() const {
   return {};
 }
 
-void RealTimeConsumer::waitQuiet(std::chrono::milliseconds, std::chrono::milliseconds) {}
+void RealTimeConsumer::waitQuiet(std::chrono::milliseconds, std::chrono::milliseconds,
+                                 std::chrono::milliseconds) {}
 
 }  // namespace tachyon::capture::etw
 

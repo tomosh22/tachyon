@@ -334,6 +334,17 @@ std::vector<uint64_t> targetSampleTs(const model::TraceModel& m) {
   return out;
 }
 
+uint64_t countBelow(const std::vector<uint64_t>& ts, uint64_t limit) {
+  uint64_t n = 0;
+  for (uint64_t t : ts) n += t < limit ? 1 : 0;
+  return n;
+}
+
+// The last second or so of a session is not guaranteed to reach a real-time consumer (the events that are
+// still in ETW's buffers when the session stops), so live and final are compared up to this long before the
+// final trace's last sample.
+constexpr double kTailSeconds = 1.5;
+
 // Samples per second of trace time, counted from `t0`, as "n0 n1 n2 ...".
 std::string secondsHistogram(const std::vector<uint64_t>& ts, uint64_t t0) {
   const double freq = static_cast<double>(etw::traceClockFrequency());
@@ -482,9 +493,22 @@ TEST_F(EtwLiveTest, AgentSpinLive) {
     report("live  samples per second from the same instant:  " + secondsHistogram(liveTs, first));
   }
   EXPECT_GT(liveSamples, 10000u);
-  EXPECT_NEAR(static_cast<double>(liveSamples), static_cast<double>(finalSamples),
-              0.03 * static_cast<double>(finalSamples) + 100)
-      << "the live window holds the same samples as the final trace's range";
+  {
+    const std::vector<uint64_t> finalTs = targetSampleTs(*finalModel);
+    const std::vector<uint64_t> liveTs = targetSampleTs(*finalSnap);
+    const uint64_t last = finalTs.empty() ? 0 : *std::max_element(finalTs.begin(), finalTs.end());
+    const uint64_t limit =
+        last - static_cast<uint64_t>(kTailSeconds * static_cast<double>(etw::traceClockFrequency()));
+    const uint64_t liveBelow = countBelow(liveTs, limit), finalBelow = countBelow(finalTs, limit);
+    report("samples before the last " + std::to_string(kTailSeconds) +
+           " s: live=" + std::to_string(liveBelow) + " final=" + std::to_string(finalBelow));
+    EXPECT_NEAR(static_cast<double>(liveBelow), static_cast<double>(finalBelow),
+                0.005 * static_cast<double>(finalBelow) + 50)
+        << "the live window misses no sample except in the last second";
+    EXPECT_LT(finalSamples - std::min(finalSamples, liveSamples),
+              static_cast<uint64_t>(kTailSeconds * 8200) + 200)
+        << "at most the tail is missing";
+  }
   for (const char* fn : {"hot_a", "hot_b", "hot_c", "spin_rest"}) {
     const double l = live.count(fn) ? live.at(fn) : 0.0, f = fin.count(fn) ? fin.at(fn) : 0.0;
     report(std::string("share ") + fn + " live=" + std::to_string(l) + " final=" + std::to_string(f));
@@ -568,9 +592,26 @@ TEST_F(EtwLiveTest, LiveDoesNotChangeTheFinalTrace) {
   EXPECT_EQ(sink.dropped, 0u);
   EXPECT_EQ(d.live.droppedEvents, 0u);
   EXPECT_EQ(d.live.metaLost, 0u);
-  EXPECT_NEAR(static_cast<double>(sink.samples), static_cast<double>(live->counts.targetSamples),
-              0.05 * static_cast<double>(live->counts.targetSamples) + 100)
-      << "samples decoded live vs samples in the final trace";
+  {
+    const double f = static_cast<double>(etw::traceClockFrequency());
+    const uint64_t limit = live->counts.lastSampleTs - static_cast<uint64_t>(kTailSeconds * f);
+    const uint64_t liveBelow = countBelow(sink.sampleTs, limit);
+    const uint64_t finalBelow = countBelow(live->counts.sampleTs, limit);
+    report("samples before the last " + std::to_string(kTailSeconds) +
+           " s: live=" + std::to_string(liveBelow) + " final=" + std::to_string(finalBelow) +
+           "; in total live=" + std::to_string(sink.samples) +
+           " final=" + std::to_string(live->counts.targetSamples));
+    EXPECT_NEAR(static_cast<double>(liveBelow), static_cast<double>(finalBelow),
+                0.005 * static_cast<double>(finalBelow) + 50)
+        << "the live path misses no sample except in the last second";
+    EXPECT_LT(live->counts.targetSamples - std::min<uint64_t>(live->counts.targetSamples, sink.samples),
+              static_cast<uint64_t>(kTailSeconds * 8200) + 200)
+        << "at most the tail is missing";
+  }
+  report("stop: flush + wait " + std::to_string(d.liveStop.flushWaitSeconds) +
+         " s; consumer events before flush " + std::to_string(d.liveStop.eventsBeforeFlush) +
+         ", after the flush wait " + std::to_string(d.liveStop.eventsAfterFlushWait) +
+         ", after the session stopped " + std::to_string(d.liveStop.eventsFinal));
   EXPECT_NEAR(static_cast<double>(sink.switches), static_cast<double>(live->counts.switches),
               0.25 * static_cast<double>(live->counts.switches) + 100);
   EXPECT_GT(sink.heartbeats, 20u);

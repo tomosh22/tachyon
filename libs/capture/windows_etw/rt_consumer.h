@@ -43,10 +43,12 @@ class RealTimeConsumer {
   RealTimeConsumer(const RealTimeConsumer&) = delete;
   RealTimeConsumer& operator=(const RealTimeConsumer&) = delete;
 
-  // Thread-safe. Waits until no ETW buffer has reached the consumer for `quiet`, at most `maxWait`. Call it
-  // after ControlTrace(FLUSH): the events still sitting in the session's buffers are then delivered, and
-  // without the flush a session that is stopped right away does not hand them to a real-time consumer.
-  void waitQuiet(std::chrono::milliseconds quiet, std::chrono::milliseconds maxWait);
+  // Thread-safe. Call it after ControlTrace(FLUSH): waits until a buffer has reached the consumer (at most
+  // `firstWait`: there may be nothing pending) and then no further buffer has for `quiet`, at most `maxWait`
+  // in all. Events still sitting in the session's buffers are delivered to a real-time consumer by the
+  // flush; a session that is stopped without one hands them over late or not at all.
+  void waitQuiet(std::chrono::milliseconds quiet, std::chrono::milliseconds firstWait,
+                 std::chrono::milliseconds maxWait);
   // Thread-safe, idempotent. Waits up to `drain` for ProcessTrace to return by itself (the session was
   // stopped, so it delivers the buffers that are left first), then closes the trace and joins the thread.
   void stop(std::chrono::milliseconds drain);

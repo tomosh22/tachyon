@@ -96,6 +96,13 @@ struct WindowsEtwDiagnostics {
   etw::LiveEtwSourceStats live;
   etw::RealTimeConsumerStats liveConsumer;  // of the current / last session segment
   bool liveActive = false;
+  // What the last stop() did to hand the tail of the session to the live consumer.
+  struct LiveStop {
+    double flushWaitSeconds = 0;        // ControlTrace(FLUSH) + wait for the consumer to catch up
+    uint64_t eventsBeforeFlush = 0;     // events the consumer had seen when stop() began
+    uint64_t eventsAfterFlushWait = 0;  // ... after the flush and the wait
+    uint64_t eventsFinal = 0;           // ... after the session was stopped and the consumer drained
+  } liveStop;
 };
 
 // Thread-safe: all members may be called from any thread. start / stop / flush are serialised through the
@@ -143,7 +150,8 @@ class WindowsEtwBackend final : public ICaptureBackend, public ITargetWatch {
                         std::unique_ptr<etw::RealTimeConsumer>& consumer);
   // Drains and closes the consumer (the session must be stopped), then finishes the source.
   void shutdownLive(std::unique_ptr<etw::RealTimeConsumer>& consumer,
-                    std::unique_ptr<etw::LiveEtwSource>& live);
+                    std::unique_ptr<etw::LiveEtwSource>& live,
+                    WindowsEtwDiagnostics::LiveStop* stop = nullptr);
   etlconvert::ConvertOptions convertOptionsFor(const CaptureOptions& options, const etw::SessionConfig& cfg,
                                                const etw::SessionCounters& counters);
 
