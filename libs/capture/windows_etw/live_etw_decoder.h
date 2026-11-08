@@ -51,6 +51,11 @@ struct LiveEtwDecoderConfig {
   etlconvert::DevicePathMapper deviceMapper;
 };
 
+// How long after its Process End event a process stays in the tables. The samples, switches and images of a
+// process's last moments reach the decoder after the End event when the buffers of the CPUs are delivered in
+// another order (or the data is held back, see LiveEtwSource): they are still attributed to it.
+inline constexpr uint64_t kEndedGraceSeconds = 5;
+
 struct LiveEtwDecoderStats {
   uint64_t events = 0;
   uint64_t samples = 0;   // handed to the sink
@@ -103,11 +108,17 @@ class LiveEtwDecoder final : private etlconvert::ParentListener {
   void onParentDone(etlconvert::PendingParent& parent) override;
 
   bool systemMode() const { return m_roots.empty(); }
-  bool isTarget(uint32_t pid) const { return m_targets.count(pid) != 0; }
-  bool keepPid(uint32_t pid) const { return pid != 0 && (systemMode() || isTarget(pid)); }
+  // `pid` is a target at trace time `ts` (0: whenever): from its start until its Process End event.
+  bool isTarget(uint32_t pid, uint64_t ts = 0) const {
+    const auto it = m_targets.find(pid);
+    return it != m_targets.end() && (ts == 0 || ts <= it->second);
+  }
+  bool keepPid(uint32_t pid, uint64_t ts = 0) const {
+    return pid != 0 && (systemMode() || isTarget(pid, ts));
+  }
   // The pid a thread belongs to (thread table, then `fallbackPid`), 0 when unknown.
   uint32_t pidOfThread(uint32_t tid, uint32_t fallbackPid) const;
-  bool keepThread(uint32_t tid, uint32_t fallbackPid) const;
+  bool keepThread(uint32_t tid, uint32_t fallbackPid, uint64_t ts = 0) const;
 
   void onProcessEvent(const etlconvert::EtwEvent& e);
   void onThreadEvent(const etlconvert::EtwEvent& e);
@@ -126,13 +137,19 @@ class LiveEtwDecoder final : private etlconvert::ParentListener {
                   uint32_t timeDateStamp, uint64_t loadTs);
   void unloadModule(uint32_t pid, uint64_t base, uint64_t ts);
   void unloadAllModules(uint32_t pid, uint64_t ts);
+  // A process that ended is forgotten only some time later (see kEndedGraceSeconds); `all` forgets them now.
+  void reapEnded(bool all);
+  void reapProcess(uint32_t pid, uint64_t endTs);
   void pruneThreads();
 
   LiveEtwDecoderConfig m_cfg;
   ILiveSink& m_sink;
   LiveEtwDecoderStats m_stats;
   std::vector<uint32_t> m_roots;
-  std::unordered_set<uint32_t> m_targets;  // pids that are targets right now
+  // pid -> trace time of its Process End (kStillRunning while it runs): the pids that are targets.
+  std::unordered_map<uint32_t, uint64_t> m_targets;
+  // pid -> Process End time, for every process that ended and has not been forgotten yet.
+  std::unordered_map<uint32_t, uint64_t> m_ended;
   ProcessTreeTracker m_tracker;
   etlconvert::ModuleTable m_modules;
   std::unique_ptr<etlconvert::StackMatcher> m_matcher;

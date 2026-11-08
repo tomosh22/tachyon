@@ -414,6 +414,59 @@ TEST(LiveEtwDecoder, UnloadsModulesAtImageUnloadAndProcessEnd) {
   EXPECT_EQ(sink->process(100)->endTs, 60u);
 }
 
+TEST(LiveEtwDecoder, WhatPrecedesAProcessEndIsKeptEvenWhenItArrivesAfterIt) {
+  // The buffers of the CPUs are delivered in any order, so the last samples of a process can reach the
+  // decoder after its Process End event. They belong to it; samples after the End do not.
+  using namespace opcodes;
+  EventScript s;
+  s.process(kProcessStart, 10, 100, 4, "game.exe");
+  s.thread(kThreadStart, 11, 100, 101);
+  s.image(kImageLoad, 12, 100, kGameBase, 0x10000, 0x5F001234, kGamePath);
+  s.process(kProcessEnd, 1000, 100, 4, "game.exe");
+  s.sample(900, 101, 100, 0, kGameBase + 0x10);   // older than the End, delivered after it
+  s.sample(1100, 101, 100, 0, kGameBase + 0x10);  // after the End: not the target's
+  auto sink = std::make_shared<RecordingSink>();
+  LiveEtwDecoder decoder(decoderConfig(sink));
+  for (const HexEvent& e : s.events()) decoder.onEvent(e.view());
+  decoder.flush();
+  ASSERT_EQ(sink->samples.size(), 1u);
+  EXPECT_EQ(sink->samples[0].ts, 900u);
+  EXPECT_EQ(sink->samples[0].pid, 100u);
+  EXPECT_EQ(decoder.stats().droppedNotTarget, 1u);
+  // The process was reported when it started and when it ended, not again for the late sample.
+  EXPECT_EQ(sink->processes.size(), 2u);
+  EXPECT_EQ(sink->process(100)->endTs, 1000u);
+  // Its modules are unloaded at the End's timestamp, but only once the End is well in the past.
+  const LiveModule* exe = sink->module(100, kGameBase, true);
+  ASSERT_NE(exe, nullptr);
+  EXPECT_EQ(exe->unloadTs, 1000u);
+}
+
+TEST(LiveEtwDecoder, AnEndedProcessIsForgottenAfterTheGracePeriod) {
+  using namespace opcodes;
+  EventScript s;
+  s.process(kProcessStart, 10, 100, 4, "game.exe");
+  s.image(kImageLoad, 12, 100, kGameBase, 0x10000, 0x5F001234, kGamePath);
+  s.process(kProcessEnd, 1000, 100, 4, "game.exe");
+  auto sink = std::make_shared<RecordingSink>();
+  LiveEtwDecoder decoder(decoderConfig(sink));
+  for (const HexEvent& e : s.events()) decoder.onEvent(e.view());
+  EXPECT_EQ(sink->module(100, kGameBase, true), nullptr) << "still within the grace period";
+  EventScript later;
+  later.sample(1000 + kEndedGraceSeconds * 10'000'000 + 1, 999, 999, 0, 0x10);  // any later event moves time
+  for (const HexEvent& e : later.events()) decoder.onEvent(e.view());
+  ASSERT_NE(sink->module(100, kGameBase, true), nullptr);
+  EXPECT_EQ(sink->module(100, kGameBase, true)->unloadTs, 1000u);
+  // The pid can be reused by an unrelated process: it is not a target.
+  EventScript reuse;
+  reuse.process(kProcessStart, 1000 + kEndedGraceSeconds * 10'000'000 + 10, 100, 4, "other.exe");
+  reuse.thread(kThreadStart, 1000 + kEndedGraceSeconds * 10'000'000 + 11, 100, 555);
+  reuse.sample(1000 + kEndedGraceSeconds * 10'000'000 + 20, 555, 100, 0, 0x10);
+  for (const HexEvent& e : reuse.events()) decoder.onEvent(e.view());
+  decoder.flush();
+  EXPECT_TRUE(sink->samples.empty());
+}
+
 TEST(LiveEtwDecoder, RundownGivesThreadsNamesAndModulesOfTheTarget) {
   RundownSnapshot snap;
   snap.processes = {{100, 4, "game.exe"}, {200, 4, "other.exe"}};

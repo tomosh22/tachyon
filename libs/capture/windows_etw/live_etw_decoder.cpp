@@ -16,6 +16,7 @@ using etlconvert::PendingParent;
 
 constexpr size_t kMaxThreadEntries = 200'000;
 constexpr uint32_t kInvalidPid = 0xFFFFFFFFu;
+constexpr uint64_t kStillRunning = ~uint64_t{0};
 
 uint32_t cleanPid(uint32_t pid) {
   return pid == kInvalidPid ? 0 : pid;
@@ -29,7 +30,7 @@ LiveEtwDecoder::LiveEtwDecoder(LiveEtwDecoderConfig config)
       m_roots(m_cfg.rootPids),
       m_tracker(m_cfg.rootPids, m_cfg.followChildren, m_cfg.childFilter),
       m_modules(m_cfg.peLookup, m_cfg.deviceMapper) {
-  for (uint32_t pid : m_roots) m_targets.insert(pid);
+  for (uint32_t pid : m_roots) m_targets[pid] = kStillRunning;
   const uint64_t windowTicks = m_cfg.clockFrequencyHz * m_cfg.stackWindowMs / 1000;
   m_matcher = std::make_unique<etlconvert::StackMatcher>(windowTicks,
                                                          static_cast<etlconvert::ParentListener&>(*this));
@@ -44,11 +45,11 @@ uint32_t LiveEtwDecoder::pidOfThread(uint32_t tid, uint32_t fallbackPid) const {
   return cleanPid(fallbackPid);
 }
 
-bool LiveEtwDecoder::keepThread(uint32_t tid, uint32_t fallbackPid) const {
+bool LiveEtwDecoder::keepThread(uint32_t tid, uint32_t fallbackPid, uint64_t ts) const {
   if (tid == 0) return false;
   const uint32_t pid = pidOfThread(tid, fallbackPid);
   if (systemMode()) return true;  // unknown pid or not: system mode keeps everything
-  return isTarget(pid);
+  return isTarget(pid, ts);
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -82,10 +83,28 @@ void LiveEtwDecoder::onEvent(const EtwEvent& e) {
   }
   m_newestTs = std::max(m_newestTs, e.timestamp);
   m_matcher->advance(m_newestTs);
+  if (!m_ended.empty()) reapEnded(false);
 }
 
 void LiveEtwDecoder::flush() {
   m_matcher->flush();
+  reapEnded(true);
+}
+
+void LiveEtwDecoder::reapEnded(bool all) {
+  const uint64_t grace = kEndedGraceSeconds * m_cfg.clockFrequencyHz;
+  std::vector<std::pair<uint32_t, uint64_t>> due;
+  for (const auto& [pid, endTs] : m_ended)
+    if (all || m_newestTs > endTs + grace) due.emplace_back(pid, endTs);
+  std::sort(due.begin(), due.end());
+  for (const auto& [pid, endTs] : due) reapProcess(pid, endTs);
+}
+
+void LiveEtwDecoder::reapProcess(uint32_t pid, uint64_t endTs) {
+  unloadAllModules(pid, endTs);
+  m_targets.erase(pid);
+  m_procs.erase(pid);
+  m_ended.erase(pid);
 }
 
 void LiveEtwDecoder::onProcessEvent(const EtwEvent& e) {
@@ -98,7 +117,10 @@ void LiveEtwDecoder::onProcessEvent(const EtwEvent& e) {
   }
   const uint32_t pid = p->processId;
   if (pid == 0) return;
-  if (m_tracker.onEvent(e)) m_targets.insert(pid);  // a followed child (Start) or an existing one (DCStart)
+  // A new process with the pid of one that ended: forget the old one first.
+  if (e.opcode == op::kProcessStart)
+    if (const auto old = m_ended.find(pid); old != m_ended.end()) reapProcess(pid, old->second);
+  if (m_tracker.onEvent(e)) m_targets[pid] = kStillRunning;  // a followed child (Start) or an existing one
   auto it = m_procs.find(pid);
   switch (e.opcode) {
     case op::kProcessStart: {
@@ -108,7 +130,7 @@ void LiveEtwDecoder::onProcessEvent(const EtwEvent& e) {
       proc.commandLine = std::move(p->commandLine);
       proc.startTs = e.timestamp;
       m_procs[pid] = std::move(proc);
-      if (keepPid(pid)) emitProcess(pid);
+      if (keepPid(pid, e.timestamp)) emitProcess(pid);
       break;
     }
     case op::kProcessDcStart:
@@ -124,17 +146,18 @@ void LiveEtwDecoder::onProcessEvent(const EtwEvent& e) {
         it->second.commandLine = std::move(p->commandLine);
       }
       // DCEnd is the end-of-session rundown: it only completes what is already reported.
-      if (keepPid(pid) && (e.opcode == op::kProcessDcStart || it->second.emitted)) emitProcess(pid);
+      if (keepPid(pid, e.timestamp) && (e.opcode == op::kProcessDcStart || it->second.emitted))
+        emitProcess(pid);
       break;
     }
     case op::kProcessEnd: {
       if (it != m_procs.end()) {
         it->second.endTs = e.timestamp;
-        if (it->second.emitted || keepPid(pid)) emitProcess(pid);
-        m_procs.erase(it);
+        if (it->second.emitted || keepPid(pid, e.timestamp)) emitProcess(pid);
       }
-      unloadAllModules(pid, e.timestamp);
-      m_targets.erase(pid);
+      // The process is forgotten later: what it did just before it ended may still be on its way here.
+      if (const auto t = m_targets.find(pid); t != m_targets.end()) t->second = e.timestamp;
+      m_ended[pid] = e.timestamp;
       break;
     }
     default: break;
@@ -165,7 +188,7 @@ void LiveEtwDecoder::onThreadEvent(const EtwEvent& e) {
         it = m_threads.insert_or_assign(tid, std::move(t)).first;
       }
       // DCEnd (end-of-session rundown) only completes what is known.
-      if (keepPid(pid) && (e.opcode != op::kThreadDcEnd || it->second.emitted)) emitThread(tid);
+      if (keepPid(pid, e.timestamp) && (e.opcode != op::kThreadDcEnd || it->second.emitted)) emitThread(tid);
       break;
     }
     case op::kThreadEnd: {
@@ -197,7 +220,7 @@ void LiveEtwDecoder::onSetName(const EtwEvent& e) {
     it = m_threads.emplace(p->threadId, std::move(t)).first;
   }
   it->second.name = std::move(p->name);
-  if (keepPid(it->second.pid)) emitThread(p->threadId);
+  if (keepPid(it->second.pid, e.timestamp)) emitThread(p->threadId);
 }
 
 void LiveEtwDecoder::onImageEvent(const EtwEvent& e) {
@@ -212,7 +235,7 @@ void LiveEtwDecoder::onImageEvent(const EtwEvent& e) {
   }
   if (img->imageBase >= etlconvert::kKernelAddressBase) return;  // kernel frames stay absolute addresses
   const uint32_t pid = img->processId;
-  if (!keepPid(pid)) return;
+  if (!keepPid(pid, e.timestamp)) return;
   if (e.opcode == op::kImageUnload) {
     unloadModule(pid, img->imageBase, e.timestamp);
   } else {
@@ -228,7 +251,7 @@ void LiveEtwDecoder::onSample(const EtwEvent& e) {
     return;
   }
   const uint32_t fallbackPid = e.threadId == s->threadId ? e.processId : 0;
-  if (s->threadId == 0 || !keepThread(s->threadId, fallbackPid)) {
+  if (s->threadId == 0 || !keepThread(s->threadId, fallbackPid, e.timestamp)) {
     ++m_stats.droppedNotTarget;
     return;
   }
@@ -248,7 +271,7 @@ void LiveEtwDecoder::onCSwitch(const EtwEvent& e) {
     ++m_stats.malformed;
     return;
   }
-  if (!keepThread(c->newThreadId, 0) && !keepThread(c->oldThreadId, 0)) {
+  if (!keepThread(c->newThreadId, 0, e.timestamp) && !keepThread(c->oldThreadId, 0, e.timestamp)) {
     ++m_stats.droppedNotTarget;
     return;
   }
@@ -275,7 +298,7 @@ void LiveEtwDecoder::onReady(const EtwEvent& e) {
   }
   // The readying thread is the header thread; its stack is kept even when it belongs to another process, as
   // long as the readied thread is a target.
-  if (!keepThread(r->threadId, 0) && !keepThread(e.threadId, e.processId)) {
+  if (!keepThread(r->threadId, 0, e.timestamp) && !keepThread(e.threadId, e.processId, e.timestamp)) {
     ++m_stats.droppedNotTarget;
     return;
   }
@@ -338,8 +361,8 @@ void LiveEtwDecoder::onParentDone(PendingParent& p) {
       cs.newPriority = p.bytes[3];
       cs.flags = p.hasStack() && p.stackThread != p.tidB ? trace::kSwitchFlagStackFromOtherThread : 0u;
       if (p.hasStack()) cs.oldStack = p.frames;
-      if (keepPid(cs.newPid)) ensureThread(cs.newTid, cs.newPid);
-      if (keepPid(cs.oldPid)) ensureThread(cs.oldTid, cs.oldPid);
+      if (keepPid(cs.newPid, p.ts)) ensureThread(cs.newTid, cs.newPid);
+      if (keepPid(cs.oldPid, p.ts)) ensureThread(cs.oldTid, cs.oldPid);
       m_sink.onContextSwitch(cs);
       ++m_stats.switches;
       break;
@@ -355,7 +378,7 @@ void LiveEtwDecoder::onParentDone(PendingParent& p) {
       rd.adjustReason = p.bytes[0];
       rd.flags = p.bytes[1];
       if (p.hasStack()) rd.readyingStack = p.frames;
-      if (keepPid(rd.readiedPid)) ensureThread(rd.readiedTid, rd.readiedPid);
+      if (keepPid(rd.readiedPid, p.ts)) ensureThread(rd.readiedTid, rd.readiedPid);
       m_sink.onReady(rd);
       ++m_stats.readies;
       break;
@@ -400,7 +423,7 @@ void LiveEtwDecoder::emitThread(uint32_t tid) {
   lt.startTs = t.startTs != 0 ? t.startTs : m_cfg.startTs;
   lt.endTs = t.endTs;
   lt.name = t.name;
-  lt.isTarget = isTarget(t.pid);
+  lt.isTarget = isTarget(t.pid);  // at some time
   t.emitted = true;
   m_sink.onThread(lt);
 }
