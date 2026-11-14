@@ -22,7 +22,11 @@ std::string WarningsBanner::keyOf(const std::filesystem::path& path) {
 void WarningsBanner::recollect(const Document& document) {
   std::vector<std::string> agent;
   if (const auto it = m_agentWarnings.find(m_key); it != m_agentWarnings.end()) agent = it->second;
-  m_warnings = collectCaptureWarnings(document.model(), agent);
+  // WP-65b: a Live snapshot is partial by nature and its dropped-event count is on the status bar.
+  if (!document.isLive())
+    m_warnings = collectCaptureWarnings(document.model(), agent);
+  else
+    m_warnings.clear();
   for (const CaptureWarning& n : m_notices) m_warnings.push_back(n);
 }
 
@@ -45,7 +49,8 @@ void WarningsBanner::update(const Document* document, uint64_t documentGeneratio
     return;
   }
   m_agentDirty = false;
-  m_notices.clear();
+  if (!(document && document->isLive() && m_haveDocument && keyOf(document->path()) == m_key))
+    m_notices.clear();  // (the notices of a live capture survive its snapshots)
   if (!document) {
     m_haveDocument = false;
     m_generation = documentGeneration;

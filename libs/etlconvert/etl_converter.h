@@ -18,11 +18,13 @@
 #include "core/result.h"
 #include "etlconvert/etl_events.h"
 #include "etlconvert/module_table.h"
+#include "trace/trace_writer.h"
 
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -66,6 +68,8 @@ struct ConvertOptions {
   size_t batchEvents = 32768;    // events per batch
   PeLookupFn peLookup;           // empty: read real files (after device path conversion)
   const DevicePathMapper* deviceMapper = nullptr;  // null: DevicePathMapper::fromSystem()
+  // WP-66b (appended): the file reserved at the output path; the trace is written into exactly that file.
+  std::optional<trace::TraceWriter::ReservedFile> reservedOutput;
 };
 
 // Facts about the ETL file (from the ETW logfile header on Windows).

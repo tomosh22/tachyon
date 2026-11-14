@@ -14,6 +14,7 @@
 #include "control/client.h"
 #include "control/fetch.h"
 #include "control/protocol.h"
+#include "model/live_model.h"
 
 #include <atomic>
 #include <chrono>
@@ -62,6 +63,29 @@ enum class AgentEventKind : uint8_t {
   CommandFailed,   // a command was refused or failed (command, code, message)
   Flushed,         // the agent wrote a flushed trace of a circular capture (flushed), whoever asked
   ProcessList,     // answer of listProcesses() (processes, or message when the request failed)
+  LiveGap,         // WP-65b: the agent dropped this client's live stream (message); the session resubscribes
+  LiveEnded,       // WP-65b: live_end: the live capture is over
+  LiveFailed,      // WP-65b: the live stream cannot be kept (message): a second corrupt batch, a refusal
+};
+
+// WP-65b: the state of the live feed (the live_subscribe stream of a capture started with live = true).
+struct LiveFeedStatus {
+  enum class State : uint8_t {
+    Off,          // no live capture of this viewer
+    Subscribing,  // started; waiting for the agent to be capturing so live_subscribe is accepted
+    Streaming,    // batches arrive and are applied to the LiveModel
+    Resyncing,    // after a gap or a corrupt batch: waiting for the keyframe of the new subscription
+    Ended,        // live_end (or the connection went away)
+    Failed        // gave up (error)
+  } state = State::Off;
+  uint64_t seq = 0;             // sequence number of the newest batch applied
+  uint64_t events = 0;          // live events applied
+  uint64_t bytes = 0;           // payload bytes applied
+  uint32_t gaps = 0;            // live_gap events received
+  uint32_t resubscribes = 0;    // live_subscribe calls after the first
+  uint32_t corruptBatches = 0;  // batches LiveModel::apply refused
+  std::string error;            // Failed: why
+  std::chrono::steady_clock::time_point lastEventAt{};
 };
 
 struct AgentEvent {
@@ -117,6 +141,9 @@ class AgentSession {
   // WP-61. Asks the agent for its process list; the answer arrives as a ProcessList event (the Attach dialog
   // of a remote agent: the processes are those of the other machine).
   void listProcesses();
+  // WP-65b. Stops the live feed of this viewer: sends live_unsubscribe and ignores whatever is in flight.
+  // The capture itself goes on.
+  void stopLiveFeed();
 
   // ---- observation (thread-safe) ----
   AgentSnapshot snapshot() const;
@@ -126,6 +153,19 @@ class AgentSession {
   control::StartRequest lastStartRequest() const;
   // True while events are queued.
   bool hasEvents() const;
+
+  // ---- WP-65b: live view ----
+  // Thread-safe. The model that `live` events are applied to (on the worker thread, which is the one writer;
+  // LiveModel is internally locked, so another thread may snapshot() it meanwhile). Set it BEFORE start() of
+  // a request with live = true: the session subscribes by itself once the agent is capturing, resubscribes
+  // after a live_gap and once after a corrupt batch (a second one is a LiveFailed event), and ends the feed
+  // at live_end. Null stops applying events.
+  void setLiveModel(std::shared_ptr<model::LiveModel> model);
+  // Thread-safe.
+  LiveFeedStatus liveStatus() const;
+  // Thread-safe. Called on the worker after a batch was applied (the live document wakes its snapshot
+  // thread); must be cheap and thread-safe. Set before the first start().
+  void setLiveNotify(std::function<void()> notify);
 
  private:
   struct Command {
@@ -138,7 +178,8 @@ class AgentSession {
       Cancel,
       Flush,
       Refresh,
-      Processes
+      Processes,
+      LiveOff
     } kind = Kind::Refresh;
     std::string address;
     std::string tokenFile;
@@ -150,11 +191,19 @@ class AgentSession {
   };
 
   void post(Command command);
+  // Live feed (worker thread).
+  bool doCall(const char* name, control::RequestBody body);
+  void onLiveEvent(const control::Event& event);
+  void beginLiveFeed();
+  void tryLiveSubscribe();
+  void resubscribeLive(const char* why);
+  void failLive(const std::string& message);
+  void endLiveFeed(const std::string& why);
+  void pollLive();
   bool commandPending() const;
   void workerMain();
   void handleCommand(const Command& command);
   void doConnect(const Command& command);
-  void doCall(const char* name, control::RequestBody body);
   void pollStatus();
   void applyStatus(const control::StatusBody& status);
   void applyEvent(const control::Event& event);
@@ -178,6 +227,20 @@ class AgentSession {
   bool m_quit = false;
   std::atomic<bool> m_quitFlag{false};  // m_quit, readable without m_mutex
   bool m_workerStarted = false;
+
+  // WP-65b. m_liveModel / m_liveStatus / m_liveNotify are guarded by m_mutex; the flags below are
+  // worker-only.
+  std::shared_ptr<model::LiveModel> m_liveModel;
+  LiveFeedStatus m_liveStatus;
+  std::function<void()> m_liveNotify;
+  bool m_liveWanted = false;      // a live start succeeded: keep (re)subscribing
+  bool m_liveSubscribed = false;  // live_subscribe was accepted and the stream is not over
+  bool m_liveIgnore = false;      // drop live events until the pending (re)subscribe is answered
+  bool m_liveResync = false;      // a gap / corrupt batch: resubscribe at the next opportunity
+  std::string m_liveResyncWhy;
+  std::chrono::steady_clock::time_point m_lastCorruptAt{};
+  std::chrono::steady_clock::time_point m_lastLiveTry{};
+  int m_liveIdlePolls = 0;
 
   std::mutex m_linkMutex;  // guards m_activeClient (shutdown closes it from another thread)
   control::Client* m_activeClient = nullptr;

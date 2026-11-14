@@ -17,6 +17,10 @@
 #include <iterator>
 #include <tuple>
 
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
+
 namespace tachyon::inst {
 namespace {
 
@@ -31,6 +35,11 @@ using namespace trace;
 std::vector<char> readBytes(const fs::path& p) {
   std::ifstream in(p, std::ios::binary);
   return std::vector<char>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+std::string text(const fs::path& p) {
+  const auto b = readBytes(p);
+  return std::string(b.begin(), b.end());
 }
 
 size_t countFiles(const fs::path& dir) {
@@ -187,6 +196,83 @@ TEST(Merge, InPlaceGoesThroughATemporaryFileAndLeavesNothingBehind) {
   EXPECT_EQ(reader->readScopeEvents().value().size(), 6u);
   expectSamplingDataEqual(base.path, copy);
 }
+
+#if !defined(_WIN32)
+TEST(Merge, TheReportCarriesTheIdentityOfTheFileRenamedIntoPlace) {
+  TempDir dir;
+  const BaseTrace base = writeBaseTrace(dir.path() / "base.tachyon");
+  const fs::path copy = dir.path() / "copy.tachyon";
+  fs::copy_file(base.path, copy);
+  const fs::path inst = sampleInstrumentation().write(dir.path() / "app.tachyon-inst");
+  const MergeInput in{inst};
+  auto merged = mergeInstrumentation(copy, std::span<const MergeInput>(&in, 1));
+  ASSERT_TRUE(merged.ok()) << merged.error().toString();
+  ASSERT_TRUE(merged->outputIdentity.has_value());
+  struct stat st {};
+  ASSERT_EQ(::stat(copy.c_str(), &st), 0);
+  EXPECT_EQ(merged->outputIdentity->volume, static_cast<uint64_t>(st.st_dev));
+  EXPECT_EQ(merged->outputIdentity->index, static_cast<uint64_t>(st.st_ino));
+}
+
+// WP-66b: the temporary file is created exclusively and written through its reservation; the final rename
+// replaces a link at the destination instead of writing through it.
+TEST(Merge, ALinkAtTheDestinationIsReplacedNotWrittenThrough) {
+  TempDir dir;
+  const BaseTrace base = writeBaseTrace(dir.path() / "base.tachyon");
+  const fs::path victim = dir.path() / "victim.txt";
+  std::ofstream(victim) << "PRECIOUS";
+  const fs::path link = dir.path() / "out.tachyon";
+  fs::create_symlink(victim, link);
+  const fs::path inst = sampleInstrumentation().write(dir.path() / "app.tachyon-inst");
+  MergeOptions opts;
+  opts.outPath = link;
+  const MergeInput in{inst};
+  auto merged = mergeInstrumentation(base.path, std::span<const MergeInput>(&in, 1), opts);
+  ASSERT_TRUE(merged.ok()) << merged.error().toString();
+  EXPECT_EQ(text(victim), "PRECIOUS");
+  EXPECT_FALSE(fs::is_symlink(link));
+  EXPECT_TRUE(TraceReader::open(link).ok());
+}
+
+TEST(Merge, TheTemporaryFileIsNeverAnExistingOrLinkedName) {
+  // The reservation the merge uses refuses anything that is already there, links included.
+  TempDir dir;
+  const fs::path victim = dir.path() / "victim.txt";
+  std::ofstream(victim) << "PRECIOUS";
+  const fs::path link = dir.path() / "t.tmp";
+  fs::create_symlink(victim, link);
+  auto reserved = trace::TraceWriter::reserveNew(link);
+  ASSERT_FALSE(reserved.ok());
+  EXPECT_EQ(reserved.error().code, ErrorCode::Busy);
+  FileHeader h{};
+  EXPECT_FALSE(trace::TraceWriter::open(link, h).ok());
+  EXPECT_EQ(text(victim), "PRECIOUS");
+}
+
+TEST(Merge, AMergeOfAPartialTraceKeepsThePartialFlagAndLeavesNoTemporaryFile) {
+  TempDir dir;
+  const BaseTrace base = writeBaseTrace(dir.path() / "base.tachyon");
+  // Cut the footer off: the trace is read by scanning and counts as partial.
+  const fs::path partial = dir.path() / "partial.tachyon";
+  {
+    auto bytes = readBytes(base.path);
+    auto reader = TraceReader::open(base.path);
+    ASSERT_TRUE(reader.ok());
+    bytes.resize(reader->header().footer_offset);
+    std::ofstream out(partial, std::ios::binary);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  }
+  const fs::path inst = sampleInstrumentation().write(dir.path() / "app.tachyon-inst");
+  const MergeInput in{inst};
+  auto merged = mergeInstrumentation(partial, std::span<const MergeInput>(&in, 1));
+  ASSERT_TRUE(merged.ok()) << merged.error().toString();
+  auto reader = TraceReader::open(partial);
+  ASSERT_TRUE(reader.ok());
+  EXPECT_NE(reader->header().flags & kFlagPartial, 0u);
+  EXPECT_NE(reader->header().footer_offset, 0u);
+  EXPECT_EQ(countFiles(dir.path()), 3u);
+}
+#endif
 
 TEST(Merge, OutPathEqualToTheInputCountsAsInPlace) {
   TempDir dir;

@@ -55,8 +55,9 @@ endif()
 
 # WP-65a: the live view's Linux acceptance (docs/specs/live.md section 5): the real agent (--backend perf), the
 # testbed's spin scenario, the client library and a LiveModel. Latency, window, shares vs the final trace, flat
-# memory, no live_gap. $TACHYON_LIVE_ACCEPTANCE_SECONDS shortens the 60 s run. Skips like the tests above.
-tachyon_add_test(live_capture_linux_tests
+# memory, no live_gap. $TACHYON_LIVE_ACCEPTANCE_SECONDS shortens the 60 s run. Skips like the tests above. SERIAL:
+# latency and sample counts depend on free cores.
+tachyon_add_test(live_capture_linux_tests SERIAL
   SOURCES live_capture_test.cpp ../../unit/agent/process_util.cpp
   DEPS tachyon::capture_linux_perf tachyon::capture tachyon::control tachyon::model tachyon::symbols
        tachyon::trace
@@ -66,3 +67,8 @@ if(TARGET live_capture_linux_tests)
                                                               TACHYON_AGENT_EXE="$<TARGET_FILE:tachyon-agent>")
   add_dependencies(live_capture_linux_tests tachyon-testbed tachyon-agent)
 endif()
+
+# WP-66b: the converter's output is opened without following a link (no perf_event_open needed).
+tachyon_add_test(perf_output_linux_tests
+  SOURCES perf_output_test.cpp
+  DEPS tachyon::capture_linux_perf tachyon::capture tachyon::trace)

@@ -32,10 +32,12 @@
 
 #include "capture/linux_perf/spool.h"
 #include "core/result.h"
+#include "trace/trace_writer.h"
 
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -60,6 +62,8 @@ struct ConvertOptions {
   // a "(deleted)" file is read through procRoot/<pid>/map_files).
   std::function<std::filesystem::path(uint32_t pid, std::string_view recordedPath)> fileMapper;
   std::function<void(float)> progress;
+  // WP-66b (appended): the file reserved at the output path; the trace is written into exactly that file.
+  std::optional<trace::TraceWriter::ReservedFile> reservedOutput;
 };
 
 struct ConvertStats {

@@ -60,6 +60,13 @@ inline std::optional<CaptureState> parseCaptureState(std::string_view s) {
   return std::nullopt;
 }
 
+// WP-66b: identity (st_dev/st_ino; volume serial and file index on Windows) of an output file the caller
+// reserved. The backend writes its final trace into exactly that file and fails if the path holds another.
+struct ReservedOutput {
+  uint64_t volume = 0;
+  uint64_t index = 0;
+};
+
 struct CaptureOptions {
   CaptureMode mode = CaptureMode::System;
   std::string exe, cwd;
@@ -76,6 +83,9 @@ struct CaptureOptions {
   bool kernelStacks = true;
   // WP-65a (appended): decode events as they arrive and hand them to the ILiveSink set with setLiveSink().
   bool live = false;
+  // WP-66b (appended): the file reserved at outPath, when the caller created it; the final trace (not a
+  // flush) is written into exactly that file.
+  std::optional<ReservedOutput> reservedOutput;
 };
 
 struct CaptureResult {

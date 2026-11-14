@@ -86,7 +86,7 @@ void printUsage() {
       "                     [--listen HOST:PORT --token-file FILE [--allow-remote-launch] "
       "[--remote-out-dir DIR]]\n"
       "                     [--mock-fixture FILE] [--mock-duration-ms N] [--mock-steps N] "
-      "[--etw-delete-raw] [--perf-delete-raw] [--perf-ring-pages N]\n"
+      "[--mock-live-speed X] [--etw-delete-raw] [--perf-delete-raw] [--perf-ring-pages N]\n"
       "                     [--inst-spool-mb N] [--inst-spool-dir DIR] [--keep-inst-spool]\n"
       "                     [--flush-seconds N] [--flush-coalesce-ms N] [--ring-min-mb N]\n"
       "                     [--live-window-seconds N]\n"
@@ -103,7 +103,10 @@ void printUsage() {
       "traces are written (--remote-out-dir, default the working directory), and fetch only traces this "
       "agent\n"
       "produced. The mock backend copies\n"
-      "$TACHYON_MOCK_FIXTURE (or --mock-fixture) to the requested output path. The etw backend keeps the\n"
+      "$TACHYON_MOCK_FIXTURE (or --mock-fixture) to the requested output path; in a live capture it replays "
+      "the\n"
+      "fixture to the subscribers at X times real time (--mock-live-speed, default 0: nothing is emitted).\n"
+      "The etw backend keeps the\n"
       "raw <out>.etl next to the trace unless --etw-delete-raw is given. The perf backend (Linux) keeps its "
       "raw\n"
       "spool directory <out>.perfspool unless --perf-delete-raw is given; --perf-ring-pages sets the ring "
@@ -131,6 +134,7 @@ struct Options {
   std::string mockFixture;
   long mockDurationMs = 0;
   long mockSteps = 4;
+  double mockLiveSpeed = 0.0;
   bool etwDeleteRaw = false;
   bool perfDeleteRaw = false;
   long perfRingPages = 256;
@@ -216,6 +220,12 @@ bool parseArgs(int argc, char** argv, Options& o) {
     } else if (a == "--mock-duration-ms") {
       if (!value(tmp)) return false;
       o.mockDurationMs = std::strtol(tmp.c_str(), nullptr, 10);
+    } else if (a == "--mock-live-speed") {
+      if (!value(tmp)) return false;
+      char* end = nullptr;
+      o.mockLiveSpeed = std::strtod(tmp.c_str(), &end);
+      if (end == tmp.c_str() || *end != '\0' || !(o.mockLiveSpeed >= 0.0) || o.mockLiveSpeed > 1000.0)
+        return false;
     } else if (a == "--mock-steps") {
       if (!value(tmp)) return false;
       o.mockSteps = std::strtol(tmp.c_str(), nullptr, 10);
@@ -303,6 +313,7 @@ int main(int argc, char** argv) {
     cfg.fixture = opt.mockFixture;
     cfg.captureDuration = std::chrono::milliseconds(opt.mockDurationMs);
     cfg.progressSteps = opt.mockSteps > 0 ? static_cast<uint32_t>(opt.mockSteps) : 1U;
+    cfg.live.speed = opt.mockLiveSpeed;
     backend = std::make_unique<capture::MockBackend>(cfg);
     if (!elevated)
       TACHYON_LOG_WARN("agent: not elevated (CAP_PERFMON/root or admin); fine for the mock backend");
@@ -392,13 +403,15 @@ int main(int argc, char** argv) {
     cfg.remoteOutDir = opt.remoteOutDir.empty() ? std::filesystem::current_path(ec)
                                                 : std::filesystem::absolute(opt.remoteOutDir, ec);
   }
-  // A root agent writing remote traces into a directory other users can rename in could be made to write
-  // through a planted symlink (the trace writer opens its output by name): refuse to serve TCP from there.
+  // Traces are opened without following links, so a shared writable directory cannot redirect a write; a
+  // directory owned by another user could still have its files replaced by the owner: refuse that one.
   if (tcpListener) {
-    if (const std::string unsafe = agent::remoteOutDirWarning(cfg.remoteOutDir); !unsafe.empty()) {
+    if (const std::string unsafe = agent::remoteOutDirProblem(cfg.remoteOutDir); !unsafe.empty()) {
       TACHYON_LOG_ERROR("agent: refusing --listen: remote output directory: {}", unsafe);
       return kExitUsage;
     }
+    if (const std::string shared = agent::remoteOutDirWarning(cfg.remoteOutDir); !shared.empty())
+      TACHYON_LOG_WARN("agent: remote output directory: {}", shared);
   }
   cfg.maxInstSpoolBytes = static_cast<uint64_t>(opt.instSpoolMb) << 20;
   cfg.instSpoolRoot = opt.instSpoolDir;

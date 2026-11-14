@@ -30,7 +30,12 @@ struct ThreadSummary {
 // builds; the main thread only reads through the atomics. Kept alive by shared_ptr from both sides, and it
 // owns the model so the LOD never outlives it.
 struct LodShared {
-  explicit LodShared(std::shared_ptr<const model::TraceModel> m) : model(std::move(m)) {}
+  explicit LodShared(std::shared_ptr<const model::TraceModel> m) : model(std::move(m)) { ++alive(); }
+  ~LodShared() { --alive(); }
+  static std::atomic<int>& alive() {
+    static std::atomic<int> n{0};
+    return n;
+  }
 
   const std::shared_ptr<const model::TraceModel> model;
   std::vector<ThreadSummary> summaries;  // valid once summariesReady

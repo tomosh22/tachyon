@@ -4,6 +4,7 @@
 #if TACHYON_PLATFORM_WINDOWS
 
 #include "control/framed_connection.h"
+#include "control/pipe_names.h"
 #include "control/tcp.h"
 #include "control/transport.h"
 
@@ -269,8 +270,7 @@ std::string defaultAgentAddress() {
 }
 
 std::string instrumentationAddress(const std::string& agentAddress, uint32_t pid) {
-  (void)agentAddress;
-  return R"(\\.\pipe\tachyon-inst-)" + std::to_string(pid);
+  return windowsInstrumentationPipeName(agentAddress, pid);
 }
 
 Result<void> applySocketOwner(const std::string&, const SocketOwner&) {

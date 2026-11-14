@@ -77,8 +77,21 @@ void CallGraphPanel::resetDocumentState() {
   m_haveDocument = false;
 }
 
-void CallGraphPanel::onDocumentChanged(const Document*) {
+void CallGraphPanel::onDocumentChanged(const Document* document) {
+  // WP-65b: the next snapshot of a live capture keeps the tree, its expansion and the selection; only the
+  // query is redone.
+  if (m_live.onDocument(document) && m_haveDocument) {
+    refreshForLiveSnapshot();
+    return;
+  }
   resetDocumentState();  // the in-flight query is cancelled; a late result is dropped as stale
+}
+
+void CallGraphPanel::refreshForLiveSnapshot() {
+  m_query.cancel();
+  m_pendingSnapshot.reset();  // the tree on screen keeps its own reference to the snapshot it came from
+  m_haveRequested = false;
+  m_requested = {};
 }
 
 void CallGraphPanel::onSelectionChanged(const PanelContext& context, const SelectionState& state,
@@ -174,8 +187,10 @@ void CallGraphPanel::update(const PanelContext& context) {
     return;
   }
   if (!m_haveDocument || context.documentGeneration != m_documentGeneration) {
-    resetDocumentState();
-    m_haveDocument = true;
+    if (!(m_haveDocument && m_live.consumeKeep())) {
+      resetDocumentState();
+      m_haveDocument = true;
+    }
     m_documentGeneration = context.documentGeneration;
   }
   if (!context.queryExecutor || !context.selection) return;

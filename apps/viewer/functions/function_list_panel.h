@@ -21,6 +21,7 @@
 #include "symbols/function_key.h"
 #include "viewer/analysis_context.h"
 #include "viewer/common/latest_query.h"
+#include "viewer/common/live_stream.h"
 #include "viewer/functions/function_list_model.h"
 #include "viewer/panel.h"
 
@@ -120,6 +121,7 @@ class FunctionListPanel final : public IPanel {
   void rebuildItems();
   void resolveExternalSelection();
   void resetDocumentState();
+  void refreshForLiveSnapshot();  // WP-65b
 
   void drawToolbar(const PanelContext& context);
   void drawTable(const PanelContext& context, float height);
@@ -133,6 +135,7 @@ class FunctionListPanel final : public IPanel {
   uint64_t m_delivered = 0;
   uint64_t m_documentGeneration = 0;
   bool m_haveDocument = false;
+  common::LiveStreamTracker m_live;  // WP-65b
   double m_pendingClockHz = 1e9;
   std::string m_message;
 

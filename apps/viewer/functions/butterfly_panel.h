@@ -16,6 +16,7 @@
 #include "symbols/function_key.h"
 #include "viewer/analysis_context.h"
 #include "viewer/common/latest_query.h"
+#include "viewer/common/live_stream.h"
 #include "viewer/functions/butterfly_model.h"
 #include "viewer/functions/function_list_model.h"
 #include "viewer/panel.h"
@@ -121,6 +122,7 @@ class ButterflyPanel final : public IPanel {
   void issue(const PanelContext& context, const QuerySpec& spec);
   void applyData(std::shared_ptr<const Data> result);
   void resetDocumentState();
+  void refreshForLiveSnapshot();  // WP-65b
   const functions::Line* lineOf(const Item& item) const;
 
   void drawToolbar(const PanelContext& context);
@@ -135,6 +137,7 @@ class ButterflyPanel final : public IPanel {
   uint64_t m_delivered = 0;
   uint64_t m_documentGeneration = 0;
   bool m_haveDocument = false;
+  common::LiveStreamTracker m_live;  // WP-65b
   std::string m_message;
 
   std::shared_ptr<const Data> m_data;

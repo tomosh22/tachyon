@@ -25,9 +25,11 @@
 
 #include "core/result.h"
 #include "inst/decoder.h"
+#include "trace/trace_writer.h"
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -60,6 +62,9 @@ struct MergeOptions {
 struct MergeReport {
   std::filesystem::path outputPath;
   bool wroteOutput = false;  // false: nothing to merge and the trace was left untouched
+  // WP-66b: the identity of the file renamed into place as the output (set with wroteOutput), so a caller can
+  // record or compare it.
+  std::optional<trace::TraceWriter::ReservedFile> outputIdentity;
   DecodeStats decode;
   std::vector<StreamInfo> streams;
   // Records written to the output by this merge (after clipping).

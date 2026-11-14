@@ -88,7 +88,16 @@ void FunctionStatsPanel::clearHighlight(const PanelContext& context, bool requer
   if (requery) m_haveRequestedStats = false;
 }
 
-void FunctionStatsPanel::onDocumentChanged(const Document*) {
+void FunctionStatsPanel::onDocumentChanged(const Document* document) {
+  // WP-65c: the next snapshot of a live capture keeps the search text, the selected function and the shown
+  // statistics; the index and the statistics are queried again on the new snapshot.
+  if (m_live.onDocument(document) && m_haveDocument) {
+    m_indexQuery.cancel();
+    m_statsQuery.cancel();
+    m_haveRequestedIndex = false;
+    m_haveRequestedStats = false;
+    return;
+  }
   resetDocumentState();
 }
 
@@ -216,8 +225,10 @@ void FunctionStatsPanel::update(const PanelContext& context) {
     return;
   }
   if (!m_haveDocument || context.documentGeneration != m_documentGeneration) {
-    resetDocumentState();
-    m_haveDocument = true;
+    if (!(m_haveDocument && m_live.consumeKeep())) {
+      resetDocumentState();
+      m_haveDocument = true;
+    }
     m_documentGeneration = context.documentGeneration;
   }
   if (!context.queryExecutor || !context.selection) return;

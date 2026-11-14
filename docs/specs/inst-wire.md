@@ -10,7 +10,7 @@ definition is `sdk/src/inst_wire.h` (namespace `tachyon::inst`); this file expla
 The same byte stream is used for all of them:
 
 - Agent connection: after the control-channel `inst_hello` handshake (see control-protocol.md) the SDK
-  connects to the returned pipe/socket (`\\.\pipe\tachyon-inst-<pid>` / `<agent socket dir>/tachyon-inst-<pid>.sock`)
+  connects to the returned pipe/socket (named in the `inst_hello` reply: see control-protocol.md; Linux `<agent socket dir>/tachyon-inst-<pid>.sock`)
   and writes the stream. The SDK never reads from this connection.
 - Sidecar file `.tachyon-inst`: exactly the same byte stream written to a file. Default path
   `<cwd>/<exe-name>-<pid>.tachyon-inst` (exe name without directory or extension); `TACHYON_SIDECAR=<path>`

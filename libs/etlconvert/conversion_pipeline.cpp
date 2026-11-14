@@ -664,7 +664,9 @@ Result<std::unique_ptr<ConversionPipeline>> ConversionPipeline::create(const std
   trace::FileHeader header;
   header.clock_frequency_hz = info.clockFrequencyHz;
   header.platform = trace::kPlatformWindows;
-  TACHYON_TRY_ASSIGN(trace::TraceWriter writer, trace::TraceWriter::open(out, header));
+  TACHYON_TRY_ASSIGN(trace::TraceWriter writer,
+                     options.reservedOutput ? trace::TraceWriter::open(out, header, *options.reservedOutput)
+                                            : trace::TraceWriter::open(out, header));
 
   auto impl = std::make_unique<Impl>();
   impl->opt = std::move(options);
