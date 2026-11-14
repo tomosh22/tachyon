@@ -291,6 +291,8 @@ class CaptureController {
   std::vector<RemoteTransfer> m_transfers;
   bool m_remoteProcessesPending = false;
 
+  bool m_openStale =
+      false;  // WP-65c: the agent went idle: an armed "open the trace" that is still unused is void
   bool m_openNextCapture = false;  // WP-65b: the next capture_done opens its trace regardless of autoOpen
   std::vector<FlushedCapture> m_flushed;
   int m_flushSeconds = 10;

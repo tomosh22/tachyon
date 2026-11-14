@@ -507,7 +507,9 @@ void App::toast(ToastLevel level, std::string text) {
 
 void App::rerunSymbolResolution() {
   if (!m_document) return;
-  if (m_document->isLive()) {  // WP-65b: the live worker starts a new symbol service at its next snapshot
+  if (m_document->isLive() && m_live->active()) {
+    // WP-65b: the live worker starts a new symbol service at its next snapshot. (An ended live document is
+    // static: it is resolved like a file document below.)
     m_live->reconfigureSymbols(liveSymbolsConfig());
     ++m_symbolGeneration;
     requestRedraw();
@@ -736,6 +738,7 @@ LiveSymbolsConfig App::liveSymbolsConfig() {
   if (config.cacheDir.empty()) config.cacheDir = defaultSymbolCacheDir();
   config.searchPaths = m_settings.symbolSearchPaths;
   config.configure = m_options.configureSymbols;
+  config.frameEpochIntervalMs = m_options.liveFrameEpochMs;
   // Module results reach the UI the way a file document's do: through the symbol mailbox, which bumps the
   // symbol generation (panels re-query with the new function keys).
   auto mailbox = m_symbolMailbox;

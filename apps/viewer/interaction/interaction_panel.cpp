@@ -26,13 +26,19 @@ void ThreadInteractionPanel::setMaxWaits(size_t n) {
   m_maxWaits = std::clamp<size_t>(n, 1, 5000);
 }
 
-void ThreadInteractionPanel::onDocumentChanged(const Document*) {
+void ThreadInteractionPanel::onDocumentChanged(const Document* document) {
+  // WP-65c: the next snapshot of a live capture keeps the longest-waits list on screen until the scan of the
+  // new snapshot delivers (the wait selected on the bus is re-resolved by refresh()).
+  const bool keepRows = m_live.onDocument(document);
   m_episode.reset();
   m_shownSelection.reset();
   m_blocking.clear();
   m_unblocking.clear();
   m_details = {};
-  m_waits.reset(nullptr);  // an in-flight scan finishes on its own and is dropped as stale
+  if (keepRows)
+    m_waits.cancel(nullptr);  // keeps the rows; an in-flight scan finishes on its own and is dropped as stale
+  else
+    m_waits.reset(nullptr);  // an in-flight scan finishes on its own and is dropped as stale
   m_everRequested = false;
   m_shownSymbolGeneration = ~0ull;
 }

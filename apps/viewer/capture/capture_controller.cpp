@@ -447,6 +447,12 @@ bool CaptureController::active() const {
 bool CaptureController::pump() {
   std::vector<AgentEvent> events = m_session.drainEvents();
   for (const AgentEvent& e : events) handleEvent(e);
+  // The capture is over (the agent is idle) and no capture_done took the "open the trace" request: a stop
+  // that failed, a capture that produced no trace. Do not let it open the next, unrelated capture.
+  if (m_openStale) {
+    m_openNextCapture = false;
+    m_openStale = false;
+  }
   return !events.empty();
 }
 
@@ -472,9 +478,11 @@ void CaptureController::handleEvent(const AgentEvent& e) {
       }
       break;
     case AgentEventKind::ConnectionLost:
+      m_openNextCapture = false;
       toast(ToastLevel::Error, e.message + " (Capture > Reconnect)");
       break;
     case AgentEventKind::StateChanged:
+      if (e.phase == AgentPhase::Idle) m_openStale = true;
       if ((e.phase == AgentPhase::Capturing || e.phase == AgentPhase::Armed) && m_lastPhase != e.phase &&
           m_host.showPanel) {
         m_host.showPanel(kCapturePanelName);
@@ -530,6 +538,7 @@ void CaptureController::handleEvent(const AgentEvent& e) {
     case AgentEventKind::CaptureDone: onCaptureDone(e); break;
     case AgentEventKind::AgentError: toast(ToastLevel::Error, "Agent: " + e.message); break;
     case AgentEventKind::CommandFailed:
+      if (e.command == "stop") m_openNextCapture = false;
       toast(ToastLevel::Error, "The agent refused " + e.command + " (" + e.code + "): " + e.message);
       break;
   }

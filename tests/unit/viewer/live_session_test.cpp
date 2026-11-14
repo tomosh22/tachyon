@@ -35,8 +35,8 @@ model::Thread makeThread(uint32_t tid, bool target = false) {
 
 TEST(LivePrune, DropsTheThreadsWithNothingInTheWindowAndRemapsWhatRefersToThem) {
   model::TraceModel m;
-  // 0: idle (dropped)   1: samples   2: idle target (kept)   3: only a context switch   4: idle (dropped)
-  // 5: only a frame mark   6: only a scope event
+  // 0: idle (dropped)   1: samples   2: idle target (kept)   3: only a context switch (dropped)   4: idle
+  // (dropped) 5: only a frame mark   6: only a scope event
   for (uint32_t tid : {100u, 101u, 102u, 103u, 104u, 105u, 106u})
     m.threads.push_back(makeThread(tid, tid == 102));
   m.samplesByThread.resize(7);
@@ -58,24 +58,24 @@ TEST(LivePrune, DropsTheThreadsWithNothingInTheWindowAndRemapsWhatRefersToThem) 
   m.statesByThread.resize(7);
   m.scopesByThread.resize(7);
 
-  EXPECT_EQ(pruneIdleThreads(m), 2u);
-  ASSERT_EQ(m.threads.size(), 5u);
-  const uint32_t expected[] = {101, 102, 103, 105, 106};
-  for (size_t i = 0; i < 5; ++i) EXPECT_EQ(m.threads[i].tid, expected[i]) << i;
-  ASSERT_EQ(m.samplesByThread.size(), 5u);
+  EXPECT_EQ(pruneIdleThreads(m), 3u);
+  ASSERT_EQ(m.threads.size(), 4u);
+  const uint32_t expected[] = {101, 102, 105, 106};
+  for (size_t i = 0; i < 4; ++i) EXPECT_EQ(m.threads[i].tid, expected[i]) << i;
+  ASSERT_EQ(m.samplesByThread.size(), 4u);
   EXPECT_EQ(m.samplesByThread[0].ts.size(), 2u);
-  EXPECT_EQ(m.statesByThread.size(), 5u);
-  EXPECT_EQ(m.scopesByThread.size(), 5u);
-  EXPECT_EQ(m.tidToThread.size(), 5u);
-  EXPECT_EQ(m.tidToThread.at(105), ThreadIdx(3));
+  EXPECT_EQ(m.statesByThread.size(), 4u);
+  EXPECT_EQ(m.scopesByThread.size(), 4u);
+  EXPECT_EQ(m.tidToThread.size(), 4u);
+  EXPECT_EQ(m.tidToThread.at(105), ThreadIdx(2));
   EXPECT_EQ(m.tidToThread.count(100), 0u);
-  EXPECT_EQ(m.frameMarks[0].thread, ThreadIdx(3));
-  EXPECT_EQ(m.markers[0].thread, ThreadIdx(3));
+  EXPECT_EQ(m.frameMarks[0].thread, ThreadIdx(2));
+  EXPECT_EQ(m.markers[0].thread, ThreadIdx(2));
   EXPECT_FALSE(m.markers[1].thread.valid());
 
   // Nothing idle: nothing changes.
   EXPECT_EQ(pruneIdleThreads(m), 0u);
-  EXPECT_EQ(m.threads.size(), 5u);
+  EXPECT_EQ(m.threads.size(), 4u);
 }
 
 namespace {
@@ -86,6 +86,7 @@ struct CountingConfig {
   int loadDelayMs = 0;
   LiveSymbolsConfig make() const {
     LiveSymbolsConfig config;
+    config.frameEpochIntervalMs = 0;  // every change starts an epoch at once (the batching has its own test)
     auto counter = loads;
     const int delay = loadDelayMs;
     config.configure = [counter, delay](symbols::SymbolService& service) {
@@ -160,6 +161,35 @@ TEST(LiveSymbols, TheSameTablesKeepTheSameServiceAndGrownTablesAdoptTheFinishedR
   EXPECT_EQ(second->lookup(resolvedFrame).function, first->lookup(resolvedFrame).function)
       << "the string table is shared: the same function has the same StringIdx";
   EXPECT_LE(live.stats().epochsAlive, 3u);
+}
+
+TEST(LiveSymbols, FrameOnlyGrowthIsBatchedButANewModuleStartsAnEpochAtOnce) {
+  CountingConfig counting;
+  LiveSymbolsConfig config = counting.make();
+  config.frameEpochIntervalMs = 400;
+  LiveSymbols live(std::move(config));
+  model::TraceModel a = loadFrames();
+  auto first = live.serviceFor(a);
+  ASSERT_TRUE(waitDone(*first));
+  model::TraceModel grown = a;
+  grown.frames.push_back(model::Frame{ModuleIdx(0), 0x321});
+  EXPECT_EQ(live.serviceFor(grown), first) << "new frames alone wait for the batching interval";
+  EXPECT_EQ(live.stats().epochs, 1u);
+  // A new module does not wait.
+  model::TraceModel moreModules = grown;
+  moreModules.modules.push_back(a.modules.front());
+  moreModules.modules.back().base += 0x100000;
+  EXPECT_NE(live.serviceFor(moreModules), first);
+  EXPECT_EQ(live.stats().epochs, 2u);
+  // And once the interval has passed the frames get theirs.
+  auto second = live.serviceFor(moreModules);
+  ASSERT_TRUE(waitDone(*second));
+  model::TraceModel evenMore = moreModules;
+  evenMore.frames.push_back(model::Frame{ModuleIdx(0), 0x322});
+  EXPECT_EQ(live.serviceFor(evenMore), second);
+  std::this_thread::sleep_for(std::chrono::milliseconds(450));
+  EXPECT_NE(live.serviceFor(evenMore), second);
+  EXPECT_EQ(live.stats().epochs, 3u);
 }
 
 TEST(LiveSymbols, ARunInProgressIsNeverRestartedByNewerTables) {

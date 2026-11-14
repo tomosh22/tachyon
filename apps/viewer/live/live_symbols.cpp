@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 
 namespace tachyon::viewer {
@@ -22,6 +23,7 @@ struct LiveSymbols::Epoch {
   std::shared_ptr<model::TraceModel> model;  // the tables only: modules, frames, nodes
   std::unique_ptr<symbols::SymbolService> service;
   std::vector<uint8_t> nonLeaf;  // by frame: some node referencing the frame has a child
+  std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
   ~Epoch() {
     if (service) service->cancel();
     service.reset();
@@ -90,12 +92,18 @@ void LiveSymbols::reset(LiveSymbolsConfig config) {
   // `old` is released here (outside the lock): when no document still uses it, its workers are joined.
 }
 
+bool LiveSymbols::sameModules(const Epoch& epoch, const model::TraceModel& snapshot) const {
+  const model::TraceModel& m = *epoch.model;
+  if (m.modules.size() != snapshot.modules.size()) return false;
+  for (size_t i = 0; i < m.modules.size(); ++i)
+    if (!sameModuleRecord(m.modules[i], snapshot.modules[i])) return false;
+  return true;
+}
+
 bool LiveSymbols::sameTables(const Epoch& epoch, const model::TraceModel& snapshot,
                              const std::vector<uint8_t>& nonLeaf) const {
   const model::TraceModel& m = *epoch.model;
-  if (m.frames.size() != snapshot.frames.size() || m.modules.size() != snapshot.modules.size()) return false;
-  for (size_t i = 0; i < m.modules.size(); ++i)
-    if (!sameModuleRecord(m.modules[i], snapshot.modules[i])) return false;
+  if (m.frames.size() != snapshot.frames.size() || !sameModules(epoch, snapshot)) return false;
   for (size_t i = 0; i < m.frames.size(); ++i)
     if (m.frames[i].module != snapshot.frames[i].module ||
         m.frames[i].addr_or_rva != snapshot.frames[i].addr_or_rva)
@@ -119,6 +127,7 @@ std::shared_ptr<LiveSymbols::Epoch> LiveSymbols::startEpoch(const model::TraceMo
   epoch->service = std::make_unique<symbols::SymbolService>(
       m_config.servers, m_config.cacheDir, previous ? previous->service->sharedStrings() : nullptr);
   symbols::SymbolService& service = *epoch->service;
+  service.setWorkerThreads(2);  // a few workers, not one per core: the viewer shares the machine
   registerPlatformProviders(service);
   if (!m_config.searchPaths.empty()) {
     const SymbolPathReport report =
@@ -137,6 +146,14 @@ std::shared_ptr<symbols::SymbolService> LiveSymbols::serviceFor(const model::Tra
   if (m_epoch && sameTables(*m_epoch, snapshot, nonLeaf))
     return std::shared_ptr<symbols::SymbolService>(m_epoch, m_epoch->service.get());
   if (m_epoch) {
+    // Only frames / nodes grew (new code was sampled, the module list is the same): a service resolves a
+    // fixed set of frames, so the new ones wait for the next epoch. Epochs cost a thread start and a
+    // re-resolution of every frame, so frame-only growth is batched; a new or changed module starts one at
+    // once.
+    if (m_config.frameEpochIntervalMs > 0 && sameModules(*m_epoch, snapshot) &&
+        std::chrono::steady_clock::now() - m_epoch->started <
+            std::chrono::milliseconds(m_config.frameEpochIntervalMs))
+      return std::shared_ptr<symbols::SymbolService>(m_epoch, m_epoch->service.get());
     const symbols::SymbolProgress p = m_epoch->service->progress();
     // The old run is still loading modules: adopting now would cancel it and start those loads again, and a
     // slow module would never finish. Keep serving with the old service until it is done.

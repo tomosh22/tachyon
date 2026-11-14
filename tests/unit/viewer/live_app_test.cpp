@@ -8,6 +8,8 @@
 #include "symbols/symbol_service.h"
 #include "viewer/callgraph/callgraph_panel.h"
 #include "viewer/functions/function_list_panel.h"
+#include "viewer/interaction/interaction_panel.h"
+#include "viewer/stats/function_stats_panel.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -116,6 +118,33 @@ TEST(LiveApp, ARemoteAgentStreamsAndStopFetchesTheFinalTrace) {
   EXPECT_FALSE(cap.transfers().empty());
   EXPECT_EQ(cap.transfers().front().state, RemoteTransfer::State::Done);
   EXPECT_EQ(h.app.liveUiState().phase, LiveUiState::Phase::None);
+}
+
+TEST(LiveApp, TheRealAgentBinaryWithTheMockBackendStreamsALiveCapture) {
+  // The tachyon-agent executable itself: `--backend mock --mock-live-speed 2` replays the fixture live.
+  TempDir dir("live_binary");
+  const std::string address = newAddress("live_binary");
+  AgentProcess agentProcess(address, 0, fixture("frames.tachyon"), {"--mock-live-speed", "2"});
+  Harness h(liveOptions());
+  configureCapture(h.app.settings(), address, dir.path() / "captures");
+  CaptureController& cap = h.app.capture();
+  cap.reconnect();
+  ASSERT_TRUE(h.until([&] {
+    return cap.session().snapshot().connection == ConnectionState::Connected &&
+           cap.session().snapshot().phase == AgentPhase::Idle;
+  }));
+  ASSERT_TRUE(h.app.commands().run("capture.live"));
+  h.frames(2);
+  cap.form().mode = capture::CaptureMode::System;
+  ASSERT_TRUE(cap.submitDialog());
+  ASSERT_TRUE(
+      h.until([&] { return h.app.document() && h.app.document()->isLive() && h.app.liveSwaps() >= 3; }));
+  EXPECT_GT(h.app.document()->totalSamples(), 0u);
+  EXPECT_EQ(h.app.liveUiState().phase, LiveUiState::Phase::Running);
+  EXPECT_EQ(cap.session().liveStatus().state, LiveFeedStatus::State::Streaming);
+  h.app.liveStop();
+  ASSERT_TRUE(h.until([&] { return !h.app.loading() && h.app.document() && !h.app.document()->isLive(); }));
+  EXPECT_EQ(h.app.document()->path(), fs::path(cap.lastRequest().out_path));
 }
 
 TEST(LiveApp, TheLiveDialogStartsALiveCaptureAndALiveDocumentAppears) {
@@ -304,6 +333,91 @@ TEST(LiveApp, TheCallGraphAndTheFunctionListKeepTheirSelectionAcrossSnapshots) {
   EXPECT_TRUE(graph->tree() != nullptr);
 }
 
+TEST(LiveApp, TheStatisticsAndInteractionPanelsKeepWhatTheyShowAcrossSnapshots) {
+  LiveRig rig("live_panels2", "frames.tachyon", 1.0, liveOptions());
+  for (PanelEntry& e : rig.app().panels().entries()) {
+    const std::string name = e.panel->name();
+    e.open = name == "Threads Timeline" || name == FunctionStatsPanel::kName ||
+             name == ThreadInteractionPanel::kName;
+  }
+  auto* stats =
+      dynamic_cast<FunctionStatsPanel*>(rig.app().panels().find(FunctionStatsPanel::kName)->panel.get());
+  auto* waits = dynamic_cast<ThreadInteractionPanel*>(
+      rig.app().panels().find(ThreadInteractionPanel::kName)->panel.get());
+  ASSERT_NE(stats, nullptr);
+  ASSERT_NE(waits, nullptr);
+  stats->disableThrottle();
+  ASSERT_TRUE(rig.startLive());
+  ASSERT_TRUE(rig.h.until([&] {
+    return rig.liveDocument() && stats->index() && !waits->waits().rows().empty() &&
+           rig.app().liveSwaps() >= 2;
+  }));
+  stats->setQueryText("e");
+  const uint64_t indexQueries = stats->issuedIndexQueries();
+  // Over the next snapshots neither panel ever goes blank: the old result stays until the new one is
+  // delivered.
+  bool blank = false;
+  const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(1800);
+  while (std::chrono::steady_clock::now() < until) {
+    rig.h.frames(1);
+    if (!stats->index() || waits->waits().rows().empty()) blank = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_FALSE(blank);
+  EXPECT_EQ(stats->queryText(), "e");
+  EXPECT_GT(stats->issuedIndexQueries(), indexQueries) << "the index is rebuilt on the newer snapshots";
+}
+
+TEST(LiveApp, PausedWhenTheCaptureEndsResumeIsStillThereAndShowsTheFinalSnapshot) {
+  LiveRig rig("live_pause_end", "frames.tachyon", 2.0, liveOptions());
+  rig.app().settings().capture.autoOpen = false;
+  ASSERT_TRUE(rig.startLive());
+  ASSERT_TRUE(rig.h.until([&] { return rig.liveDocument() && rig.app().liveSwaps() >= 2; }));
+  rig.app().setLivePaused(true);
+  rig.h.frames(2);
+  rig.cap().stopCapture();
+  ASSERT_TRUE(rig.h.until([&] { return rig.app().liveUiState().phase == LiveUiState::Phase::Ended; }));
+  rig.run(400);
+  // The view is still the frozen one; Resume is possible (the panel enables it for a paused view) and ends
+  // it.
+  EXPECT_FALSE(rig.app().document()->live().ended);
+  EXPECT_TRUE(rig.app().liveUiState().paused);
+  EXPECT_NE(rig.app().liveStatusLine().find("paused"), std::string::npos) << rig.app().liveStatusLine();
+  rig.app().setLivePaused(false);
+  ASSERT_TRUE(rig.h.until([&] { return rig.liveDocument() && rig.app().document()->live().ended; }));
+  EXPECT_FALSE(rig.app().live().active());
+  EXPECT_FALSE(rig.app().liveUiState().paused);
+}
+
+TEST(LiveApp, AnEndedLiveDocumentResolvesSymbolsAgainLikeAFileDocument) {
+  LiveRig rig("live_ended_syms", "frames.tachyon", 2.0, liveOptions());
+  rig.app().settings().capture.autoOpen = false;
+  ASSERT_TRUE(rig.startLive());
+  ASSERT_TRUE(rig.h.until([&] { return rig.liveDocument() && rig.app().liveSwaps() >= 2; }));
+  rig.cap().stopCapture();
+  ASSERT_TRUE(rig.h.until([&] { return rig.liveDocument() && rig.app().document()->live().ended; }));
+  ASSERT_FALSE(rig.app().live().active());
+  const auto before = rig.app().document()->symbols();
+  rig.app().rerunSymbolResolution();
+  ASSERT_NE(rig.app().document()->symbols(), nullptr);
+  EXPECT_NE(rig.app().document()->symbols(), before) << "a fresh service resolves the static document";
+  EXPECT_TRUE(rig.h.until([&] { return rig.h.symbolsDone(); }));
+}
+
+TEST(LiveApp, AnUnusedOpenTheTraceRequestDoesNotOutliveTheCapture) {
+  LiveRig rig("live_open_stale", "frames.tachyon", 4.0, liveOptions());
+  rig.app().settings().capture.autoOpen = false;
+  ASSERT_TRUE(rig.waitConnected());
+  rig.cap().stopCaptureAndOpen();  // nothing runs: the agent refuses the stop
+  ASSERT_TRUE(rig.h.until([&] { return toastContains(rig.app(), "refused stop"); }));
+  ASSERT_TRUE(rig.startLive());
+  ASSERT_TRUE(rig.h.until([&] { return rig.liveDocument() && rig.app().liveSwaps() >= 2; }));
+  rig.cap().stopCapture();  // an ordinary stop: autoOpen is off, so the trace must not open
+  ASSERT_TRUE(rig.h.until([&] { return rig.app().liveUiState().phase == LiveUiState::Phase::Ended; }));
+  rig.run(600);
+  EXPECT_TRUE(rig.app().document()->isLive());
+}
+
 TEST(LiveApp, PauseFreezesTheDocumentAndResumeCatchesUp) {
   LiveRig rig("live_pause", "frames.tachyon", 1.0, liveOptions());
   ASSERT_TRUE(rig.startLive());
@@ -439,6 +553,8 @@ TEST(LiveApp, SymbolsAreLoadedOncePerModuleAcrossSnapshots) {
   // Every provider load is counted; the fixture's symbols resolve through its .symbols.json.
   auto loads = std::make_shared<std::atomic<int>>(0);
   AppOptions options = liveOptions();
+  options.liveFrameEpochMs =
+      0;  // a new service at every snapshot with new frames: adoption is what is tested
   options.configureSymbols = [loads](symbols::SymbolService& service) {
     ASSERT_TRUE(service.addSymbolFileOverride(fixture("frames.symbols.json")).ok());
     symbols::SymbolService* svc = &service;
