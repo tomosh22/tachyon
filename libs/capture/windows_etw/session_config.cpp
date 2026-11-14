@@ -142,6 +142,7 @@ Result<SessionConfig> makeSessionConfig(const CaptureOptions& options, std::stri
   c.enableFlags = enableFlagsFor(options);
   c.profileIntervalUnits = profileIntervalUnits(options.samplingHz);
   c.stackEvents = stackEventsFor(options);
+  c.realTime = options.live;
   if (options.circularMb > 0) {
     if (options.circularMb < kMinCircularMb || options.circularMb > kMaxCircularMb)
       return makeError(ErrorCode::InvalidArgument, "circularMb must be between " +
@@ -183,6 +184,7 @@ std::string captureOptionsJson(const CaptureOptions& o, const SessionConfig& c,
   j["sampling_hz_effective"] = intervalUnitsToHz(c.profileIntervalUnits);
   j["profile_interval_100ns"] = c.profileIntervalUnits;
   j["circular_mb"] = o.circularMb;
+  j["live"] = o.live;
   j["stackwalk"] = {{"profile", o.stackProfile}, {"cswitch", o.stackCSwitch}, {"readythread", o.stackReady}};
   j["kernel_stacks"] = o.kernelStacks;
   j["enable_flags"] = c.enableFlags;

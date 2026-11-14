@@ -82,6 +82,9 @@ std::vector<uint64_t> buildProperties(const SessionConfig& cfg, const GUID& guid
   p->MaximumFileSize = cfg.maxFileMb;  // MB; for circular mode this is the cap
   p->LogFileMode = (cfg.circular ? EVENT_TRACE_FILE_MODE_CIRCULAR : EVENT_TRACE_FILE_MODE_SEQUENTIAL) |
                    EVENT_TRACE_SYSTEM_LOGGER_MODE;
+  // WP-65w: the same session also delivers its buffers to a real-time consumer (the live view). The file is
+  // written exactly as without it; a slow consumer loses RealTimeBuffersLost, never the file's buffers.
+  if (cfg.realTime) p->LogFileMode |= EVENT_TRACE_REAL_TIME_MODE;
   p->EnableFlags = cfg.enableFlags;
   p->LoggerNameOffset = static_cast<ULONG>(sizeof(EVENT_TRACE_PROPERTIES));
   p->LogFileNameOffset = static_cast<ULONG>(sizeof(EVENT_TRACE_PROPERTIES) + nameBytes);
