@@ -59,6 +59,12 @@ struct LiveEtwDecoderConfig {
 // process's last moments reach the decoder after the End event when the buffers of the CPUs are delivered in
 // another order (or the data is held back, see LiveEtwSource): they are still attributed to it.
 inline constexpr uint64_t kEndedGraceSeconds = 5;
+// A Process Start for the pid of a process that ended less than this long ago (in trace time) is held until
+// the older data of the old process has passed: the sink keys its tables by pid.
+inline constexpr uint64_t kReuseDeferSeconds = 1;
+// An event more than this far ahead of the newest time seen (or of the session start) is not believed: it
+// would move time (and so reap every ended process and pending unload) on a corrupt timestamp.
+inline constexpr uint64_t kMaxAheadSeconds = 60;
 
 struct LiveEtwDecoderStats {
   uint64_t events = 0;
@@ -72,7 +78,8 @@ struct LiveEtwDecoderStats {
   uint64_t stacksUnmatched = 0;
   uint64_t parentsWithoutStack = 0;
   uint64_t stackKeyEvents = 0;  // compressed stacks (opcodes 34-37): not decoded
-  uint64_t malformed = 0;
+  uint64_t malformed = 0;       // undecodable payloads and timestamps too far ahead
+  uint64_t deferredForPidReuse = 0;
   uint64_t maxTs = 0;  // newest event timestamp
 };
 
@@ -124,6 +131,12 @@ class LiveEtwDecoder final : private etlconvert::ParentListener {
   uint32_t pidOfThread(uint32_t tid, uint32_t fallbackPid) const;
   bool keepThread(uint32_t tid, uint32_t fallbackPid, uint64_t ts = 0) const;
 
+  void dispatch(const etlconvert::EtwEvent& e);
+  void advanceTime(uint64_t ts);
+  // True when the event belongs to a process whose pid was reused too soon: it is stored and replayed later.
+  bool deferForPidReuse(const etlconvert::EtwEvent& e);
+  void replayDeferred(uint32_t pid);
+  void noteDeferDue(uint64_t endTs);
   void onProcessEvent(const etlconvert::EtwEvent& e);
   void onThreadEvent(const etlconvert::EtwEvent& e);
   void onSetName(const etlconvert::EtwEvent& e);
@@ -169,6 +182,16 @@ class LiveEtwDecoder final : private etlconvert::ParentListener {
     uint64_t base = 0, ts = 0;
   };
   std::vector<PendingUnload> m_pendingUnloads;
+  struct DeferredEvent {
+    etlconvert::Guid provider;
+    uint8_t opcode = 0, version = 0;
+    uint64_t timestamp = 0;
+    uint32_t threadId = 0, processId = 0, pid = 0;
+    uint16_t cpu = 0;
+    std::vector<std::byte> payload;
+  };
+  std::vector<DeferredEvent> m_deferred;
+  std::unordered_map<uint32_t, uint64_t> m_deferPid;  // reused pid -> End time of its previous process
   uint64_t m_reapDueAt = ~uint64_t{0};  // trace time after which reapEnded() has something to do
   uint64_t m_newestTs = 0;
   std::vector<uint64_t> m_ips;  // scratch

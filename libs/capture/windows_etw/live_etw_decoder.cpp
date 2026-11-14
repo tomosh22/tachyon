@@ -1,5 +1,6 @@
 #include "capture/windows_etw/live_etw_decoder.h"
 
+#include "core/span_util.h"
 #include "trace/trace_format.h"
 
 #include <algorithm>
@@ -57,7 +58,25 @@ bool LiveEtwDecoder::keepThread(uint32_t tid, uint32_t fallbackPid, uint64_t ts)
 
 void LiveEtwDecoder::onEvent(const EtwEvent& e) {
   ++m_stats.events;
+  {
+    const uint64_t ref = std::max(m_newestTs, m_cfg.startTs);
+    if (e.timestamp > ref && e.timestamp - ref > kMaxAheadSeconds * m_cfg.clockFrequencyHz) {
+      ++m_stats.malformed;  // hostile or corrupt: never moves time
+      return;
+    }
+  }
   m_stats.maxTs = std::max(m_stats.maxTs, e.timestamp);
+  if (!deferForPidReuse(e)) dispatch(e);
+  advanceTime(e.timestamp);
+}
+
+void LiveEtwDecoder::advanceTime(uint64_t ts) {
+  m_newestTs = std::max(m_newestTs, ts);
+  m_matcher->advance(m_newestTs);
+  if (m_newestTs > m_reapDueAt) reapEnded(false);
+}
+
+void LiveEtwDecoder::dispatch(const EtwEvent& e) {
   namespace guids = etlconvert::guids;
   namespace op = etlconvert::opcodes;
   if (e.provider == guids::kPerfInfo) {
@@ -81,9 +100,81 @@ void LiveEtwDecoder::onEvent(const EtwEvent& e) {
   } else if (e.provider == guids::kImage) {
     onImageEvent(e);
   }
-  m_newestTs = std::max(m_newestTs, e.timestamp);
-  m_matcher->advance(m_newestTs);
-  if (m_newestTs > m_reapDueAt) reapEnded(false);
+}
+
+bool LiveEtwDecoder::deferForPidReuse(const EtwEvent& e) {
+  namespace op = etlconvert::opcodes;
+  namespace guids = etlconvert::guids;
+  uint32_t pid = 0;
+  bool starts = false;  // opens a process (as opposed to a thread / image of one)
+  if (e.provider == guids::kProcess && e.opcode == op::kProcessStart) {
+    const auto v = core::readPod<uint32_t>(e.payload, 8);
+    if (!v) return false;
+    pid = *v;
+    starts = true;
+  } else if (e.provider == guids::kThread &&
+             (e.opcode == op::kThreadStart || e.opcode == op::kThreadDcStart)) {
+    const auto v = core::readPod<uint32_t>(e.payload, 0);
+    if (!v) return false;
+    pid = *v;
+  } else if (e.provider == guids::kImage && (e.opcode == op::kImageLoad || e.opcode == op::kImageDcStart)) {
+    const auto v = core::readPod<uint32_t>(e.payload, 16);
+    if (!v) return false;
+    pid = *v;
+  } else {
+    return false;
+  }
+  auto d = m_deferPid.find(pid);
+  if (d == m_deferPid.end()) {
+    if (!starts) return false;
+    const auto old = m_ended.find(pid);
+    if (old == m_ended.end()) return false;
+    if (m_newestTs > old->second + kReuseDeferSeconds * m_cfg.clockFrequencyHz) return false;  // drained
+    d = m_deferPid.emplace(pid, old->second).first;
+    noteDeferDue(old->second);
+  }
+  DeferredEvent de;
+  de.provider = e.provider;
+  de.opcode = e.opcode;
+  de.version = e.version;
+  de.timestamp = e.timestamp;
+  de.threadId = e.threadId;
+  de.processId = e.processId;
+  de.pid = pid;
+  de.cpu = e.cpu;
+  de.payload.assign(e.payload.begin(), e.payload.end());
+  m_deferred.push_back(std::move(de));
+  ++m_stats.deferredForPidReuse;
+  return true;
+}
+
+void LiveEtwDecoder::replayDeferred(uint32_t pid) {
+  std::vector<DeferredEvent> mine;
+  for (auto it = m_deferred.begin(); it != m_deferred.end();) {
+    if (it->pid == pid) {
+      mine.push_back(std::move(*it));
+      it = m_deferred.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  for (const DeferredEvent& d : mine) {
+    EtwEvent e;
+    e.provider = d.provider;
+    e.opcode = d.opcode;
+    e.version = d.version;
+    e.timestamp = d.timestamp;
+    e.threadId = d.threadId;
+    e.processId = d.processId;
+    e.cpu = d.cpu;
+    e.payload = etlconvert::Bytes(d.payload.data(), d.payload.size());
+    dispatch(e);
+  }
+}
+
+void LiveEtwDecoder::noteDeferDue(uint64_t endTs) {
+  const uint64_t defer = kReuseDeferSeconds * m_cfg.clockFrequencyHz;
+  m_reapDueAt = std::min(m_reapDueAt, endTs > ~uint64_t{0} - defer ? ~uint64_t{0} - 1 : endTs + defer);
 }
 
 void LiveEtwDecoder::flush() {
@@ -103,6 +194,17 @@ void LiveEtwDecoder::reapEnded(bool all) {
     if (all || m_newestTs > endTs + grace) due.emplace_back(pid, endTs);
   std::sort(due.begin(), due.end());
   for (const auto& [pid, endTs] : due) reapProcess(pid, endTs);
+  // Reused pids whose old process's data has had time to pass: forget the old, then start the new.
+  std::vector<std::pair<uint32_t, uint64_t>> reused;
+  for (const auto& [pid, endTs] : m_deferPid)
+    if (all || m_newestTs > endTs + kReuseDeferSeconds * m_cfg.clockFrequencyHz)
+      reused.emplace_back(pid, endTs);
+  std::sort(reused.begin(), reused.end());
+  for (const auto& [pid, endTs] : reused) {
+    if (m_ended.count(pid) != 0) reapProcess(pid, endTs);
+    m_deferPid.erase(pid);
+    replayDeferred(pid);
+  }
   // Image unloads that are old enough, in the order they happened.
   std::vector<PendingUnload> ready;
   for (auto it = m_pendingUnloads.begin(); it != m_pendingUnloads.end();) {
@@ -119,6 +221,7 @@ void LiveEtwDecoder::reapEnded(bool all) {
   m_reapDueAt = ~uint64_t{0};
   for (const auto& [pid, endTs] : m_ended) noteReapDue(endTs);
   for (const PendingUnload& u : m_pendingUnloads) noteReapDue(u.ts);
+  for (const auto& [pid, endTs] : m_deferPid) noteDeferDue(endTs);
 }
 
 void LiveEtwDecoder::reapProcess(uint32_t pid, uint64_t endTs) {

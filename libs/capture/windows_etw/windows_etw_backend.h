@@ -145,6 +145,7 @@ class WindowsEtwBackend final : public ICaptureBackend, public ITargetWatch {
   Result<void> startRecording(const CaptureOptions& options, std::unique_ptr<etw::TargetProcess> target,
                               bool launchNow);
   // Creates the live source and connects the real-time consumer to the running session (WP-65w).
+  void addLiveWarnings(CaptureResult& result, const etw::SessionCounters& counters);
   Result<void> openLive(const CaptureOptions& options, const etw::SessionConfig& cfg,
                         std::unique_ptr<etw::LiveEtwSource>& live,
                         std::unique_ptr<etw::RealTimeConsumer>& consumer);
@@ -156,6 +157,11 @@ class WindowsEtwBackend final : public ICaptureBackend, public ITargetWatch {
                                                const etw::SessionCounters& counters);
 
   mutable std::mutex m_mutex;
+  // Serialises the calls on an EtwSession (flush / stop / destruction) with the live source's poll of its
+  // real-time loss counter; taken before m_mutex, never while holding it.
+  std::mutex m_ctlMutex;
+  std::atomic<uint64_t> m_lastRtLost{0};    // the poll's last good answer
+  std::vector<std::string> m_liveWarnings;  // m_mutex; reported in the next stop() / flush() result
   WindowsEtwBackendConfig m_config;
   CaptureState m_state = CaptureState::Idle;
   etw::SessionLifecycle m_lifecycle;

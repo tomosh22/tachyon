@@ -125,6 +125,7 @@ void LiveEtwSource::submit(const etlconvert::EtwEvent& event) {
     m_ignored.fetch_add(1, std::memory_order_relaxed);
     return;
   }
+  std::lock_guard lock(m_stageMutex);
   Stage& stage = kind == Kind::Data ? m_dataStage : m_metaStage;
   stageEvent(stage, event);
   if (stage.bytes.size() >= kStageFlushBytes) pushStage(stage, kind == Kind::Data);
@@ -161,7 +162,13 @@ void LiveEtwSource::pushStage(Stage& stage, bool data) {
   m_cv.notify_one();
 }
 
+void LiveEtwSource::addDropped(uint64_t events) {
+  std::lock_guard lock(m_mutex);
+  m_droppedPending += events;
+}
+
 void LiveEtwSource::endBuffer() {
+  std::lock_guard lock(m_stageMutex);
   // Metadata first: the data of the same buffer is explained by it.
   pushStage(m_metaStage, false);
   pushStage(m_dataStage, true);
@@ -233,6 +240,8 @@ void LiveEtwSource::run() {
     m_decoder->applyRundown(snap);
   }
   using Clock = std::chrono::steady_clock;
+  auto nextLostPoll = Clock::now() + std::chrono::seconds(1);
+  uint64_t lostSeen = 0;
   for (;;) {
     std::vector<Chunk> ready;
     uint64_t dropped = 0;
@@ -281,6 +290,16 @@ void LiveEtwSource::run() {
     }
     if (stopping) m_decoder->flush();
     if (dropped != 0) sink.onDropped(dropped);
+    if (m_config.pollRealTimeLost && !stopping && Clock::now() >= nextLostPoll) {
+      nextLostPoll = Clock::now() + std::chrono::seconds(1);
+      const uint64_t lost = m_config.pollRealTimeLost();
+      if (lost > lostSeen) {
+        sink.onDropped(lost - lostSeen);
+        std::lock_guard lock(m_mutex);
+        m_stats.realTimeBuffersLost += lost - lostSeen;
+      }
+      lostSeen = lost;  // a new session segment starts again at 0
+    }
     if (m_config.nowTicks) sink.onTimeAdvance(m_config.nowTicks());
     {
       std::lock_guard lock(m_mutex);

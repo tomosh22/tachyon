@@ -44,12 +44,17 @@ struct LiveEtwSourceConfig {
   std::chrono::milliseconds maxLag{2000};
   // The trace clock now (for the heartbeat); empty: no heartbeat.
   std::function<uint64_t()> nowTicks;
+  // Polled about once a second on the source's thread: the number of real-time buffers the session has lost
+  // so far (ETW's RealTimeBuffersLost; it restarts at 0 with every session). An increase is reported with
+  // ILiveSink::onDropped (in buffers). Empty: not polled.
+  std::function<uint64_t()> pollRealTimeLost;
 };
 
 struct LiveEtwSourceStats {
   LiveEtwDecoderStats decoder;
-  uint64_t eventsSubmitted = 0;  // events copied into chunks
-  uint64_t eventsIgnored = 0;    // events the decoder does not understand (not copied)
+  uint64_t realTimeBuffersLost = 0;  // as polled (pollRealTimeLost), summed over sessions
+  uint64_t eventsSubmitted = 0;      // events copied into chunks
+  uint64_t eventsIgnored = 0;        // events the decoder does not understand (not copied)
   uint64_t chunks = 0;
   uint64_t droppedEvents = 0;  // data events dropped: queue cap or maxLag
   uint64_t metaLost = 0;       // metadata events dropped (tables may be wrong afterwards)
@@ -77,14 +82,16 @@ class LiveEtwSource {
   // (processes, threads and modules that existed before the session). A launched process is only known after
   // the session started, so the consumer can be connected (events queue up) before this call.
   void arm(std::vector<uint32_t> rootPids, std::function<RundownSnapshot()> rundown = {});
-  // Not thread-safe against itself (one producer thread at a time; the next producer may start after the
-  // previous one has returned). Never blocks on the decoder. Copies the event if the decoder understands it.
+  // Thread-safe (two consumers overlap while a circular flush hands over to the next session's). Never
+  // blocks on the decoder. Copies the event if the decoder understands it.
   void submit(const etlconvert::EtwEvent& event);
-  // Same thread as submit(). The end of one ETW buffer: hands over what was copied since the last call.
+  // Thread-safe. The end of one ETW buffer: hands over what was copied since the last call.
   void endBuffer();
   // Thread-safe, idempotent. Decodes everything still queued (no hold-back, no lag drops), releases the
   // pending stacks, sends a last heartbeat and joins the thread.
   void finish();
+  // Thread-safe. `events` live events were lost outside the source (reported to the sink by its thread).
+  void addDropped(uint64_t events);
   // Thread-safe.
   LiveEtwSourceStats stats() const;
 
@@ -105,7 +112,8 @@ class LiveEtwSource {
   void pushStage(Stage& stage, bool data);
 
   LiveEtwSourceConfig m_config;
-  Stage m_metaStage, m_dataStage;             // producer thread only
+  std::mutex m_stageMutex;  // the producers: one consumer, or two for a moment during a flush
+  Stage m_metaStage, m_dataStage;
   std::unique_ptr<LiveEtwDecoder> m_decoder;  // created by arm(), used by the thread only
   std::function<RundownSnapshot()> m_rundown;
   mutable std::mutex m_mutex;

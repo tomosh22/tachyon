@@ -138,11 +138,13 @@ class RecordingSink final : public ILiveSink {
   void onModule(const LiveModule& mod) override {
     std::lock_guard lock(m);
     modules.push_back(mod);
+    order.push_back(mod.unloadTs != 0 ? "unload" : "load");
   }
   void onSample(uint64_t ts, uint32_t pid, uint32_t tid, uint32_t cpu, uint16_t flags,
                 std::span<const uint64_t> ips) override {
     std::lock_guard lock(m);
     samples.push_back({ts, pid, tid, cpu, flags, std::vector<uint64_t>(ips.begin(), ips.end())});
+    order.push_back("sample");
   }
   void onContextSwitch(const LiveContextSwitch& c) override {
     std::lock_guard lock(m);
@@ -203,6 +205,7 @@ class RecordingSink final : public ILiveSink {
   std::vector<Switch> switches;
   std::vector<Ready> readies;
   std::vector<uint64_t> advances;
+  std::vector<std::string> order;  // "load" / "unload" / "sample", as they reached the sink
   uint64_t dropped = 0;
 };
 
@@ -494,6 +497,61 @@ TEST(LiveEtwDecoder, AModuleLoadedAgainAtTheSameBaseReportsTheOldUnloadFirst) {
   EXPECT_EQ(sink->modules[1].unloadTs, 500u);
   EXPECT_EQ(sink->modules[2].unloadTs, 0u);
   EXPECT_EQ(sink->modules[2].loadTs, 600u);
+}
+
+TEST(LiveEtwDecoder, AReusedPidDoesNotReapTheOldProcessUnderItsLateSamples) {
+  // The pid of a followed child is reused 50 ticks after it ended. A sample of the old process that precedes
+  // its End but reaches the decoder after the new process's Start must still see the old modules: the new
+  // process's events wait until older data has had time to pass.
+  using namespace opcodes;
+  EventScript s;
+  s.process(kProcessStart, 10, 100, 4, "game.exe");
+  s.process(kProcessStart, 20, 300, 100, "helper.exe");
+  s.thread(kThreadStart, 21, 300, 301);
+  s.image(kImageLoad, 22, 300, kGameBase, 0x10000, 0x5F001234, kGamePath);
+  s.process(kProcessEnd, 200, 300, 100, "helper.exe");
+  s.process(kProcessStart, 250, 300, 100, "helper2.exe");  // the pid is reused
+  s.thread(kThreadStart, 251, 300, 302);
+  s.image(kImageLoad, 252, 300, kGameBase, 0x20000, kNtdllStamp, kNtdllPath);
+  s.sample(150, 301, 300, 0, kGameBase + 0x10);  // the old process's, delivered late
+  auto sink = std::make_shared<RecordingSink>();
+  LiveEtwDecoderConfig cfg = decoderConfig(sink);
+  cfg.followChildren = true;
+  LiveEtwDecoder decoder(cfg);
+  for (const HexEvent& e : s.events()) decoder.onEvent(e.view());
+  EventScript later;
+  later.sample(250 + kReuseDeferSeconds * 10'000'000 + 1, 999, 999, 0, 0x10);
+  for (const HexEvent& e : later.events()) decoder.onEvent(e.view());
+  decoder.flush();
+  EXPECT_GT(decoder.stats().deferredForPidReuse, 0u);
+  // The old sample reached the sink while the old module was still known; only then the old one went away
+  // and the new process's module came.
+  ASSERT_EQ(sink->samples.size(), 1u);
+  EXPECT_EQ(sink->samples[0].tid, 301u);
+  const std::vector<std::string> expected = {"load", "sample", "unload", "load"};
+  EXPECT_EQ(sink->order, expected);
+  ASSERT_EQ(sink->modules.size(), 3u);
+  EXPECT_EQ(sink->modules[1].unloadTs, 200u);
+  EXPECT_EQ(sink->modules[2].size, 0x20000u);
+  EXPECT_NE(sink->thread(302), nullptr) << "the new process's thread was replayed";
+}
+
+TEST(LiveEtwDecoder, ATimestampFarAheadNeverMovesTime) {
+  using namespace opcodes;
+  EventScript s;
+  s.process(kProcessStart, 10, 100, 4, "game.exe");
+  s.image(kImageLoad, 12, 100, kGameBase, 0x10000, 0x5F001234, kGamePath);
+  s.process(kProcessEnd, 1000, 100, 4, "game.exe");
+  auto sink = std::make_shared<RecordingSink>();
+  LiveEtwDecoder decoder(decoderConfig(sink));
+  for (const HexEvent& e : s.events()) decoder.onEvent(e.view());
+  EventScript hostile;
+  hostile.sample((kMaxAheadSeconds + 1) * 10'000'000 + 2000, 999, 999, 0, 0x10);
+  hostile.thread(kThreadStart, ~uint64_t{0} - 5, 999, 998);
+  for (const HexEvent& e : hostile.events()) decoder.onEvent(e.view());
+  EXPECT_EQ(decoder.stats().malformed, 2u);
+  EXPECT_EQ(sink->module(100, kGameBase, true), nullptr) << "the process was not reaped by a bogus time";
+  EXPECT_EQ(decoder.stats().maxTs, 1000u);
 }
 
 TEST(LiveEtwDecoder, AnEndedProcessIsForgottenAfterTheGracePeriod) {

@@ -738,6 +738,7 @@ TEST_F(EtwLiveTest, CircularFlushKeepsTheLiveViewRunning) {
   auto flushed = backend.flush("flush-a", 3);
   ASSERT_TRUE(flushed.ok()) << flushed.error().toString();
   const uint64_t flushTs = etw::traceClockNow();
+  const double liveGap = backend.diagnostics().lastFlushGapSeconds;
   EXPECT_TRUE(fs::exists(flushed->tracePath));
   EXPECT_TRUE(waitForTargetExit(backend, kSeconds + 60));
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -754,6 +755,31 @@ TEST_F(EtwLiveTest, CircularFlushKeepsTheLiveViewRunning) {
          " dropped=" + std::to_string(sink->dropped));
   EXPECT_GT(beforeFlush, 10000u);
   EXPECT_GT(after, 10000u) << "the consumer followed the restarted session";
+  for (const std::string& w : stopped->warnings)
+    EXPECT_EQ(w.find("real-time"), std::string::npos) << "unexpected live warning: " << w;
+
+  // The live view must not widen the capture gap of a flush (no kernel session runs between the stop of the
+  // old segment and the start of the next): compare with a plain circular capture of the same workload.
+  double plainGap = -1;
+  {
+    WindowsEtwBackend plain;
+    ASSERT_TRUE(plain.checkPrivileges().ok());
+    CaptureOptions po = spinOptions(dir() / "circ-plain.tachyon", 7, false);
+    po.circularMb = 64;
+    auto ps = plain.start(po);
+    ASSERT_TRUE(ps.ok()) << ps.error().toString();
+    std::this_thread::sleep_for(std::chrono::seconds(4));
+    auto pf = plain.flush("flush-plain", 3);
+    ASSERT_TRUE(pf.ok()) << pf.error().toString();
+    plainGap = plain.diagnostics().lastFlushGapSeconds;
+    auto pstop = plain.stop();
+    ASSERT_TRUE(pstop.ok()) << pstop.error().toString();
+  }
+  report("flush gap: live " + std::to_string(liveGap * 1000.0) + " ms, plain " +
+         std::to_string(plainGap * 1000.0) + " ms");
+  ASSERT_GE(liveGap, 0.0);
+  ASSERT_GE(plainGap, 0.0);
+  EXPECT_LT(liveGap, plainGap + 0.1) << "the live consumer's drain must not widen the capture gap";
 }
 
 // ---- tachyon-cli live

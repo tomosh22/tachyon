@@ -106,6 +106,19 @@ Result<void> WindowsEtwBackend::openLive(const CaptureOptions& options, const Se
   sc.decoder.stackWindowMs = 100;
   sc.decoder.deviceMapper = etlconvert::DevicePathMapper::fromSystem();
   sc.nowTicks = [] { return etw::traceClockNow(); };
+  sc.pollRealTimeLost = [this]() -> uint64_t {
+    std::lock_guard ctl(m_ctlMutex);
+    EtwSession* session = nullptr;
+    {
+      std::lock_guard lock(m_mutex);
+      session = m_session.get();
+    }
+    if (session != nullptr && session->running()) {
+      auto q = session->query();
+      if (q.ok()) m_lastRtLost = q->realTimeBuffersLost;
+    }
+    return m_lastRtLost.load();
+  };
   live = std::make_unique<etw::LiveEtwSource>(std::move(sc));
   live->start();
   auto c = etw::RealTimeConsumer::start(cfg.name, *live);
@@ -357,6 +370,8 @@ Result<void> WindowsEtwBackend::startRecording(const CaptureOptions& requested,
   m_target = std::move(target);
   m_live = std::move(live);
   m_consumer = std::move(consumer);
+  m_liveWarnings.clear();
+  m_lastRtLost = 0;
   m_diag.live = {};
   m_diag.liveConsumer = {};
   m_diag.startInfo = m_session->startInfo();
@@ -435,6 +450,22 @@ etlconvert::ConvertOptions WindowsEtwBackend::convertOptionsFor(const CaptureOpt
   return co;
 }
 
+// Problems of the live path that did not fail the capture. Real-time buffers lost mean the live view missed
+// events; the final trace has them.
+void WindowsEtwBackend::addLiveWarnings(CaptureResult& result, const SessionCounters& counters) {
+  if (counters.realTimeBuffersLost != 0)
+    result.warnings.push_back(
+        std::to_string(counters.realTimeBuffersLost) +
+        " real-time buffers were lost by the live view's consumer (it fell behind); the "
+        "final trace is complete, the live view had gaps");
+  std::vector<std::string> pending;
+  {
+    std::lock_guard lock(m_mutex);
+    pending.swap(m_liveWarnings);
+  }
+  for (std::string& w : pending) result.warnings.push_back(std::move(w));
+}
+
 Result<CaptureResult> WindowsEtwBackend::stop() {
   std::unique_ptr<EtwSession> session;
   std::unique_ptr<etw::TargetProcess> target;
@@ -490,7 +521,11 @@ Result<CaptureResult> WindowsEtwBackend::stop() {
     // Events still in the session's buffers reach a real-time consumer only when they are flushed first.
     liveStop.eventsBeforeFlush = consumer->stats().events;
     const auto flushBegan = std::chrono::steady_clock::now();
-    auto flushed = session->flushBuffers();
+    Result<void> flushed = ok();
+    {
+      std::lock_guard ctl(m_ctlMutex);
+      flushed = session->flushBuffers();
+    }
     if (flushed.ok())
       consumer->waitQuiet(std::chrono::milliseconds(250), std::chrono::milliseconds(1500),
                           std::chrono::seconds(4));
@@ -499,13 +534,20 @@ Result<CaptureResult> WindowsEtwBackend::stop() {
     liveStop.flushWaitSeconds = secondsSince(flushBegan);
     liveStop.eventsAfterFlushWait = consumer->stats().events;
   }
-  auto counters = session->stop();
+  Result<SessionCounters> counters = makeError(ErrorCode::Internal, "not stopped");
+  {
+    std::lock_guard ctl(m_ctlMutex);
+    counters = session->stop();
+  }
   // The session has stopped (or could not): the consumer drains what is left, then the source decodes the
   // rest and ends the live stream, before the (slow) conversion starts.
   shutdownLive(consumer, live, &liveStop);
   if (!counters.ok()) return finishFailed(counters.error());
   const fs::path etl = session->config().etlPath;
-  session.reset();
+  {
+    std::lock_guard ctl(m_ctlMutex);
+    session.reset();
+  }
   target.reset();
   if (counters->eventsLost != 0 || counters->logBuffersLost != 0 || counters->realTimeBuffersLost != 0)
     TACHYON_LOG_WARN("etw: data loss: {} events, {} log buffers, {} real-time buffers", counters->eventsLost,
@@ -529,6 +571,7 @@ Result<CaptureResult> WindowsEtwBackend::stop() {
   result.tracePath = options.outPath;
   result.eventsLost = std::max<uint64_t>(counters->eventsLost, stats->eventsLost);
   result.durationS = durationS;
+  addLiveWarnings(result, *counters);
   if (m_config.keepRawEtl) {
     result.rawPath = etl;
   } else {
@@ -570,41 +613,60 @@ Result<CaptureResult> WindowsEtwBackend::flush(std::string name, uint32_t second
   }
 
   // 1. Write everything buffered, then stop. The stopped file is a complete ETL (end rundown included).
-  auto flushed = old->flushBuffers();
+  Result<void> flushed = ok();
+  {
+    std::lock_guard ctl(m_ctlMutex);
+    flushed = old->flushBuffers();
+  }
   if (!flushed.ok()) TACHYON_LOG_WARN("etw: flush before stop failed: {}", flushed.error().toString());
   if (flushed.ok() && oldConsumer)
     oldConsumer->waitQuiet(std::chrono::milliseconds(250), std::chrono::milliseconds(1500),
                            std::chrono::seconds(4));
-  auto counters = old->stop();
+  Result<SessionCounters> counters = makeError(ErrorCode::Internal, "not stopped");
+  {
+    std::lock_guard ctl(m_ctlMutex);
+    counters = old->stop();
+  }
   const auto stoppedAt = std::chrono::steady_clock::now();
   const fs::path oldEtl = oldCfg.etlPath;
-  // The live consumer of the stopped segment delivers the buffers that are left and ends; the source keeps
-  // running and the next segment gets a new consumer.
-  if (oldConsumer) {
-    oldConsumer->stop(std::chrono::seconds(10));
-    oldConsumer.reset();
-  }
   if (!counters.ok()) {
+    if (oldConsumer) oldConsumer->stop(std::chrono::seconds(10));
     std::lock_guard lock(m_mutex);
     m_lifecycle.flushRestartFailed();
     return counters.error();
   }
-  old.reset();
+  {
+    std::lock_guard ctl(m_ctlMutex);
+    old.reset();
+  }
 
-  // 2. Restart on the next segment. The time between the stop above and the new session being configured is
-  //    the capture gap.
+  // 2. Restart on the next segment FIRST: the time between the stop above and the new session being
+  // configured
+  //    is the capture gap, and nothing the live view does may widen it. The live consumer of the stopped
+  //    segment is drained only afterwards (it reads a session that is gone and the new one is already
+  //    recording; two consumers on two sessions coexist).
   auto next = startSegment(options, segment + 1);
   const double gapS = secondsSince(stoppedAt);
   std::unique_ptr<etw::RealTimeConsumer> nextConsumer;
+  std::string liveWarning;
   if (next.ok() && live != nullptr) {
     auto c = etw::RealTimeConsumer::start((*next)->config().name, *live);
-    if (c.ok())
+    if (c.ok()) {
       nextConsumer = std::move(*c);
-    else
-      TACHYON_LOG_WARN("etw: the live view lost its consumer after flush: {}", c.error().toString());
+    } else {
+      liveWarning = "the live view lost its real-time consumer when the session restarted after a flush (" +
+                    c.error().toString() + "); the live view stops updating, the trace is not affected";
+      TACHYON_LOG_WARN("etw: {}", liveWarning);
+      live->addDropped(1);
+    }
+  }
+  if (oldConsumer) {
+    oldConsumer->stop(std::chrono::seconds(10));
+    oldConsumer.reset();
   }
   {
     std::lock_guard lock(m_mutex);
+    if (!liveWarning.empty()) m_liveWarnings.push_back(liveWarning);
     if (next.ok()) {
       m_session = std::move(*next);
       m_consumer = std::move(nextConsumer);
@@ -634,6 +696,7 @@ Result<CaptureResult> WindowsEtwBackend::flush(std::string name, uint32_t second
   const double freq = stats->clockFrequencyHz != 0 ? static_cast<double>(stats->clockFrequencyHz) : 1.0;
   result.durationS =
       stats->endTs > stats->startTs ? static_cast<double>(stats->endTs - stats->startTs) / freq : sinceStartS;
+  addLiveWarnings(result, *counters);
   std::error_code ec;
   if (m_config.keepRawEtl) {
     const fs::path raw = dir / (name + ".etl");
