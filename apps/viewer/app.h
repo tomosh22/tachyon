@@ -157,6 +157,8 @@ class App {
   analysis::QueryExecutor& queryExecutor() { return *m_queryExecutor; }
   PanelRegistry& panels() { return m_panels; }
   CommandRegistry& commands() { return m_commands; }
+  // Main-thread only. Rebuilds the default docked layout at the next frame (View > Reset layout).
+  void resetLayout();
   const std::shared_ptr<Document>& document() const { return m_document; }
   uint64_t frameCount() const { return m_frameCount; }
   bool loading() const { return m_openJob != 0; }
@@ -258,6 +260,7 @@ class App {
   void applyPendingStyle();
   void drawUi();
   void drawMenuBar();
+  void updateDockLayout();
   void drawStatusBar();
   void drawCommandPalette();
   void saveSettings();
@@ -321,6 +324,8 @@ class App {
   PathPicker m_pathPicker;
 
   bool m_paletteRequested = false;
+  bool m_layoutChecked = false;         // WP-67c: default dock layout built, or a saved one found
+  bool m_layoutResetRequested = false;  // WP-67c: View > Reset layout
   bool m_paletteOpen = false;
   std::array<char, 256> m_paletteQuery{};
   int m_paletteSelected = 0;

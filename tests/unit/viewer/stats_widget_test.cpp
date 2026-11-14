@@ -42,7 +42,7 @@ AppOptions headlessOptions() {
 
 class Harness {
  public:
-  Harness() : app(makeNullRenderer(), headlessOptions()) {
+  Harness() : app(makeNullRenderer(1920.0f, 1080.0f), headlessOptions()) {
     std::string error;
     EXPECT_TRUE(app.init(error)) << error;
     ImGuiIO& io = ImGui::GetIO();
