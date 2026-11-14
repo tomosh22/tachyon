@@ -120,14 +120,20 @@ struct TraceView {
     return pids;
   }
 
-  // The pid of the process whose image (or command line executable) starts with `prefix` (lower case).
+  // The pid of the process whose image (or command line executable) starts with `prefix` (lower case). A
+  // target process wins: the rundown lists every process of the machine, and earlier tests leave processes
+  // with the same image running (m_leftovers).
   uint32_t pidOfImage(const std::string& prefix) const {
+    const std::set<uint32_t> targets = targetPids();
+    uint32_t any = 0;
     for (const trace::ProcessRec& p : processes) {
       const std::string name = lower(str(p.name));
       const std::string exe = lower(etw::baseNameOf(etw::executablePathOf(str(p.command_line))));
-      if (startsWith(name, prefix) || startsWith(exe, prefix)) return p.pid;
+      if (!startsWith(name, prefix) && !startsWith(exe, prefix)) continue;
+      if (targets.count(p.pid) != 0) return p.pid;
+      if (any == 0) any = p.pid;
     }
-    return 0;
+    return any;
   }
 
   std::set<uint32_t> tidsOf(uint32_t pid) const {
