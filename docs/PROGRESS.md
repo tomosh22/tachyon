@@ -2,6 +2,20 @@
 
 Maintained by the orchestrator. Updated after every merge. Status values: not started, in progress, in review, merged, blocked, needs Windows verification (also used for privileged-Linux verification).
 
+## Current status (2026-11-15)
+
+- **Done:** every work package in the plan except WP-14 is merged, including the optional WP-65 live view, plus follow-ups (letter suffixes, WP-66–69, WP-71b, WP-67c–f). CI is green on linux-release, linux-asan and windows.
+- **Needs the user or the engine:**
+  - WP-14 (engine capture validation).
+  - Milestone gates M4 (manual hitch hunt; 60 fps on `large` on a real GPU), M5 (engine integration, overhead) and M6 (flight recorder, CI report in the engine pipeline, 10-minute engine capture). See Milestone gates.
+- **Needs a real Windows machine:** see "Windows / privileged verification queue".
+- **Plan concerns awaiting a decision:** see "Plan concerns awaiting user decision" (40 ns SDK target, 3× resident memory, M5 overhead wording). Also: uniform interning 11.99 s vs 10 s; the timeline 64-row frame target on `large` on a 4-vCPU VM; unprivileged Linux capture at perf_event_paranoid 1–2.
+- **Optional viewer follow-ups:**
+  - Call Graph Thread States column (L; needs a libs query).
+  - Call Graph thread / time-display filters (M).
+  - Thread-state tint behind the timeline activity strip (M).
+  - Warnings banner collapse button (S).
+
 ## Work packages
 
 | WP | Title | Lane | Status | Branch | Date |
@@ -268,7 +282,7 @@ Found by running the real viewer under Xvfb (2026-11-14): with a fresh settings 
 
 In the docked layout the six fixed numeric columns (~35.5 em) took the whole ~530 px panel and the stretch Function column shrank to one character. The name column now gets at least max(12 em, min(18 em, 40% of the panel)); when the panel is narrower than that plus the other columns, the table scrolls horizontally with the name column frozen (Function List, Call Graph, Butterfly; Module default 8 → 6.5 em). Column ids and flags unchanged, so saved table settings stay valid. Measured name width: 15–17 em at 1600x900, ≥ 12 em at 1280x720. Orchestrator review (116 lines), CI green on all three jobs, local release ctest 2458/2458.
 
-## WP-65w / WP-65c status (2026-11-08, work stopped at the user's request)
+## WP-65w / WP-65c notes (merged 2026-11-14)
 
 - WP-65w: MERGED 2026-11-14. Verifier FAIL on one blocking issue, fixed by the author: in live mode a circular flush drained the live consumer (up to ~20 s) before restarting the session, widening the final trace's gap; the next session now starts first, and the Windows test asserts live gap < plain gap + 100 ms. Also fixed from the review: real-time buffer loss reported during the capture, a consumer that fails to restart after a flush is reported, pid reuse within the hold-back no longer drops or misattributes the old process's late samples (test fails without the fix), far-ahead timestamps ignored. CI green on all three jobs (run 43643945573); local release ctest 2448/2448. Measured on CI: latency p50 ~0.95 s / p95 ~1.4 s (asserted 3 s), no gaps, 0 lost buffers, live vs final shares within 0.015 points. Open: deferred launch misses exe/ntdll live; pid-less samples dropped in process mode; system-mode rundown cost unmeasured; live vs plain flush gap numbers not captured (CI hides passing output). Needs Windows verification on a real many-core machine: live latency, a stalled consumer (does the hybrid file + real-time session ever lose file events?), system-mode live.
 - WP-65c: MERGED 2026-11-14 (orchestrator review, diff ~390 lines; CI green on all three jobs incl. the privileged 30 s window run; local full release ctest 2421 tests, one unrelated failure below). Delivered items 1–8 of its brief; numbers in docs/specs/live.md (30 s window: latency p95 0.74 s, RSS 96 MiB flat). Not done: incremental LOD (would need libs/analysis), appendable frame view in SymbolService. Minor: for one swap the Thread Interaction rows keep the previous snapshot's ThreadIdx (labels fall back to the tid; a click in that moment can select another thread). Watch: RuntimeStress.SixteenThreadsNoCorruptionAndExactAccounting failed once in a parallel run on 2026-11-14 (not reproduced in 25 reruns, 15 of them under load; failure message not captured).
@@ -307,7 +321,7 @@ Verifier PASS (no blocking issues). Orchestrator change: a Windows build without
 - WP-70b: MERGED (orchestrator review; CI green). Original item: `warnings` in CaptureResult (capture_backend.h, appended at the end of the struct) plumbed into capture_done; block SIGPIPE around the launch release write; pre-check threads × cpus fds against RLIMIT_NOFILE (raise soft to hard, and name the count in the error); "no ETW capture is running" wording in the shared lifecycle.
 - WP-34c: MERGED (orchestrator review; CI green). The DIA call site is best effort (last own-file line row at or before the address). Original item: add `callSiteFile`/`callSiteLine` (the physical function's call site of the outermost inline) to ResolvedAddress, filled by DWARF (`sites[n-1]`) and DIA; then `linesForFunction` uses it for exact inline call-site lines. (WP-34b found that providers put callee-internal positions on outer frames, so `inlines.back()` is NOT the physical call site.)
 
-- WP-34b: use the exact inline call-site line (`ra.inlines.back()` when its file is the function's file; providers already put call-site lines on outer frames) instead of the nearest-preceding-row approximation; handle a same-file inlined callee; clamp `readImageBytes` size so a hostile image cannot cause a huge allocation (bad_alloc); bound the SourceLocator cache.
+- WP-34b — DONE (merged): use the exact inline call-site line (`ra.inlines.back()` when its file is the function's file; providers already put call-site lines on outer frames) instead of the nearest-preceding-row approximation; handle a same-file inlined callee; clamp `readImageBytes` size so a hostile image cannot cause a huge allocation (bad_alloc); bound the SourceLocator cache.
 - SdkOverheadPerf on the Windows runner now consistently measures 95–110 ns (it was 68 ns on 2026-10-25; the SDK code is unchanged, so the runner is slower). The orchestrator set the Windows gate to 160 ns, which is 2× the proposed 80 ns binding budget, until the user decides the 40 ns plan concern. Linux stays at 80 ns.
 
 - Test hygiene (orchestrator, done): the testbed share checks skip when the load average exceeds the core count; the cancellation-latency tests assert at 2× their 50 ms budget. Both only failed when parallel agents overloaded the 4-core dev box.
@@ -316,10 +330,10 @@ Verifier PASS (no blocking issues). Orchestrator change: a Windows build without
 
 - WP-53b: MERGED. Cold fiber-aware cancel now takes 10–33 ms (was 134–212 ms). Absolute blend budgets are met (warm bottomUp 45–70 ms, topDown 55–130 ms, butterfly 64 ms; cold 0.2 s and 0.4 s fiber-aware). caller_addr uses `lo < caller <= hi`. Orchestrator change: the latency test asserts at 2× its 50 ms budget, like the other perf budgets. Original item: poll cancellation in the fiber piece computation and the blend-index sorts (cold fiber-aware cancel took 134–212 ms); replace the 3× ratio with absolute budgets (warm blended bottomUp/topDown/butterfly ≤ 100 ms, assert 200 ms; cold ≤ 1 s, assert 2 s, on the 5 M / 1 M model); match mapped frames with `lo < caller_addr <= hi`, since caller_addr is a return address; thread-safety comment on lockSummaryShared.
 
-- WP-33b (also): empty-stack samples are counted in topDown's root exclusive but dropped by bottomUp under KernelFrames::Show/Group. Result: Function List % ≠ Call Graph % on traces with frameless samples (repro: 80% vs 100%). Fix in libs/analysis with a `<no stack>` row (kRootKey) in bottomUp, or by excluding the samples from topDown, consistently in both.
+- WP-33b (also) — DONE in WP-33b: empty-stack samples are counted in topDown's root exclusive but dropped by bottomUp under KernelFrames::Show/Group. Result: Function List % ≠ Call Graph % on traces with frameless samples (repro: 80% vs 100%). Fix in libs/analysis with a `<no stack>` row (kRootKey) in bottomUp, or by excluding the samples from topDown, consistently in both.
 - Viewer polish (with WP-48): DONE (hints and % cell note were on main; confirmed by WP-67).
 
-- WP-33b: `Filter::subtreePath` (FunctionKey path prefix, applied after flatten; hashed in QueryCache), then switch the Call Graph "Filter to subtree" to it and drop the main-thread subtree resolver. Also: pie chart gets a "self" slice; selected-row deep-cap message.
+- WP-33b — DONE (merged 2026-11-03): `Filter::subtreePath` (FunctionKey path prefix, applied after flatten; hashed in QueryCache), then switch the Call Graph "Filter to subtree" to it and drop the main-thread subtree resolver. Also: pie chart gets a "self" slice; selected-row deep-cap message.
 
 - WP-02b: done by the orchestrator. testbed_tests are RUN_SERIAL (the CPU-share checks failed when ctest -j oversubscribed the cores; the verifier reproduced this on pre-existing binaries). LocatorTest.ConcurrentDownloadsAreBounded now asserts only the bound (≤ 2), not that the limit is reached. CancellationTest.TwentyMillion measured 42.6 ms against 50 ms under load average 10; watch it.
 - WP-21b: MERGED (verifier PASS). Cancel or destroy with 4 stalled transfers now takes 18–130 ms (was 16 s); curl idle CPU is 0.15%; pins are balanced. Low follow-ups: catch thread creation failure in the WinHTTP CancelWatcher; pins taken via setLocate(makeDefaultLocate(...)) are never unpinned; the remembered-model overload of resolveAllAsync needs the model to outlive waitAll. Original item: make SymbolService/SymbolLocator downloads cancellable mid-transfer, so closing a document with symbol servers configured doesn't block the UI (measured 16 s with a slow server). Call `unpin()` when providers close.
@@ -401,6 +415,13 @@ Hardening follow-ups assigned to WP-13: pipe client SQOS flags (SECURITY_SQOS_PR
 build/<preset>/bin/tachyon-viewer build/<preset>/fixtures/medium.tachyon
 ```
 Check by hand: window opens, Trace Info panel shows 16 threads / 7,486,737 samples, Ctrl+P palette, File > Open browser, drag-and-drop, View > Theme / UI Scale, layout persists across restarts. The viewer has only been run headless and under Xvfb so far.
+
+### WP-67e / WP-67f (Windows desktop)
+- **Default layout:** with a fresh config dir (`--config <new dir>\settings.json`), the default layout matches docs (Function Statistics strip / Threads / analysis tabs + Source) and the session tab shows the file name.
+- **Themes:**
+  - View > Theme > System follows Settings > Personalization > Colors > "Choose your app mode". Switch it while the viewer runs; the viewer should follow within about 3 s.
+  - Light and Dark are readable at 100%, 150% and 200% display scaling. The 200 px thread-label gutter fits the eye / tid / name / chevron.
+- **Instance chart:** in Function Statistics, the Clip p99 / Log / Threshold controls work, and dragging the threshold line works.
 
 ## Open questions (Part 7) and assumed defaults
 
