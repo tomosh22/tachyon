@@ -351,6 +351,9 @@ class Converter {
   // Per cpu, the task that last got the cpu (SWITCH_CPU_WIDE fallback): stands in for a switch-out record
   // whose own tid is unusable.
   std::unordered_map<uint32_t, uint32_t> m_cpuRunning;
+  // Per cpu, the target task most recently switched IN by a per-task PERF_RECORD_SWITCH and not yet switched
+  // out (see onSwitchRecord for the attribution rule).
+  std::unordered_map<uint32_t, uint32_t> m_taskOnCpu;
   // The thread record of a tid: the live one, else the exited one; -1 when unknown.
   int64_t findThread(uint32_t tid) const {
     auto it = m_tidToThread.find(tid);
@@ -1051,17 +1054,42 @@ void Converter::onSwitchRecord(const ParsedRecord& r) {
     } else {
       oldTid = r.nextPrevTid;  // the task that ran before
       newTid = r.tid;
-      const bool repeatsSwitchOut = last.valid && last.oldTid == oldTid && last.newTid == newTid;
+      // The in-record of an exiting task names it -1 as well; it repeats the out-record just seen.
+      const bool repeatsSwitchOut =
+          last.valid && (last.oldTid == oldTid || oldTid == kBadTid) && last.newTid == newTid;
       last.valid = false;
       if (repeatsSwitchOut) return;  // the switch-out record already said it
     }
   } else if (out) {
     oldTid = r.tid;
+    // Per-task events see only switches of target tasks, so the task tracked on a cpu (switched in, no
+    // switch-out since) is the only one that can leave it. An exiting task's final switch-out is emitted
+    // after the task is unhashed and carries tid -1; it is attributed to the task tracked on its cpu when
+    //  - the cpu has a tracked task (otherwise unattributed), and
+    //  - that task was tracked only if its EXIT record had not been merged yet when it was switched in (the
+    //    kernel emits EXIT after the last switch-in and before the final switch-out, so "no EXIT yet" and an
+    //    EXIT after the switch-out are both consistent; a switch-in of an already exited tid is stale).
+    // Any switch-out on a cpu (named or not) ends the tracked run, and lost records drop all tracking, so a
+    // wrong guess needs a switch-in that was never recorded. Records are merged in time order (mergeStreams),
+    // so "the task's EXIT is at or after the switch-out" holds or the EXIT arrives later in the stream.
+    // Whatever does not satisfy the rule stays unattributed and is counted in schedUnnamed.
+    auto tracked = m_taskOnCpu.find(r.cpu);
+    if (tracked != m_taskOnCpu.end()) {
+      if (oldTid == kBadTid) oldTid = tracked->second;
+      m_taskOnCpu.erase(tracked);
+    }
   } else {
     newTid = r.tid;
+    const int64_t known = newTid != kBadTid ? findThread(newTid) : -1;
+    const bool alreadyExited = known >= 0 && m_threads[static_cast<size_t>(known)].exited;
+    if (newTid != kBadTid && !alreadyExited)
+      m_taskOnCpu[r.cpu] = newTid;
+    else
+      m_taskOnCpu.erase(r.cpu);
   }
   if (oldTid == kBadTid || newTid == kBadTid) {
     ++m_stats.schedUnnamed;
+    if (r.type() == kRecordSwitchCpuWide) m_cpuRunning.erase(r.cpu);  // who runs there now is unknown
     return;
   }
   if (r.type() == kRecordSwitchCpuWide && newTid != 0)
@@ -1111,7 +1139,11 @@ void Converter::onRecord(const ParsedRecord& r) {
     case kRecordMmap:
     case kRecordMmap2: onMmap(r); break;
     case kRecordLost:
-    case kRecordLostSamples: m_stats.eventsLost += r.lost; break;
+    case kRecordLostSamples:
+      m_stats.eventsLost += r.lost;
+      m_taskOnCpu.clear();  // a lost switch record makes the tracked tasks unreliable
+      m_cpuRunning.clear();
+      break;
     case kRecordThrottle: onThrottle(r, false); break;
     case kRecordUnthrottle: onThrottle(r, true); break;
     case kRecordSwitch:
@@ -1358,7 +1390,10 @@ Result<void> Converter::finalize() {
     m_stats.warnings.push_back(std::to_string(n) + " tracepoint record(s) of type " +
                                std::to_string(key >> 32) + " (payload " + std::to_string(key & 0xFFFFFFFFu) +
                                " bytes) do not match the recorded sched formats and were ignored");
-  if (m_stats.schedUnnamed > 0)
+  // A small residue is information (CaptureInfo convert_stats), not a banner warning.
+  const uint64_t switchRecords = m_stats.schedSwitchEvents + m_stats.schedUnnamed;
+  if (m_stats.schedUnnamed >= 100 ||
+      (m_stats.schedUnnamed > 0 && m_stats.schedUnnamed * 1000 >= switchRecords))
     m_stats.warnings.push_back(
         std::to_string(m_stats.schedUnnamed) +
         " switch records of a task the kernel could no longer name (it was exiting) could "
@@ -1445,6 +1480,7 @@ Result<void> Converter::finalize() {
                           {"samples_dropped_window", m_stats.samplesDroppedWindow},
                           {"records_unsupported", m_stats.recordsUnsupported},
                           {"records_malformed", m_stats.recordsMalformed},
+                          {"sched_unattributed_switches", m_stats.schedUnnamed},
                           {"frames_total", m_stats.framesTotal},
                           {"frames_unmapped", m_stats.framesUnmapped},
                           {"frames_kernel", m_stats.framesKernel},
