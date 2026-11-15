@@ -61,6 +61,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-67c | Viewer default docked layout (first launch) and View > Reset layout | C | merged | wp/67c-default-layout | 2026-11-15 |
 | WP-67d | Readable function-name column in Function List, Call Graph, Butterfly | C | merged | wp/67d-name-columns | 2026-11-15 |
 | WP-71b | Attribute exiting tasks' switch records; small residue to Trace Info | L | merged | wp/71b-exit-switch | 2026-11-15 |
+| WP-67e | Superluminal-style layout, session tab, System/Light/Dark themes | C | merged | wp/67e-superluminal-layout | 2026-11-15 |
 | WP-68 | Viewer performance pass 2 (LOD direct zoom, flame, WP-54 draw lists, single-decode load, preview symbol reuse) | C | merged (partial: frame targets remain exceptions) | wp/68-perf-pass2 | 2026-11-08 |
 | WP-69 | Report/export/doctor follow-ups and test flakes (WP-62b, symbol-setup helper, Windows doctor) | D | merged (4a moved to WP-66b) | wp/69-tooling | 2026-11-08 |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
@@ -440,4 +441,14 @@ Check by hand: window opens, Trace Info panel shows 16 threads / 7,486,737 sampl
 - A residue under 100 records and under 0.1% of switch records goes only to CaptureInfo convert_stats.sched_unattributed_switches, shown in Trace Info. Anything larger stays a warning.
 - Follow-up: the tracepoint path still records readying_tid 0 for an unhashed waker (exit_notify wakeups).
 - Spec text: capture-backend.md, "Clarifications added with WP-71b".
+
+## WP-67e notes
+- Default layout: Function Statistics (+ Trace Info) strip / Threads Timeline / bottom-left tab group (Call Graph, Function List, Butterfly, Thread Interaction, capture family) + Source bottom-right. Settings::layoutVersion (kLayoutVersion = 2) replaces an older saved layout once; bump it whenever the default layout changes. Session tab strip with the trace name.
+- Themes: System (default) | Light | Dark. System follows the OS: Windows HKCU ...\Themes\Personalize AppsUseLightTheme; Linux xdg portal color-scheme, then gsettings, then GTK_THEME, else dark. Probed off the UI thread every 3 s (apps/viewer/os_theme.cpp). Old "dark" settings (the old default) migrate to System. Palettes, including thread-state colours, are in apps/viewer/theme.cpp, with contrast and distinctness tests.
+- Deviation: dock tab bars stay at the top (ImGui 1.91.5 has no bottom tab bars). No toolbar icons (no icon font).
+- Dev hooks: --demo-select, TACHYON_WINDOW_SIZE=WxH (screenshots).
+- Verifier: PASS. Non-blocking notes: muted text on selected rows in dark mode is 3.6:1; a failed settings save re-applies the default layout on each launch.
+- Follow-ups: Call Graph Thread States column (L, needs a libs query); Function Statistics threshold (S, now in WP-67f); Call Graph thread / time-display filter combos (M); thread-state tint behind the timeline activity strip (M); warnings banner collapse button (S).
+- Needs Windows verification: a live OS theme switch on a real desktop, docking and the session tab on Windows, DPI scaling with the 200 px gutter.
+- Related fix on main (1ecc212): Linux wait reason 0 (switch-record captures, reason unknown) is now Other/grey, not Preempted/amber.
 
