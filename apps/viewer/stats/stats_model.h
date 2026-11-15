@@ -87,6 +87,45 @@ int stepSelection(int current, int delta, int count);
 // unit chosen by magnitude (via ticksToMs). A zero clock frequency counts as 1 GHz.
 std::string formatDuration(double ticks, double clockHz);
 
+// ---- per-instance chart scale (WP-67f)
+// -----------------------------------------------------------------------
+
+// Thread-safe: pure function. Nearest-rank percentile (p in [0,1]) of `durations` (need not be sorted); 0 for
+// an empty list. n == 1 gives that value; for n < 100 the 99th percentile is the maximum.
+uint64_t percentileTicks(std::vector<uint64_t> durations, double p);
+
+struct InstanceScale {
+  uint64_t top = 1;       // the duration that fills the full chart height (>= 1)
+  uint64_t maxTicks = 1;  // the longest duration
+  bool clipping = false;  // top < maxTicks: longer bars are clipped and marked
+  uint64_t lo = 1;        // log scale: the duration at height 0 (the shortest shown, at least 1 tick)
+  bool log = false;       // log requested; it is only applied when top > lo (see logActive)
+  bool logActive() const { return log && top > lo; }
+};
+
+// Thread-safe: pure function. The vertical scale for `durations`: with `clip` the 99th percentile (when it is
+// below the maximum, otherwise the maximum, i.e. nothing to clip), else the maximum.
+InstanceScale makeInstanceScale(const std::vector<uint64_t>& durations, bool clip, bool log);
+
+// Thread-safe: pure function. Bar height in [0,1] of the full height for a duration: d / top (linear) or
+// (log d - log lo) / (log top - log lo) (log, anchored at the shortest shown duration so a spread
+// distribution fills the height; finite and monotonic, 0 at or below lo). Linear when top <= lo. Durations
+// above `top` give 1.
+double barFraction(const InstanceScale& scale, uint64_t duration);
+
+// Thread-safe: pure function. The duration at height fraction `f` (inverse of barFraction, f clamped to
+// [0,1]).
+uint64_t ticksAtFraction(const InstanceScale& scale, double f);
+
+// Thread-safe: pure function. True when a bar of this duration is clipped by the scale.
+inline bool barClipped(const InstanceScale& scale, uint64_t duration) {
+  return scale.clipping && duration > scale.top;
+}
+
+// Thread-safe: pure function. Parses "143 ms", "1.5ms", "300us", "2 s", "800ns" (a bare number is
+// milliseconds; "" and "0" mean off) into microseconds. nullopt when it is not a duration; 0 for off.
+std::optional<double> parseDurationUs(const std::string& text);
+
 // ---- geometry ---------------------------------------------------------------------------------------------
 
 struct PlotRect {

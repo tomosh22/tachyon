@@ -85,6 +85,11 @@ struct Settings {
   static constexpr uint32_t kDefaultMemoryCeilingPercent = 75;
   static constexpr uint32_t kMinMemoryCeilingPercent = 10;
   uint32_t memoryCeilingPercent = kDefaultMemoryCeilingPercent;
+  // WP-67f: the per-instance chart of Function Statistics: clip bars above the 99th percentile, log height,
+  // and the threshold line in microseconds (0 = none). Per user, not per trace.
+  bool statsClipOutliers = true;
+  bool statsLogScale = false;
+  double statsThresholdUs = 0.0;
   // WP-41
   CaptureSettings capture;
 

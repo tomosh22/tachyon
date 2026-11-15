@@ -191,6 +191,13 @@ Settings Settings::load(const std::filesystem::path& path) {
       TACHYON_LOG_WARN("settings: 'blendScopes' is not a boolean, using default");
     }
   }
+  if (const auto it = j.find("statsClipOutliers"); it != j.end() && it->is_boolean())
+    s.statsClipOutliers = it->get<bool>();
+  if (const auto it = j.find("statsLogScale"); it != j.end() && it->is_boolean())
+    s.statsLogScale = it->get<bool>();
+  if (const auto it = j.find("statsThresholdUs");
+      it != j.end() && it->is_number() && std::isfinite(it->get<double>()) && it->get<double>() >= 0.0)
+    s.statsThresholdUs = it->get<double>();
   if (const auto it = j.find("frameBudgetMs"); it != j.end()) {
     if (it->is_number() && std::isfinite(it->get<double>()) && it->get<double>() > 0.0) {
       s.frameBudgetMs = std::clamp(it->get<double>(), 0.1, 10000.0);
@@ -243,6 +250,9 @@ Result<void> Settings::save(const std::filesystem::path& path) const {
   j["recentFiles"] = recentFiles;
   j["blendScopes"] = blendScopes;
   j["frameBudgetMs"] = frameBudgetMs;
+  j["statsClipOutliers"] = statsClipOutliers;
+  j["statsLogScale"] = statsLogScale;
+  j["statsThresholdUs"] = statsThresholdUs;
   j["memoryCeilingPercent"] = memoryCeilingPercent;
   j["capture"] = captureSettingsToJson(capture);
 

@@ -30,6 +30,14 @@ struct PanelContext {
   const Document* document = nullptr;
   SelectionBus* selection = nullptr;
   const Settings* settings = nullptr;
+  // WP-67f: the same object, writable, and the hook that persists it (null in bare test setups). Main-thread
+  // only; a panel that changes a per-user preference writes it here and calls saveSettings().
+  Settings* mutableSettings = nullptr;
+  void (*saveSettingsFn)(void*) = nullptr;
+  void* saveSettingsUser = nullptr;
+  void saveSettings() const {
+    if (saveSettingsFn) saveSettingsFn(saveSettingsUser);
+  }
   // Main-thread only. Background jobs (completions are delivered on the main thread). Null in bare test
   // setups.
   JobQueue* jobs = nullptr;
