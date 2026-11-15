@@ -421,13 +421,14 @@ void FunctionListPanel::drawTable(const PanelContext& context, float height) {
   const double clockHz = table.clockHz;
   std::optional<uint32_t> clicked, rightClicked, doubleClicked;
   std::optional<size_t> toggledGroup;
-  if (ImGui::BeginTable("##functionlist", 7, flags, ImVec2(0.0f, height))) {
-    ImGui::TableSetupScrollFreeze(0, 1);
+  if (ImGui::BeginTable("##functionlist", 7, flags, ImVec2(0.0f, height),
+                        common::nameColumnInnerWidth(m_fixedColumnsWidth, 42.0f))) {
+    ImGui::TableSetupScrollFreeze(1, 1);  // the name stays visible while the numbers scroll
     const ImGuiTableColumnFlags num =
         ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending;
     ImGui::TableSetupColumn("Function", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_NoHide,
                             5.0f, userId(fl::SortColumn::Function));
-    ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthFixed, em * 8.0f,
+    ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthFixed, em * 6.5f,
                             userId(fl::SortColumn::Module));
     ImGui::TableSetupColumn("Inclusive", num, em * 6.5f, userId(fl::SortColumn::Inclusive));
     ImGui::TableSetupColumn("Incl %", num, em * 4.5f, userId(fl::SortColumn::Inclusive));
@@ -436,6 +437,7 @@ void FunctionListPanel::drawTable(const PanelContext& context, float height) {
     ImGui::TableSetupColumn("Excl %", num, em * 4.5f, userId(fl::SortColumn::Exclusive));
     ImGui::TableSetupColumn("Instances", num, em * 5.5f, userId(fl::SortColumn::Instances));
     ImGui::TableHeadersRow();
+    m_fixedColumnsWidth = common::measuredFixedColumnsWidth();
 
     if (m_pushSort) {
       ImGui::TableSetColumnSortDirection(

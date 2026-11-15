@@ -116,6 +116,7 @@ class ButterflyPanel final : public IPanel {
   void disableThrottle() { m_throttle = false; }
 
  private:
+  float m_fixedColumnsWidth = 0.0f;  // WP-67d: what the numeric columns took last frame (name column sizing)
   using Clock = std::chrono::steady_clock;
 
   QuerySpec currentSpec(const PanelContext& context) const;
