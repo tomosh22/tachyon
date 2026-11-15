@@ -528,8 +528,18 @@ TEST(DockLayout, TheStatisticsStripLaysItsPartsOutSideBySide) {
   context.documentGeneration = app.documentGeneration();
   context.symbols = app.document()->symbols().get();
   context.symbolGeneration = app.symbolGeneration();
-  panel->chooseResult(context, 0);
-  ASSERT_TRUE(until([&] { return panel->result() != nullptr && !panel->statsPending(); }));
+  // The first entry that has instances (the order of the hits differs between machines).
+  bool found = false;
+  for (size_t row = 0; row < std::min<size_t>(panel->hits().size(), 12) && !found; ++row) {
+    panel->chooseResult(context, row);
+    ASSERT_TRUE(until([&] {
+      return panel->selected() && panel->result() != nullptr &&
+             panel->result()->key == panel->selected()->key && !panel->statsPending();
+    }));
+    found = panel->result()->instances != nullptr && !panel->result()->instances->empty() &&
+            panel->result()->stats != nullptr && panel->result()->stats->count > 0;
+  }
+  ASSERT_TRUE(found) << "no entry of the tiny trace has instances";
   runFrames(app, 3);
 
   ASSERT_TRUE(docked("Function Statistics"));
