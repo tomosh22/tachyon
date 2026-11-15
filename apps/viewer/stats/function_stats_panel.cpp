@@ -744,7 +744,10 @@ void FunctionStatsPanel::drawBoxPlot(double clockHz) {
   }
 }
 
-void FunctionStatsPanel::drawInstanceNav(const PanelContext& context) {
+// `compact`: no trailing text and no line break after the buttons; the chart toolbar continues on the row and
+// the text goes to the chart caption (m_navInfo).
+void FunctionStatsPanel::drawInstanceNav(const PanelContext& context, bool compact) {
+  m_navInfo.clear();
   const size_t n = m_result->instances ? m_result->instances->size() : 0;
   if (n == 0) return;
   if (ImGui::Button("< Previous")) previousInstance(context);
@@ -757,20 +760,23 @@ void FunctionStatsPanel::drawInstanceNav(const PanelContext& context) {
   bmax = ImGui::GetItemRectMax();
   m_nextButton = {bmin.x, bmin.y, bmax.x, bmax.y, true};
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Next instance (F3)");
-  ImGui::SameLine();
+  if (!compact) ImGui::SameLine();
   if (m_current && *m_current < n) {
     const analysis::Instance& inst = (*m_result->instances)[*m_current];
     const model::TraceModel& model = context.document->model();
     const std::string thread =
         inst.thread.get() < model.threads.size() ? model.threads[inst.thread.get()].name : "";
-    ImGui::Text(
-        "Instance %u of %zu   thread %s   at %s   lasts %s", *m_current + 1, n,
+    char info[256];
+    std::snprintf(
+        info, sizeof info, "Instance %u of %zu   thread %s   at %s   lasts %s", *m_current + 1, n,
         thread.empty() ? "(unnamed)" : thread.c_str(),
         st::formatDuration(static_cast<double>(inst.begin - model.header.start_ts), m_clockHz).c_str(),
         st::formatDuration(static_cast<double>(inst.end - inst.begin), m_clockHz).c_str());
+    m_navInfo = info;
   } else {
-    ImGui::Text("%zu instances highlighted in the timeline", n);
+    m_navInfo = std::to_string(n) + " instances highlighted in the timeline";
   }
+  if (!compact) ImGui::TextUnformatted(m_navInfo.c_str());
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -806,7 +812,7 @@ void FunctionStatsPanel::drawWide(const PanelContext& context) {
         common::drawSpinner(em * 0.4f, ImGui::GetColorU32(ImGuiCol_PlotHistogram));
       }
       if (haveStats) {
-        drawInstanceNav(context);
+        drawInstanceNav(context, true);
         drawInstanceBars(context, std::max(ImGui::GetContentRegionAvail().y, em * 2.0f));
       } else if (!m_statsQuery.pending()) {
         ImGui::TextDisabled("No instances in the selected time range.");
@@ -879,8 +885,9 @@ void FunctionStatsPanel::setThresholdUs(const PanelContext& context, double us) 
 }
 
 // Clip / Log toggle buttons and the threshold field. Toggled buttons read "ON" and carry the accent tint.
-void FunctionStatsPanel::drawChartToolbar(const PanelContext& context) {
+void FunctionStatsPanel::drawChartToolbar(const PanelContext& context, bool sameRow) {
   const ThemePalette& pal = paletteOf(context);
+  if (sameRow) ImGui::SameLine();
   const auto toggle = [&](const char* label, bool on, ButtonRect& rect, const char* tip) {
     if (on) {
       ImGui::PushStyleColor(ImGuiCol_Button, pal.accentSoft);
@@ -915,9 +922,9 @@ void FunctionStatsPanel::drawChartToolbar(const PanelContext& context) {
         m_thresholdUs > 0.0 ? st::formatDuration(m_thresholdUs * 1e-6 * m_clockHz, m_clockHz) : "";
   char buf[48];
   std::snprintf(buf, sizeof buf, "%s", m_thresholdText.c_str());
-  ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.5f);
+  ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.6f);
   const bool entered =
-      ImGui::InputTextWithHint("##thr", "e.g. 1.5 ms", buf, sizeof buf,
+      ImGui::InputTextWithHint("##thr", "1.5 ms", buf, sizeof buf,
                                ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
   m_thresholdTextActive = ImGui::IsItemActive();
   if (m_thresholdTextActive) m_thresholdText = buf;
@@ -947,9 +954,9 @@ void FunctionStatsPanel::drawInstanceBars(const PanelContext& context, float hei
     return;
   }
   adoptPreferences(context);
-  drawChartToolbar(context);
+  drawChartToolbar(context, true);  // continues the row of the compact instance navigation
   const float em = ImGui::GetFontSize();
-  height = std::max(std::min(height, ImGui::GetContentRegionAvail().y), em * 2.0f);
+  height = std::max(std::min(height, ImGui::GetContentRegionAvail().y), em * 4.0f);
 
   const std::vector<analysis::Instance>& all = *m_result->instances;
   const ThemePalette& pal = paletteOf(context);
@@ -974,7 +981,9 @@ void FunctionStatsPanel::drawInstanceBars(const PanelContext& context, float hei
   const bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   dl->AddRectFilled(p0, ImVec2(p0.x + width, p0.y + height), pal.laneBg);
-  const float plotH = height - 2.0f;
+  const float captionH = em * 1.35f;
+  const float plotTop = p0.y + captionH;
+  const float plotH = height - captionH - 2.0f;
   const float baseY = p0.y + height;
   const auto yForTicks = [&](uint64_t t) {
     return baseY - std::max(1.0f, plotH * static_cast<float>(st::barFraction(scale, t)));
@@ -1041,44 +1050,49 @@ void FunctionStatsPanel::drawInstanceBars(const PanelContext& context, float hei
     if (current) dl->AddRect(ImVec2(x0 - 1.0f, baseY - h - 1.0f), ImVec2(x1 + 1.0f, baseY), pal.overlay);
     if (clipped) {
       const float cx = (x0 + x1) * 0.5f, hw = std::max(colW * 0.5f, 3.0f);
-      dl->AddTriangleFilled(ImVec2(cx - hw, p0.y + capH + 1.0f), ImVec2(cx + hw, p0.y + capH + 1.0f),
-                            ImVec2(cx, p0.y + 1.0f), pal.error);
+      dl->AddTriangleFilled(ImVec2(cx - hw, plotTop + capH + 1.0f), ImVec2(cx + hw, plotTop + capH + 1.0f),
+                            ImVec2(cx, plotTop + 1.0f), pal.error);
     }
     m_instanceBars.push_back({x0, baseY - h, x1, baseY, static_cast<uint32_t>(std::min(last, n) - first),
                               bestDuration, clipped, above});
   }
 
-  if (threshold > 0) {
-    const float y = std::clamp(lineY, p0.y + 1.0f, baseY);
-    m_thresholdY = y;
-    dl->AddLine(ImVec2(p0.x, y), ImVec2(p0.x + width, y), pal.highlight, lineActive ? 2.5f : 1.5f);
+  // Caption strip (reserved above the plot, so it never covers a bar).
+  {
+    char text[192];
+    const std::string top = st::formatDuration(static_cast<double>(scale.top), m_clockHz);
+    int len;
+    if (scale.clipping)
+      len = std::snprintf(text, sizeof text, "%s scale: %s (p99), max %s clipped",
+                          scale.log ? "Log" : "Linear", top.c_str(),
+                          st::formatDuration(static_cast<double>(scale.maxTicks), m_clockHz).c_str());
+    else
+      len = std::snprintf(text, sizeof text, "%s scale: %s (max)", scale.log ? "Log" : "Linear", top.c_str());
+    if (threshold > 0 && len > 0 && static_cast<size_t>(len) < sizeof text)
+      std::snprintf(text + len, sizeof text - static_cast<size_t>(len), "  |  %u above threshold",
+                    m_aboveThreshold);
+    dl->PushClipRect(p0, ImVec2(p0.x + width, plotTop), true);
+    dl->AddText(ImVec2(p0.x + 4.0f, p0.y + (captionH - ImGui::GetFontSize()) * 0.5f), pal.textMuted, text);
+    const float textY = p0.y + (captionH - ImGui::GetFontSize()) * 0.5f;
+    const float infoW = ImGui::CalcTextSize(m_navInfo.c_str()).x;
+    if (!m_navInfo.empty() && ImGui::CalcTextSize(text).x + infoW + 24.0f < width)
+      dl->AddText(ImVec2(p0.x + width - infoW - 6.0f, textY), pal.text, m_navInfo.c_str());
+    dl->PopClipRect();
+    dl->AddLine(ImVec2(p0.x, plotTop), ImVec2(p0.x + width, plotTop), pal.border, 1.0f);
   }
 
-  // Scale legend, right-aligned over the plot.
-  {
-    char line1[128];
-    const std::string top = st::formatDuration(static_cast<double>(scale.top), m_clockHz);
-    if (scale.clipping)
-      std::snprintf(line1, sizeof line1, "%s scale: %s (p99), max %s clipped", scale.log ? "Log" : "Linear",
-                    top.c_str(), st::formatDuration(static_cast<double>(scale.maxTicks), m_clockHz).c_str());
-    else
-      std::snprintf(line1, sizeof line1, "%s scale: %s (max)", scale.log ? "Log" : "Linear", top.c_str());
-    const float pad = 3.0f;
-    float y = p0.y + pad;
-    const auto put = [&](const char* text, ImU32 col) {
-      const ImVec2 sz = ImGui::CalcTextSize(text);
-      const float x = p0.x + width - sz.x - pad * 2.0f;
-      dl->AddRectFilled(ImVec2(x - pad, y - 1.0f), ImVec2(x + sz.x + pad, y + sz.y + 1.0f),
-                        (pal.laneBg & 0x00FFFFFFu) | 0xC8000000u);
-      dl->AddText(ImVec2(x, y), col, text);
-      y += sz.y + 2.0f;
-    };
-    put(line1, pal.textMuted);
-    if (threshold > 0) {
-      char line2[96];
-      std::snprintf(line2, sizeof line2, "%u above threshold", m_aboveThreshold);
-      put(line2, pal.text);
-    }
+  // The threshold line: 2 px in the text colour (contrasts with the bars in both themes) and its value at the
+  // right end on a plate.
+  if (threshold > 0) {
+    const float y = std::clamp(lineY, plotTop + 1.0f, baseY - 1.0f);
+    m_thresholdY = y;
+    dl->AddLine(ImVec2(p0.x, y), ImVec2(p0.x + width, y), pal.text, lineActive ? 3.0f : 2.0f);
+    const std::string label = st::formatDuration(static_cast<double>(threshold), m_clockHz);
+    const ImVec2 sz = ImGui::CalcTextSize(label.c_str());
+    const float lx = p0.x + width - sz.x - 8.0f;
+    const float ly = y - sz.y - 3.0f >= plotTop ? y - sz.y - 3.0f : y + 3.0f;  // above the line, else below
+    dl->AddRectFilled(ImVec2(lx - 3.0f, ly - 1.0f), ImVec2(lx + sz.x + 3.0f, ly + sz.y + 1.0f), pal.text);
+    dl->AddText(ImVec2(lx, ly), pal.windowBg, label.c_str());
   }
 
   if (lineActive && hovered) {

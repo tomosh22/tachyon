@@ -203,10 +203,10 @@ class FunctionStatsPanel final : public IPanel {
   void drawWide(const PanelContext& context);
   void drawInstanceBars(const PanelContext& context, float height);
   void adoptPreferences(const PanelContext& context);
-  void drawChartToolbar(const PanelContext& context);
+  void drawChartToolbar(const PanelContext& context, bool sameRow);
   void drawStatisticsBox(double clockHz);
   void drawBoxPlot(double clockHz);
-  void drawInstanceNav(const PanelContext& context);
+  void drawInstanceNav(const PanelContext& context, bool compact = false);
 
   common::LatestQuery<stats::SearchIndex> m_indexQuery;
   common::LatestQuery<StatsResult> m_statsQuery;
@@ -251,6 +251,7 @@ class FunctionStatsPanel final : public IPanel {
   ButtonRect m_prevButton, m_nextButton, m_populateButton;
   // WP-67f: per-user preferences (mirrored into Settings when the context has them) and the last frame's
   // chart.
+  std::string m_navInfo;  // the "Instance k of n ..." text of the last drawInstanceNav
   bool m_prefsAdopted = false;
   bool m_clip = true;
   bool m_log = false;
