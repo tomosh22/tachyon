@@ -62,6 +62,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-67d | Readable function-name column in Function List, Call Graph, Butterfly | C | merged | wp/67d-name-columns | 2026-11-15 |
 | WP-71b | Attribute exiting tasks' switch records; small residue to Trace Info | L | merged | wp/71b-exit-switch | 2026-11-15 |
 | WP-67e | Superluminal-style layout, session tab, System/Light/Dark themes | C | merged | wp/67e-superluminal-layout | 2026-11-15 |
+| WP-67f | Function Statistics instance chart: Clip p99 toggle, log scale, threshold | C | merged | wp/67f-instance-chart | 2026-11-15 |
 | WP-68 | Viewer performance pass 2 (LOD direct zoom, flame, WP-54 draw lists, single-decode load, preview symbol reuse) | C | merged (partial: frame targets remain exceptions) | wp/68-perf-pass2 | 2026-11-08 |
 | WP-69 | Report/export/doctor follow-ups and test flakes (WP-62b, symbol-setup helper, Windows doctor) | D | merged (4a moved to WP-66b) | wp/69-tooling | 2026-11-08 |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
@@ -451,4 +452,19 @@ Check by hand: window opens, Trace Info panel shows 16 threads / 7,486,737 sampl
 - Follow-ups: Call Graph Thread States column (L, needs a libs query); Function Statistics threshold (S, now in WP-67f); Call Graph thread / time-display filter combos (M); thread-state tint behind the timeline activity strip (M); warnings banner collapse button (S).
 - Needs Windows verification: a live OS theme switch on a real desktop, docking and the session tab on Windows, DPI scaling with the 200 px gutter.
 - Related fix on main (1ecc212): Linux wait reason 0 (switch-record captures, reason unknown) is now Other/grey, not Preempted/amber.
+
+## WP-67f notes
+- Instance chart toolbar:
+  - Clip p99 toggle, default on. Bars scale to the 99th percentile of the shown instances; longer bars are drawn clipped, with a red cap.
+  - Log toggle, default off. It is anchored at the shortest shown instance and falls back to linear when all instances have the same duration.
+  - Threshold field plus a draggable line, with an "N above threshold" count.
+- Settings keys: statsClipOutliers, statsLogScale, statsThresholdUs (per user; saved on change or on drag release).
+- PanelContext gains mutableSettings and saveSettings().
+- Verifier: PASS. Non-blocking nits:
+  - a huge threshold input turns the threshold off;
+  - llround overflow only with corrupt durations (more than 2^63 ticks);
+  - Enter on the formatted threshold text re-parses the rounded value;
+  - a 4 px band around the line can't be clicked to navigate.
+- I reviewed the log-anchor follow-up commit (27399ca) myself.
+- Follow-up: the default Function Statistics strip is short, so the plot is only about 70 px tall; consider a taller kStatsFraction.
 
