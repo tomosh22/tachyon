@@ -923,7 +923,7 @@ TEST(StatsChart, ThresholdCountsInstancesAndDrawsALineThatCanBeDragged) {
   EXPECT_EQ(h.panel->thresholdUs(), 0.0);
   EXPECT_EQ(h.panel->aboveThreshold(), 0u);
   EXPECT_TRUE(std::isnan(h.panel->thresholdLineY()));  // no line until one is set
-  const double hz = h.model().header.clock_frequency_hz;
+  const double hz = static_cast<double>(h.model().header.clock_frequency_hz);
   std::vector<uint64_t> d = durationsOf(*h.panel);
   std::vector<uint64_t> sorted = d;
   std::sort(sorted.begin(), sorted.end());
