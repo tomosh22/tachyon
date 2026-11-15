@@ -10,6 +10,13 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
   - Milestone gates M4 (manual hitch hunt; 60 fps on `large` on a real GPU), M5 (engine integration, overhead) and M6 (flight recorder, CI report in the engine pipeline, 10-minute engine capture). See Milestone gates.
 - **Needs a real Windows machine:** see "Windows / privileged verification queue".
 - **Plan concerns awaiting a decision:** see "Plan concerns awaiting user decision" (40 ns SDK target, 3× resident memory, M5 overhead wording). Also: uniform interning 11.99 s vs 10 s; the timeline 64-row frame target on `large` on a 4-vCPU VM; unprivileged Linux capture at perf_event_paranoid 1–2.
+- **Gaps found by the 2026-11-15 docs review** (documented as actual behaviour; not yet fixed):
+  - The viewer has no thread filter: selecting a thread does not filter the analysis panels, and `ViewFilter.threads` is never set by the UI.
+  - The timeline's "Inline frames" checkbox is permanently disabled. The Call Graph, Function List and Butterfly have a working one.
+  - `tachyon-cli export` does not pick up `<stem>.symbols.json` automatically; the viewer and `tachyon-report` do.
+  - A relative or missing `--out` is resolved in the agent's working directory, not the CLI's.
+  - `tachyon-agent` defaults to `--backend mock`.
+  - Perf captures keep `<out>.perfspool` unless `--perf-delete-raw` is given.
 - **Optional viewer follow-ups:**
   - Call Graph Thread States column (L; needs a libs query).
   - Call Graph thread / time-display filters (M).
@@ -488,4 +495,12 @@ Check by hand: window opens, Trace Info panel shows 16 threads / 7,486,737 sampl
   - a 4 px band around the line can't be clicked to navigate.
 - I reviewed the log-anchor follow-up commit (27399ca) myself.
 - Follow-up: the default Function Statistics strip is short, so the plot is only about 70 px tall; consider a taller kStatsFraction.
+
+## Docs refresh (2026-11-15)
+- DOCS-A: every `docs/specs/*.md` was checked against the headers. Clarification sections are folded into the main text, each file has a dated changelog, `docs/specs` is declared authoritative over plan Part 3, and `sdk/src/inst_wire.md` is now a pointer.
+- DOCS-B: README rewritten; new `docs/viewer-guide.md` (with screenshots) and `apps/agent/README.md`. CLI, agent, report, testbed and tracegen docs checked against the built binaries; `docs/engine-integration.md` checked against the SDK.
+- Code fixes from the review:
+  - Linux prev_state 0x80 is TASK_REPORT_IDLE ("Idle (I)"), not an exit (4060fa1).
+  - Stale comments in `trace_format.h` and `query.h`.
+  - Doctor usage and the debuginfod hint.
 
