@@ -1,4 +1,5 @@
 #include "viewer/status/symbols_panel.h"
+#include "viewer/theme.h"
 
 #include "viewer/document.h"
 
@@ -131,7 +132,7 @@ void SymbolsPanel::draw(const PanelContext& context, bool* open) {
     if (m_host.scanRunning && m_host.scanRunning()) ImGui::TextDisabled("Scanning the search paths...");
     if (m_host.pathProblems) {
       for (const std::string& p : m_host.pathProblems())
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f), "%s", p.c_str());
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().warn), "%s", p.c_str());
     }
   }
   ImGui::End();

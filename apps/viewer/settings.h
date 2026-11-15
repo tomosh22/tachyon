@@ -10,7 +10,8 @@
 
 namespace tachyon::viewer {
 
-enum class ThemeKind : uint8_t { Dark, Light };
+// WP-67e: System follows the operating system's light / dark preference (see os_theme.h).
+enum class ThemeKind : uint8_t { System, Light, Dark };
 
 struct SourcePathMapping {
   std::string from, to;
@@ -66,7 +67,12 @@ struct Settings {
   // components of the debug path. "Locate file..." in the Source panel appends to them.
   std::vector<SourcePathMapping> sourcePathMappings;
   std::vector<std::string> sourceRoots;
-  ThemeKind theme = ThemeKind::Dark;
+  ThemeKind theme = ThemeKind::System;
+  // WP-67e: version of the default dock layout this install has applied. Bumped whenever the shipped default
+  // layout changes: a settings file that lacks the key (or holds a lower value) gets the new default once;
+  // the layout the user saves afterwards is kept. A missing settings file starts at the current version.
+  static constexpr uint32_t kLayoutVersion = 2;
+  uint32_t layoutVersion = kLayoutVersion;
   float uiScale = 1.0f;                  // multiplied with the display DPI scale
   std::vector<std::string> recentFiles;  // UTF-8, most recent first
   // WP-54: "Blend instrumentation scopes into sampled stacks" (used when the trace has instrumentation) and

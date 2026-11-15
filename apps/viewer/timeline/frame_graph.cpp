@@ -345,7 +345,7 @@ void FrameGraphView::draw(const PanelContext& context, const model::TraceModel& 
     ImGui::TextDisabled("%zu frames, longest %s", m_data->bars.size(),
                         formatDurationTicks(m_data->bars.maxDuration, m_clockHz).c_str());
   } else if (!m_error.empty()) {
-    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", m_error.c_str());
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(m_palette->error), "%s", m_error.c_str());
   } else if (m_data) {
     ImGui::TextDisabled("(no frame marks in this trace)");
   } else {
@@ -362,8 +362,8 @@ void FrameGraphView::draw(const PanelContext& context, const model::TraceModel& 
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const float x0 = area.x0, x1 = area.x0 + area.width;
   const float top = p0.y + 2.0f, bottom = p0.y + height - 2.0f;
-  dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(x1, p0.y + height), IM_COL32(22, 22, 27, 255));
-  dl->AddText(ImVec2(gutterX0 + 4.0f, p0.y + 2.0f), IM_COL32(170, 170, 175, 255), "Frame times");
+  dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(x1, p0.y + height), m_palette->laneBg);
+  dl->AddText(ImVec2(gutterX0 + 4.0f, p0.y + 2.0f), m_palette->textMuted, "Frame times");
 
   if (series && m_data->bars.size() > 0) {
     const uint64_t budgetTicks = msToTicks(m_budgets.msFor(*series), m_clockHz);
@@ -384,8 +384,8 @@ void FrameGraphView::draw(const PanelContext& context, const model::TraceModel& 
         const FrameBarItem& it = m_items[i];
         const float h = heightOf(it.duration);
         const bool over = it.overBudget;
-        ImU32 color = over ? IM_COL32(225, 80, 65, 255) : IM_COL32(70, 130, 200, 255);
-        if (hover && *hover == i) color = over ? IM_COL32(255, 130, 110, 255) : IM_COL32(120, 175, 240, 255);
+        ImU32 color = over ? m_palette->states.syncWait : m_palette->barFill;
+        if (hover && *hover == i) color = over ? m_palette->error : m_palette->accent;
         const float gap = it.x1 - it.x0 > 4.0f ? 1.0f : 0.0f;
         batch.add(it.x0, bottom - h, it.x1 - gap, bottom, color);
         if (over) ++m_overBudget;
@@ -404,11 +404,11 @@ void FrameGraphView::draw(const PanelContext& context, const model::TraceModel& 
     // Budget line.
     if (budgetTicks > 0) {
       m_budgetY = bottom - heightOf(budgetTicks);
-      dl->AddLine(ImVec2(x0, m_budgetY), ImVec2(x1, m_budgetY), IM_COL32(240, 200, 60, 230), 1.0f);
+      dl->AddLine(ImVec2(x0, m_budgetY), ImVec2(x1, m_budgetY), m_palette->highlight, 1.0f);
       char text[48];
       std::snprintf(text, sizeof text, "%.2f ms", m_budgets.msFor(*series));
-      dl->AddText(ImVec2(x1 - ImGui::CalcTextSize(text).x - 4.0f, m_budgetY - em),
-                  IM_COL32(240, 200, 60, 255), text);
+      dl->AddText(ImVec2(x1 - ImGui::CalcTextSize(text).x - 4.0f, m_budgetY - em), m_palette->highlight,
+                  text);
     }
     if (hover) {
       m_tooltip = frameBarTooltipLines(m_data->bars, m_items[*hover], m_clockHz, budgetTicks,
@@ -420,7 +420,7 @@ void FrameGraphView::draw(const PanelContext& context, const model::TraceModel& 
     }
   }
   // The visible window of the timeline is the rows' business; the strip shows the same time span as they do.
-  dl->AddLine(ImVec2(gutterX0, p0.y + height), ImVec2(x1, p0.y + height), IM_COL32(70, 70, 76, 255));
+  dl->AddLine(ImVec2(gutterX0, p0.y + height), ImVec2(x1, p0.y + height), m_palette->border);
   ImGui::PopID();
 }
 

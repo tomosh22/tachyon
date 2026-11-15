@@ -13,6 +13,7 @@ const char* cliUsage() {
          "  --bench <trace>     headless frame-time benchmark: open the trace, then measure steady,\n"
          "                      panning and zooming frames (CPU ms) with the timeline and panels open\n"
          "  --bench-frames <n>  frames per --bench phase (default 300)\n"
+         "  --demo-select       (for screenshots) select the hottest call-graph function once it is ready\n"
          "  -h, --help          show this help\n";
 }
 
@@ -22,6 +23,8 @@ CliArgs parseCliArgs(const std::vector<std::string>& args) {
     const std::string& a = args[i];
     if (a == "-h" || a == "--help") {
       out.help = true;
+    } else if (a == "--demo-select") {
+      out.demoSelect = true;
     } else if (a == "--bench-frames") {
       if (i + 1 >= args.size()) {
         out.error = a + " needs a value";

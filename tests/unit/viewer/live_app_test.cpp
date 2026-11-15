@@ -347,6 +347,10 @@ TEST(LiveApp, TheStatisticsAndInteractionPanelsKeepWhatTheyShowAcrossSnapshots) 
   ASSERT_NE(stats, nullptr);
   ASSERT_NE(waits, nullptr);
   stats->disableThrottle();
+  // The default layout tabs the Live panel (which a Live capture opens in front) with Thread Interaction:
+  // float the latter so that it stays on screen.
+  rig.h.frames(2);
+  ImGui::SetWindowDock(ImGui::FindWindowByName(ThreadInteractionPanel::kName), 0, ImGuiCond_Always);
   ASSERT_TRUE(rig.startLive());
   ASSERT_TRUE(rig.h.until([&] {
     return rig.liveDocument() && stats->index() && !waits->waits().rows().empty() &&

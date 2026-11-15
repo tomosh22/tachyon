@@ -1,4 +1,5 @@
 #include "viewer/callgraph/callgraph_panel.h"
+#include "viewer/theme.h"
 
 #include "viewer/builtin_panels.h"
 #include "viewer/common/function_names.h"
@@ -510,23 +511,44 @@ void CallGraphPanel::draw(const PanelContext& context, bool* open) {
     return;
   }
   drawToolbar(context);
-  const float pieHeight = std::clamp(ImGui::GetContentRegionAvail().y * 0.3f, ImGui::GetFontSize() * 6.0f,
-                                     ImGui::GetFontSize() * 12.0f);
-  const float tableHeight =
-      std::max(ImGui::GetContentRegionAvail().y - pieHeight - ImGui::GetStyle().ItemSpacing.y,
-               ImGui::GetFontSize() * 4.0f);
+  const float em = ImGui::GetFontSize();
+  const ImVec2 avail = ImGui::GetContentRegionAvail();
+  // WP-67e: in a wide panel (the default layout's bottom row) the pie sits to the right of the table, like
+  // Superluminal's "Function time distribution"; narrow panels keep it below.
+  const float pieWidth = std::clamp(avail.x * 0.22f, em * 10.0f, em * 22.0f);
+  // (only when the table keeps room for its seven columns and a readable function name)
+  const bool pieAside =
+      avail.x - pieWidth - ImGui::GetStyle().ItemSpacing.x >= em * 58.5f && avail.y >= em * 8.0f;
+  const float pieHeight = pieAside ? 0.0f : std::clamp(avail.y * 0.3f, em * 6.0f, em * 12.0f);
+  const float tableHeight = pieAside
+                                ? std::max(avail.y, em * 4.0f)
+                                : std::max(avail.y - pieHeight - ImGui::GetStyle().ItemSpacing.y, em * 4.0f);
+  if (pieAside) {
+    ImGui::BeginChild("##cgtablecol", ImVec2(avail.x - pieWidth - ImGui::GetStyle().ItemSpacing.x, avail.y),
+                      ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+  }
   if (m_tree) {
-    drawTable(context, tableHeight);
+    drawTable(context, pieAside ? ImGui::GetContentRegionAvail().y : tableHeight);
   } else if (m_query.pending()) {
-    drawSpinner(ImGui::GetFontSize() * 0.5f, ImGui::GetColorU32(ImGuiCol_PlotHistogram));
+    drawSpinner(em * 0.5f, ImGui::GetColorU32(ImGuiCol_PlotHistogram));
     ImGui::SameLine();
     ImGui::TextUnformatted("Building call graph...");
-    ImGui::Dummy(ImVec2(0, tableHeight - ImGui::GetFontSize() * 2.0f));
+    if (!pieAside) ImGui::Dummy(ImVec2(0, tableHeight - em * 2.0f));
   } else {
     ImGui::TextDisabled("%s", m_message.empty() ? "No call graph." : m_message.c_str());
-    ImGui::Dummy(ImVec2(0, tableHeight - ImGui::GetFontSize() * 2.0f));
+    if (!pieAside) ImGui::Dummy(ImVec2(0, tableHeight - em * 2.0f));
   }
-  drawPie(context);
+  if (pieAside) {
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginChild("##cgpiecol", ImVec2(0.0f, avail.y), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    drawPie(context);
+    ImGui::EndChild();
+  } else {
+    drawPie(context);
+  }
   drawContextMenu(context);
   ImGui::End();
 }
@@ -565,14 +587,14 @@ void CallGraphPanel::drawToolbar(const PanelContext& context) {
   const SelectionState& state = context.selection->state();
   if (common::hasSubtreeRestriction(state.timeFilter)) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "  Subtree: %s",
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().info), "  Subtree: %s",
                        common::subtreeText(*state.timeFilter).c_str());
     ImGui::SameLine();
     if (ImGui::SmallButton("x##clearsubtree")) clearSubtreeFilter(context);
   }
   if (!m_message.empty()) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "  %s", m_message.c_str());
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().error), "  %s", m_message.c_str());
   }
 }
 
@@ -708,7 +730,10 @@ void CallGraphPanel::drawTable(const PanelContext& context, float height) {
 void CallGraphPanel::drawPie(const PanelContext&) {
   const float em = ImGui::GetFontSize();
   const float avail = std::max(ImGui::GetContentRegionAvail().y, em * 4.0f);
-  const float radius = std::min(avail * 0.5f - 4.0f, em * 5.0f);
+  float radius = std::min(avail * 0.5f - 4.0f, em * 5.0f);
+  // A narrow pie box (the pie beside the table) puts the legend under the circle instead of to its right.
+  const bool legendBelow = ImGui::GetContentRegionAvail().x < radius * 2.0f + em * 18.0f;
+  if (legendBelow) radius = std::min(radius, std::max(ImGui::GetContentRegionAvail().x * 0.5f - 6.0f, em));
   if (!ImGui::BeginChild("##cgpie", ImVec2(0.0f, avail), ImGuiChildFlags_Borders)) {
     ImGui::EndChild();
     return;
@@ -750,7 +775,8 @@ void CallGraphPanel::drawPie(const PanelContext&) {
     }
   }
   // Legend.
-  ImGui::SetCursorScreenPos(ImVec2(centre.x + radius + em, origin.y));
+  ImGui::SetCursorScreenPos(legendBelow ? ImVec2(origin.x, centre.y + radius + em * 0.6f)
+                                        : ImVec2(centre.x + radius + em, origin.y));
   ImGui::BeginGroup();
   ImGui::Text("Time in %s", m_pieTitle.c_str());
   for (size_t i = 0; i < m_pie.size(); ++i) {

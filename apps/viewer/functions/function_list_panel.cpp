@@ -1,4 +1,5 @@
 #include "viewer/functions/function_list_panel.h"
+#include "viewer/theme.h"
 
 #include "viewer/builtin_panels.h"
 #include "viewer/common/function_names.h"
@@ -401,12 +402,12 @@ void FunctionListPanel::drawToolbar(const PanelContext& context) {
   const SelectionState& state = context.selection->state();
   if (m_restrictSubtree && common::hasSubtreeRestriction(state.timeFilter)) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "  Subtree: %s",
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().info), "  Subtree: %s",
                        common::subtreeText(*state.timeFilter).c_str());
   }
   if (!m_message.empty()) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "  %s", m_message.c_str());
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().error), "  %s", m_message.c_str());
   }
 }
 

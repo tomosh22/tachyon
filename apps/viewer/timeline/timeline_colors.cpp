@@ -42,46 +42,48 @@ Color32 hsv(float h, float s, float v) {
 
 }  // namespace
 
-Color32 waitCategoryColor(analysis::WaitCategory category) {
+Color32 waitCategoryColor(analysis::WaitCategory category, const StatePalette& palette) {
   switch (category) {
-    case analysis::WaitCategory::Synchronization: return kSyncWaitColor;
-    case analysis::WaitCategory::IO: return kIoWaitColor;
-    case analysis::WaitCategory::Memory: return kMemoryWaitColor;
-    case analysis::WaitCategory::Preempted: return kReadyColor;
+    case analysis::WaitCategory::Synchronization: return palette.syncWait;
+    case analysis::WaitCategory::IO: return palette.ioWait;
+    case analysis::WaitCategory::Memory: return palette.memoryWait;
+    case analysis::WaitCategory::Preempted: return palette.ready;
     case analysis::WaitCategory::Other: break;
   }
-  return kOtherWaitColor;
+  return palette.otherWait;
 }
 
-Color32 waitCategoryColorFromByte(uint8_t category) {
-  if (category > static_cast<uint8_t>(analysis::WaitCategory::Other)) return kOtherWaitColor;
-  return waitCategoryColor(static_cast<analysis::WaitCategory>(category));
+Color32 waitCategoryColorFromByte(uint8_t category, const StatePalette& palette) {
+  if (category > static_cast<uint8_t>(analysis::WaitCategory::Other)) return palette.otherWait;
+  return waitCategoryColor(static_cast<analysis::WaitCategory>(category), palette);
 }
 
-Color32 stateColor(uint32_t platform, const model::ThreadStateInterval& interval) {
+Color32 stateColor(uint32_t platform, const model::ThreadStateInterval& interval,
+                   const StatePalette& palette) {
   switch (interval.state) {
-    case model::ThreadState::Running: return kRunningColor;
-    case model::ThreadState::Ready: return kReadyColor;
+    case model::ThreadState::Running: return palette.running;
+    case model::ThreadState::Ready: return palette.ready;
     case model::ThreadState::Waiting:
-      return waitCategoryColor(analysis::waitReasonCategory(platform, interval.wait_reason));
+      return waitCategoryColor(analysis::waitReasonCategory(platform, interval.wait_reason), palette);
     case model::ThreadState::Unknown: break;
   }
-  return kUnknownColor;
+  return palette.unknown;
 }
 
-Color32 bandColumnColor(const analysis::BandColumn& column) {
+Color32 bandColumnColor(const analysis::BandColumn& column, const StatePalette& palette) {
   const float total = column.running + column.ready + column.waiting + column.unknown;
-  if (!(total > 0.0f)) return kUnknownColor;
+  if (!(total > 0.0f)) return palette.unknown;
   // Integer weights out of 256 (this runs for every pixel column of every row of every frame).
   const float scale = 256.0f / total;
   const int wr = std::clamp(static_cast<int>(column.running * scale + 0.5f), 0, 256);
   const int wy = std::clamp(static_cast<int>(column.ready * scale + 0.5f), 0, 256 - wr);
   const int ww = std::clamp(static_cast<int>(column.waiting * scale + 0.5f), 0, 256 - wr - wy);
   const int wu = 256 - wr - wy - ww;
-  const Color32 waitColor = ww > 0 ? waitCategoryColorFromByte(column.waitCategory) : kOtherWaitColor;
+  const Color32 waitColor =
+      ww > 0 ? waitCategoryColorFromByte(column.waitCategory, palette) : palette.otherWait;
   const auto channel = [&](uint8_t (*get)(Color32)) {
-    const int v = (wr * get(kRunningColor) + wy * get(kReadyColor) + ww * get(waitColor) +
-                   wu * get(kUnknownColor) + 128) >>
+    const int v = (wr * get(palette.running) + wy * get(palette.ready) + ww * get(waitColor) +
+                   wu * get(palette.unknown) + 128) >>
                   8;
     // Quantise to multiples of 16 so near-equal neighbours merge into one rectangle.
     return static_cast<uint8_t>(std::min(255, ((v + 8) >> 4) << 4));
@@ -107,10 +109,10 @@ Color32 hashColor(uint64_t key) {
 }
 
 Color32 callstackColor(const model::TraceModel& model, CallstackIdx node, FrameColorMode mode,
-                       const symbols::SymbolService* symbols, FramePosition position) {
-  if (!node.valid() || node.get() >= model.nodes.size()) return kUnknownColor;
+                       const symbols::SymbolService* symbols, FramePosition position, Color32 unknown) {
+  if (!node.valid() || node.get() >= model.nodes.size()) return unknown;
   const FrameIdx frameIdx = model.nodes[node.get()].frame;
-  if (!frameIdx.valid() || frameIdx.get() >= model.frames.size()) return kUnknownColor;
+  if (!frameIdx.valid() || frameIdx.get() >= model.frames.size()) return unknown;
   const model::Frame& f = model.frames[frameIdx.get()];
   uint64_t key = f.module.get();
   if (mode == FrameColorMode::ByFunction) {
@@ -126,7 +128,8 @@ Color32 callstackColor(const model::TraceModel& model, CallstackIdx node, FrameC
 Color32 stripColumnColor(const model::TraceModel& model, const analysis::StripColumn& column,
                          FrameColorMode mode, const symbols::SymbolService* symbols) {
   if (!column.stack.valid() || !(column.coverage > 0.0f)) return 0;
-  const Color32 base = callstackColor(model, column.stack, mode, symbols);
+  const Color32 base =
+      callstackColor(model, column.stack, mode, symbols, FramePosition::Leaf, makeColor(128, 128, 134));
   // Mixed columns (low share of the dominant stack) fade towards grey so they read as "many stacks".
   const int shareQ = static_cast<int>(std::clamp(column.share, 0.0f, 1.0f) * 255.0f);
   const int coverageQ = static_cast<int>(std::clamp(column.coverage, 0.0f, 1.0f) * 255.0f);

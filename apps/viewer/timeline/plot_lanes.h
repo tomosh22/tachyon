@@ -12,6 +12,8 @@
 // with the number of markers it stands for.
 #pragma once
 
+#include "viewer/theme.h"
+
 #include "model/model.h"
 #include "viewer/job_queue.h"
 #include "viewer/panel.h"
@@ -166,6 +168,11 @@ struct PlotHover {
 
 class PlotLanesView {
  public:
+  // WP-67e: the palette the view draws with (null = the dark one); set by the timeline widget every frame.
+  void setPalette(const ThemePalette* palette) {
+    m_palette = palette != nullptr ? palette : &paletteFor(ColorScheme::Dark);
+  }
+
   PlotLanesView() = default;
   PlotLanesView(const PlotLanesView&) = delete;
   PlotLanesView& operator=(const PlotLanesView&) = delete;
@@ -208,6 +215,7 @@ class PlotLanesView {
   std::optional<std::pair<double, double>> lastRange(uint32_t plot) const;
 
  private:
+  const ThemePalette* m_palette = &paletteFor(ColorScheme::Dark);
   struct Shared;
   void drawMarkers(ImDrawList* dl, const model::TraceModel& model, const PlotArea& area, float y0, float y1,
                    float gutterX0, const ImVec2* mouse);

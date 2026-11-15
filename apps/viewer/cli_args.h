@@ -13,6 +13,7 @@ struct CliArgs {
   std::optional<std::filesystem::path> configPath;    // --config <settings.json>
   std::optional<std::filesystem::path> selftestPath;  // --selftest <trace>
   std::optional<std::filesystem::path> benchPath;     // --bench <trace> (WP-64)
+  bool demoSelect = false;                            // --demo-select (screenshots, see AppOptions)
   int benchFrames = 300;                              // --bench-frames <n>: frames per phase
   bool help = false;
   std::string error;  // non-empty when the arguments are invalid

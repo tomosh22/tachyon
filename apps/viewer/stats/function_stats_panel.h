@@ -170,7 +170,12 @@ class FunctionStatsPanel final : public IPanel {
   void drawSearch(const PanelContext& context);
   void drawResults(const PanelContext& context, float height);
   void drawStats(const PanelContext& context);
-  void drawHistogram(double clockHz);
+  void drawHistogram(double clockHz, float plotHeight = 0.0f);
+  // WP-67e: the wide arrangement (the top strip of the default layout): search + results | per-instance
+  // duration bars | histogram | statistics, side by side.
+  void drawWide(const PanelContext& context);
+  void drawInstanceBars(const PanelContext& context, float height);
+  void drawStatisticsBox(double clockHz);
   void drawBoxPlot(double clockHz);
   void drawInstanceNav(const PanelContext& context);
 

@@ -7,6 +7,7 @@
 #include "analysis/wait_reasons.h"
 #include "model/model.h"
 #include "symbols/symbol_service.h"
+#include "viewer/theme.h"
 #include "viewer/timeline/timeline_data.h"
 
 #include <cstdint>
@@ -32,38 +33,33 @@ constexpr uint8_t colorA(Color32 c) {
   return static_cast<uint8_t>(c >> 24);
 }
 
-// The palette (Part 1.1 of the WP-42 brief): green Running, red synchronization wait, dark blue I/O, light
-// blue paging/memory, grey other, amber Ready.
-inline constexpr Color32 kRunningColor = makeColor(70, 190, 90);
-inline constexpr Color32 kReadyColor = makeColor(240, 170, 30);
-inline constexpr Color32 kSyncWaitColor = makeColor(215, 70, 65);
-inline constexpr Color32 kIoWaitColor = makeColor(40, 70, 170);
-inline constexpr Color32 kMemoryWaitColor = makeColor(110, 180, 235);
-inline constexpr Color32 kOtherWaitColor = makeColor(130, 130, 135);
-inline constexpr Color32 kUnknownColor = makeColor(48, 48, 54);
+// WP-67e: the thread state colours come from the active theme (StatePalette, defined once in theme.cpp):
+// green Running, red/pink synchronization wait, dark blue I/O, light blue paging/memory, grey other, amber
+// Ready, and a background-ish "unknown". Every function below takes the palette to use, so the pure colour
+// mapping stays testable and is never tied to one theme.
 
 // All functions in this header: thread-safe, pure.
 
-Color32 waitCategoryColor(analysis::WaitCategory category);
+Color32 waitCategoryColor(analysis::WaitCategory category, const StatePalette& palette);
 // `category` is BandColumn::waitCategory (kNoWaitCategory and unknown values map to Other).
-Color32 waitCategoryColorFromByte(uint8_t category);
+Color32 waitCategoryColorFromByte(uint8_t category, const StatePalette& palette);
 // Colour of a thread state interval (Waiting uses the interval's wait reason on `platform`).
-Color32 stateColor(uint32_t platform, const model::ThreadStateInterval& interval);
+Color32 stateColor(uint32_t platform, const model::ThreadStateInterval& interval,
+                   const StatePalette& palette);
 // Colour of one band column: the state colours weighted by their fractions, the remainder is "unknown".
 // Quantised to multiples of 16 per channel so equal-looking neighbours compare equal (run merging).
-Color32 bandColumnColor(const analysis::BandColumn& column);
+Color32 bandColumnColor(const analysis::BandColumn& column, const StatePalette& palette);
 
 // How flame chart and strip colours are derived from a frame.
 enum class FrameColorMode : uint8_t { ByModule, ByFunction };
 
 // Stable pseudo-random colour from a 64-bit key (golden-ratio hue walk, fixed saturation/value).
 Color32 hashColor(uint64_t key);
-// Colour of callstack node `node` (its leaf frame). Invalid or out-of-range nodes give kUnknownColor.
+// Colour of callstack node `node` (its leaf frame). Invalid or out-of-range nodes give `unknown`.
 // With `symbols`, ByFunction groups frames by their function key (resolved frames of one function share a
 // colour); without, by frame address.
 Color32 callstackColor(const model::TraceModel& model, CallstackIdx node, FrameColorMode mode,
-                       const symbols::SymbolService* symbols = nullptr,
-                       FramePosition position = FramePosition::Leaf);
+                       const symbols::SymbolService* symbols, FramePosition position, Color32 unknown);
 // Strip column colour: callstackColor faded towards the background by (1 - share) and by coverage (alpha).
 Color32 stripColumnColor(const model::TraceModel& model, const analysis::StripColumn& column,
                          FrameColorMode mode, const symbols::SymbolService* symbols = nullptr);

@@ -129,6 +129,10 @@ class Harness {
   // Timeline on top, statistics panel below, both fully on the 1280x720 display.
   void layout() {
     frames(2);
+    // The default layout docks the statistics panel into a short top strip; float both panels so that the
+    // statistics panel gets the whole 1000x490 window.
+    for (const char* name : {ThreadsTimelinePanel::kName, FunctionStatsPanel::kName})
+      ImGui::SetWindowDock(ImGui::FindWindowByName(name), 0, ImGuiCond_Always);
     ImGui::SetWindowPos(ThreadsTimelinePanel::kName, ImVec2(0, 20));
     ImGui::SetWindowSize(ThreadsTimelinePanel::kName, ImVec2(1260, 195));
     ImGui::SetWindowPos(FunctionStatsPanel::kName, ImVec2(0, 225));
@@ -237,6 +241,9 @@ TEST(StatsWidget, TypingFiltersAndKeysChooseTheEntry) {
   h.chord(ImGuiMod_Ctrl, ImGuiKey_F);
   ASSERT_TRUE(h.until([&] { return h.panelSettled(); }));
   h.layout();
+  h.frames(2);
+  h.chord(ImGuiMod_Ctrl,
+          ImGuiKey_F);  // floating the panel (layout) took the keyboard focus: ask for it again
   h.frames(2);
   ASSERT_TRUE(h.panel->searchActive());
   ASSERT_NE(h.panel->index(), nullptr);
@@ -610,6 +617,7 @@ TEST(StatsWidget, CtrlFIsNotStolenFromAFocusedTextField) {
   PanelEntry* statsEntry = h.entryOf(FunctionStatsPanel::kName);
   listEntry->open = true;
   h.frames(3);
+  ImGui::SetWindowDock(ImGui::FindWindowByName(FunctionListPanel::kName), 0, ImGuiCond_Always);
   ImGui::SetWindowPos(FunctionListPanel::kName, ImVec2(0, 340));
   ImGui::SetWindowSize(FunctionListPanel::kName, ImVec2(700, 300));
   h.frames(3);

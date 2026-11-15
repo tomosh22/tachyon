@@ -532,6 +532,7 @@ void TimelineWidget::refreshRow(const PanelContext& context, const RowLayout& ro
 // Drawing
 
 void TimelineWidget::draw(const PanelContext& context) {
+  m_palette = &paletteOf(context);
   m_stats = {};
   m_tooltip.clear();
   if (!context.document) {
@@ -579,6 +580,9 @@ void TimelineWidget::draw(const PanelContext& context) {
   updateFlameDepths();
   updateInstrumentation(context);
   m_anyHovered = false;
+  m_doc->frames.setPalette(m_palette);
+  m_doc->plots.setPalette(m_palette);
+  m_doc->scopes.setPalette(m_palette);
 
   drawToolbar(context);
   drawStatusLine(context);
@@ -596,6 +600,106 @@ void TimelineWidget::draw(const PanelContext& context) {
   drawRows(context);
   handleKeys(context);
   if (m_doc && m_doc->live && m_follow && m_doc->view != m_viewBaseline) m_follow = false;
+}
+
+// WP-67e: the navigation-mode toolbar above the thread labels: pointer / zoom / pan / measure and the sort
+// menu, drawn as small vector glyphs (no icon font).
+void TimelineWidget::drawNavToolbar(const PanelContext& context, float x0, float y0, float x1, float y1) {
+  (void)context;
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  const float em = ImGui::GetFontSize();
+  const float size = std::min(y1 - y0 - 2.0f, em * 1.3f);
+  if (size < 6.0f || x1 - x0 < size * 5.0f) return;
+  const float top = y0 + (y1 - y0 - size) * 0.5f;
+  const ImVec2 cursor = ImGui::GetCursorScreenPos();  // the layout continues below the header
+  struct Button {
+    const char* tip;
+    NavMode mode;
+    int glyph;
+  };
+  static constexpr Button kButtons[] = {
+      {"Pointer: click selects, drag pans (Shift+drag selects a range)", NavMode::Pointer, 0},
+      {"Zoom: drag a range to zoom into it", NavMode::Zoom, 1},
+      {"Pan: drag moves the view", NavMode::Pan, 2},
+      {"Measure: drag a range to measure it", NavMode::Measure, 3}};
+  const ImU32 ink = m_palette->text;
+  float x = x0 + 4.0f;
+  int index = 0;
+  for (int i = 0; i < 5; ++i, ++index, x += size + 2.0f) {
+    const ImVec2 a(x, top), b(x + size, top + size);
+    ImGui::SetCursorScreenPos(a);
+    ImGui::PushID(index);
+    const bool pressed = ImGui::InvisibleButton("##nav", ImVec2(size, size));
+    ImGui::PopID();
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = i < 4 && m_navMode == kButtons[i].mode;
+    if (active) dl->AddRectFilled(a, b, m_palette->accentSoft, 2.0f);
+    if (active)
+      dl->AddRect(a, b, m_palette->accent, 2.0f);
+    else if (hovered)
+      dl->AddRectFilled(a, b, m_palette->hover, 2.0f);
+    const ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+    const float r = size * 0.28f;
+    const int glyph = i < 4 ? kButtons[i].glyph : 4;
+    switch (glyph) {
+      case 0:  // pointer arrow
+        dl->AddTriangleFilled(ImVec2(c.x - r * 0.8f, c.y - r * 1.1f), ImVec2(c.x - r * 0.8f, c.y + r * 1.0f),
+                              ImVec2(c.x + r * 0.9f, c.y + r * 0.2f), ink);
+        break;
+      case 1:  // magnifier
+        dl->AddCircle(ImVec2(c.x - r * 0.2f, c.y - r * 0.2f), r * 0.9f, ink, 0, 1.4f);
+        dl->AddLine(ImVec2(c.x + r * 0.45f, c.y + r * 0.45f), ImVec2(c.x + r * 1.2f, c.y + r * 1.2f), ink,
+                    1.8f);
+        break;
+      case 2:  // double arrow
+        dl->AddLine(ImVec2(c.x - r * 1.2f, c.y), ImVec2(c.x + r * 1.2f, c.y), ink, 1.4f);
+        dl->AddTriangleFilled(ImVec2(c.x - r * 1.3f, c.y), ImVec2(c.x - r * 0.5f, c.y - r * 0.6f),
+                              ImVec2(c.x - r * 0.5f, c.y + r * 0.6f), ink);
+        dl->AddTriangleFilled(ImVec2(c.x + r * 1.3f, c.y), ImVec2(c.x + r * 0.5f, c.y - r * 0.6f),
+                              ImVec2(c.x + r * 0.5f, c.y + r * 0.6f), ink);
+        break;
+      case 3:  // ruler
+        dl->AddLine(ImVec2(c.x - r * 1.2f, c.y), ImVec2(c.x + r * 1.2f, c.y), ink, 1.4f);
+        dl->AddLine(ImVec2(c.x - r * 1.2f, c.y - r * 0.7f), ImVec2(c.x - r * 1.2f, c.y + r * 0.7f), ink,
+                    1.4f);
+        dl->AddLine(ImVec2(c.x + r * 1.2f, c.y - r * 0.7f), ImVec2(c.x + r * 1.2f, c.y + r * 0.7f), ink,
+                    1.4f);
+        dl->AddLine(ImVec2(c.x, c.y - r * 0.4f), ImVec2(c.x, c.y + r * 0.4f), ink, 1.2f);
+        break;
+      default:  // sort: descending bars
+        for (int k = 0; k < 3; ++k) {
+          const float len = r * (2.4f - 0.8f * static_cast<float>(k));
+          const float yy = c.y - r * 0.9f + r * 0.9f * static_cast<float>(k);
+          dl->AddLine(ImVec2(c.x - r * 1.2f, yy), ImVec2(c.x - r * 1.2f + len, yy), ink, 1.6f);
+        }
+        break;
+    }
+    if (i < 4) {
+      if (pressed) m_navMode = kButtons[i].mode;
+      if (hovered) ImGui::SetTooltip("%s", kButtons[i].tip);
+    } else {
+      if (pressed) ImGui::OpenPopup("##navsort");
+      if (hovered) ImGui::SetTooltip("Sort the threads");
+    }
+    if (i == 3) x += 4.0f;
+  }
+  ImGui::SetCursorScreenPos(cursor);
+  if (ImGui::BeginPopup("##navsort")) {
+    DocState& d = *m_doc;
+    for (const SortKey k :
+         {SortKey::RunningTime, SortKey::SampleCount, SortKey::Name, SortKey::ThreadId, SortKey::Natural}) {
+      if (ImGui::MenuItem(sortKeyName(k), nullptr, k == m_options.sortKey)) {
+        m_options.sortKey = k;
+        d.orderDirty = true;
+      }
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Reverse", nullptr, m_options.reverseSort)) {
+      m_options.reverseSort = !m_options.reverseSort;
+      d.orderDirty = true;
+    }
+    ImGui::EndPopup();
+  }
 }
 
 void TimelineWidget::drawToolbar(const PanelContext& context) {
@@ -734,12 +838,14 @@ void TimelineWidget::drawStatusLine(const PanelContext& context) {
   DocState& d = *m_doc;
   const analysis::TimelineLod* lod = d.shared->lodIfPrepared();
   if (d.shared->failed.load(std::memory_order_acquire)) {
-    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Timeline index failed: %s", d.shared->error.c_str());
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(m_palette->error), "Timeline index failed: %s",
+                       d.shared->error.c_str());
   } else if (!lod || lod->readyThreadCount() < lod->threadCount()) {
     const size_t ready = lod ? lod->readyThreadCount() : 0;
     const size_t total = d.model->threads.size();
-    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Building timeline index: %zu / %zu threads (%.0f%%)",
-                       ready, total, lod ? static_cast<double>(lod->progress()) * 100.0 : 0.0);
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(m_palette->warn),
+                       "Building timeline index: %zu / %zu threads (%.0f%%)", ready, total,
+                       lod ? static_cast<double>(lod->progress()) * 100.0 : 0.0);
     context.requestRedraw();
   } else {
     const TickRange window = queryWindow(d.view, d.limits);
@@ -754,7 +860,7 @@ void TimelineWidget::drawStatusLine(const PanelContext& context) {
   }
   if (sel && sel->timeFilter) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "  Filter: %s",
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(m_palette->info), "  Filter: %s",
                        formatDurationTicks(sel->timeFilter->t1 - sel->timeFilter->t0, d.clockHz).c_str());
   }
   // Frame rate of the whole viewer (the acceptance criterion is 60 fps), right aligned.
@@ -788,7 +894,7 @@ void TimelineWidget::drawInstanceHighlights(ImDrawList* dl, const PanelContext& 
   // Bounded work per frame: a cap on the rects of one frame (a row never produces more than its pixel width).
   constexpr size_t kMaxRectsPerFrame = 20000;
   size_t budget = kMaxRectsPerFrame;
-  const ImU32 fill = IM_COL32(255, 190, 40, 80), edge = IM_COL32(255, 205, 70, 255);
+  const ImU32 fill = rgbaWithAlpha(m_palette->highlight, 80), edge = m_palette->highlight;
   std::vector<stats::OverlayRect> rects;
   for (size_t i = visible.first; i < visible.last && budget > 0; ++i) {
     const RowLayout& row = d.layout[i];
@@ -834,8 +940,8 @@ void TimelineWidget::drawInstanceHighlights(ImDrawList* dl, const PanelContext& 
       const float xb =
           std::max(static_cast<float>(std::min(b, static_cast<double>(x0 + w))), xa + stats::kMinRectWidth);
       const float top = originY + row.y0;
-      dl->AddRect(ImVec2(xa - 1.0f, top), ImVec2(xb + 1.0f, top + row.height), IM_COL32(255, 255, 255, 255),
-                  0.0f, 0, 2.0f);
+      dl->AddRect(ImVec2(xa - 1.0f, top), ImVec2(xb + 1.0f, top + row.height), m_palette->overlay, 0.0f, 0,
+                  2.0f);
       break;
     }
   }
@@ -856,9 +962,10 @@ void TimelineWidget::drawRangeOverlays(ImDrawList* dl, const PanelContext& conte
   };
   if (context.selection && context.selection->state().timeFilter) {
     const ViewFilter& f = *context.selection->state().timeFilter;
-    rect({f.t0, f.t1}, IM_COL32(80, 140, 255, 36), IM_COL32(80, 140, 255, 200));
+    rect({f.t0, f.t1}, rgbaWithAlpha(m_palette->accent, 36), rgbaWithAlpha(m_palette->accent, 200));
   }
-  if (m_selection) rect(*m_selection, IM_COL32(255, 255, 255, 44), IM_COL32(255, 255, 255, 220));
+  if (m_selection)
+    rect(*m_selection, rgbaWithAlpha(m_palette->overlay, 44), rgbaWithAlpha(m_palette->overlay, 220));
 }
 
 void TimelineWidget::drawOverview(const PanelContext& context) {
@@ -873,9 +980,9 @@ void TimelineWidget::drawOverview(const PanelContext& context) {
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const float x0 = m_geometry.plotX0, w = m_geometry.plotWidth;
 
-  dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(x0 + w, p0.y + height), IM_COL32(24, 24, 28, 255));
-  dl->AddText(ImVec2(p0.x + 4.0f, p0.y + (height - ImGui::GetFontSize()) * 0.5f),
-              IM_COL32(170, 170, 175, 255), "Overview");
+  dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(x0 + w, p0.y + height), m_palette->laneBg);
+  dl->AddText(ImVec2(p0.x + 4.0f, p0.y + (height - ImGui::GetFontSize()) * 0.5f), m_palette->textMuted,
+              "Overview");
 
   // Contents: average Running fraction of the ready threads, recomputed when the width or the number of ready
   // threads changes.
@@ -911,7 +1018,7 @@ void TimelineWidget::drawOverview(const PanelContext& context) {
       if (v <= 0.0f) continue;
       const float h = std::max(1.0f, v * (height - 4.0f));
       dl->AddRectFilled(ImVec2(x0 + c * colW, p0.y + height - 2.0f - h),
-                        ImVec2(x0 + (c + 1) * colW + 0.5f, p0.y + height - 2.0f), IM_COL32(70, 160, 90, 255));
+                        ImVec2(x0 + (c + 1) * colW + 0.5f, p0.y + height - 2.0f), m_palette->states.running);
     }
   }
   // Frame marks are too dense to show here; selection / filter ranges and the viewport indicator are not.
@@ -922,12 +1029,12 @@ void TimelineWidget::drawOverview(const PanelContext& context) {
   };
   if (context.selection && context.selection->state().timeFilter) {
     const ViewFilter& f = *context.selection->state().timeFilter;
-    rangeRect({f.t0, f.t1}, IM_COL32(80, 140, 255, 70));
+    rangeRect({f.t0, f.t1}, rgbaWithAlpha(m_palette->accent, 70));
   }
-  if (m_selection) rangeRect(*m_selection, IM_COL32(255, 255, 255, 70));
+  if (m_selection) rangeRect(*m_selection, rgbaWithAlpha(m_palette->overlay, 70));
   const OverviewRect vp = overviewViewport(d.view, d.limits, x0, w);
-  dl->AddRectFilled(ImVec2(vp.x0, p0.y), ImVec2(vp.x1, p0.y + height), IM_COL32(255, 255, 255, 28));
-  dl->AddRect(ImVec2(vp.x0, p0.y), ImVec2(vp.x1, p0.y + height), IM_COL32(255, 255, 255, 200));
+  dl->AddRectFilled(ImVec2(vp.x0, p0.y), ImVec2(vp.x1, p0.y + height), rgbaWithAlpha(m_palette->accent, 40));
+  dl->AddRect(ImVec2(vp.x0, p0.y), ImVec2(vp.x1, p0.y + height), m_palette->accent);
 
   const ImGuiIO& io = ImGui::GetIO();
   if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -953,16 +1060,15 @@ void TimelineWidget::drawHeader(const PanelContext& context) {
   const float x0 = m_geometry.plotX0, w = m_geometry.plotWidth;
   const ImU32 textCol = ImGui::GetColorU32(ImGuiCol_Text);
   dl->PushClipRect(ImVec2(x0, p0.y), ImVec2(x0 + w, p0.y + rulerH + frameH), true);
-  dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(x0 + w, p0.y + rulerH), IM_COL32(32, 32, 38, 255));
-  dl->AddRectFilled(ImVec2(x0, p0.y + rulerH), ImVec2(x0 + w, p0.y + rulerH + frameH),
-                    IM_COL32(26, 26, 31, 255));
+  dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(x0 + w, p0.y + rulerH), m_palette->rulerBg);
+  dl->AddRectFilled(ImVec2(x0, p0.y + rulerH), ImVec2(x0 + w, p0.y + rulerH + frameH), m_palette->laneBg);
 
   // Ruler
   const std::vector<RulerTick> ticks = buildRuler(d.view, d.clockHz, w, 90.0 * ui);
   for (const RulerTick& t : ticks) {
     const float x = static_cast<float>(relTickToX(d.view, t.relTick, x0, w));
     const float len = t.major ? rulerH * 0.65f : rulerH * 0.3f;
-    dl->AddLine(ImVec2(x, p0.y + rulerH - len), ImVec2(x, p0.y + rulerH), IM_COL32(170, 170, 175, 255));
+    dl->AddLine(ImVec2(x, p0.y + rulerH - len), ImVec2(x, p0.y + rulerH), m_palette->textMuted);
     if (t.major) dl->AddText(ImVec2(x + 3.0f, p0.y + 1.0f), textCol, t.label.c_str());
   }
 
@@ -972,12 +1078,11 @@ void TimelineWidget::drawHeader(const PanelContext& context) {
     const float charWidth = ImGui::CalcTextSize("0").x;
     for (const FrameMarkItem& m : layoutFrameMarks(d.frameTicks, d.view, d.limits, x0, w, charWidth)) {
       ++m_stats.frameMarksDrawn;
-      dl->AddLine(ImVec2(m.x, p0.y + rulerH + 2.0f), ImVec2(m.x, p0.y + rulerH + frameH),
-                  IM_COL32(230, 190, 90, 255));
+      dl->AddLine(ImVec2(m.x, p0.y + rulerH + 2.0f), ImVec2(m.x, p0.y + rulerH + frameH), m_palette->warn);
       if (m.hasLabel) {
         char text[24];
         std::snprintf(text, sizeof text, "%llu", static_cast<unsigned long long>(m.number));
-        dl->AddText(ImVec2(m.x + 2.0f, p0.y + rulerH), IM_COL32(230, 190, 90, 255), text);
+        dl->AddText(ImVec2(m.x + 2.0f, p0.y + rulerH), m_palette->warn, text);
         m_frameLabels.push_back(m.number);
       }
     }
@@ -985,7 +1090,10 @@ void TimelineWidget::drawHeader(const PanelContext& context) {
   drawRangeOverlays(dl, context, p0.y, p0.y + rulerH + frameH);
   dl->PopClipRect();
   dl->AddLine(ImVec2(m_geometry.gutterX0, p0.y + rulerH + frameH), ImVec2(x0 + w, p0.y + rulerH + frameH),
-              IM_COL32(70, 70, 76, 255));
+              m_palette->border);
+  // WP-67e: the navigation toolbar sits above the thread labels, next to the ruler (submitted after the
+  // header button so it takes the clicks of its own area).
+  drawNavToolbar(context, m_geometry.gutterX0, p0.y, x0 - 2.0f, p0.y + rulerH + frameH);
 }
 
 void TimelineWidget::drawRows(const PanelContext& context) {
@@ -1108,10 +1216,9 @@ void TimelineWidget::drawRows(const PanelContext& context) {
     refreshRow(context, row, cache);
     const float top = origin.y + row.y0;
     const bool selected = row.thread == selectedThread;
-    dl->AddRectFilled(ImVec2(m_geometry.gutterX0, top),
-                      ImVec2(m_geometry.plotX0 + m_geometry.plotWidth, top + row.height),
-                      selected ? IM_COL32(50, 62, 90, 255)
-                               : ((i & 1) ? IM_COL32(30, 30, 35, 255) : IM_COL32(35, 35, 41, 255)));
+    dl->AddRectFilled(
+        ImVec2(m_geometry.gutterX0, top), ImVec2(m_geometry.plotX0 + m_geometry.plotWidth, top + row.height),
+        selected ? m_palette->accentSoft : ((i & 1) ? m_palette->laneBg : m_palette->laneBgAlt));
     drawRowContents(dl, context, i, top, cache);
     ++m_stats.rowsDrawn;
     if (cache.pending) ++m_stats.rowsPending;
@@ -1135,7 +1242,8 @@ void TimelineWidget::drawRows(const PanelContext& context) {
   // Cursor hairline and tooltip.
   if (canvasHovered && !inGutter && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
     const float x = io.MousePos.x;
-    dl->AddLine(ImVec2(x, m_geometry.rowsY0), ImVec2(x, m_geometry.rowsY1), IM_COL32(255, 255, 255, 60));
+    dl->AddLine(ImVec2(x, m_geometry.rowsY0), ImVec2(x, m_geometry.rowsY1),
+                rgbaWithAlpha(m_palette->overlay, 60));
   }
   const Hit hit = canvasHovered ? hitTest(context, io.MousePos.x, io.MousePos.y) : Hit{};
   if (canvasHovered) m_anyHovered = true;
@@ -1147,13 +1255,27 @@ void TimelineWidget::drawRows(const PanelContext& context) {
 }
 namespace {
 
-void drawPendingLook(ImDrawList* dl, float x0, float y0, float x1, float y1) {
-  dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(44, 44, 52, 255));
+// WP-67e: a small eye (almond outline and pupil), centred on `c`, half-width 1.3 * r.
+void drawEyeIcon(ImDrawList* dl, ImVec2 c, float r, ImU32 color) {
+  constexpr int kHalf = 9;
+  ImVec2 pts[kHalf * 2];
+  for (int i = 0; i < kHalf; ++i) {
+    const float u = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(kHalf - 1);  // -1 .. 1
+    const float y = r * 0.62f * (1.0f - u * u);
+    pts[i] = ImVec2(c.x + u * r * 1.3f, c.y - y);
+    pts[kHalf * 2 - 1 - i] = ImVec2(c.x + u * r * 1.3f, c.y + y);
+  }
+  dl->AddPolyline(pts, kHalf * 2, color, ImDrawFlags_Closed, 1.2f);
+  dl->AddCircleFilled(c, r * 0.34f, color);
+}
+
+void drawPendingLook(ImDrawList* dl, const ThemePalette& p, float x0, float y0, float x1, float y1) {
+  dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), p.pendingFill);
   dl->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y1), true);
   const float h = y1 - y0;
   const float phase = std::fmod(static_cast<float>(ImGui::GetTime()) * 20.0f, 16.0f);
   for (float x = x0 - h + phase; x < x1; x += 16.0f) {
-    dl->AddLine(ImVec2(x, y1), ImVec2(x + h, y0), IM_COL32(70, 70, 82, 255));
+    dl->AddLine(ImVec2(x, y1), ImVec2(x + h, y0), p.pendingStripe);
   }
   dl->PopClipRect();
 }
@@ -1170,24 +1292,42 @@ void TimelineWidget::drawRowContents(ImDrawList* dl, const PanelContext& context
   const float bandY0 = rowTop + bandTop(geom), bandY1 = bandY0 + geom.bandHeight;
   const float stripY0 = rowTop + stripTop(geom), stripY1 = stripY0 + geom.stripHeight;
 
-  // Gutter label: expand arrow, pin marker, name and thread id.
+  // Gutter label (WP-67e): visibility eye, thread id in muted text, name, expand chevron at the right edge.
   {
     const model::Thread& th = model.threads[row.thread.get()];
     const RowFlags flags = d.flags[row.thread.get()];
-    char label[200];
-    std::snprintf(label, sizeof label, "%s%s%s (%u)", row.expanded ? "v " : "> ", flags.pinned ? "* " : "",
-                  th.name.empty() ? "thread" : th.name.c_str(), th.tid);
-    const ImVec4 clip(m_geometry.gutterX0, rowTop, x0 - 4.0f, rowTop + row.height);
-    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                ImVec2(m_geometry.gutterX0 + 4.0f, rowTop + geom.rowPadding),
-                ImGui::GetColorU32(ImGuiCol_Text), label, nullptr, 0.0f, &clip);
+    const float em = ImGui::GetFontSize();
+    const float gx0 = m_geometry.gutterX0, gx1 = x0 - 4.0f;
+    const float textY = rowTop + geom.rowPadding;
+    const float cy = textY + em * 0.5f;
+    drawEyeIcon(dl, ImVec2(gx0 + em * 1.0f, cy), em * 0.5f, m_palette->textMuted);
+    char tid[16];
+    std::snprintf(tid, sizeof tid, "%u", th.tid);
+    const float tidX = gx0 + em * 1.9f;
+    const float nameX = tidX + ImGui::CalcTextSize("000000").x + 4.0f;
+    const ImVec4 tidClip(tidX, rowTop, nameX - 2.0f, rowTop + row.height);
+    dl->AddText(ImGui::GetFont(), em, ImVec2(tidX, textY), m_palette->textMuted, tid, nullptr, 0.0f,
+                &tidClip);
+    char name[160];
+    std::snprintf(name, sizeof name, "%s%s", flags.pinned ? "* " : "",
+                  th.name.empty() ? "thread" : th.name.c_str());
+    const ImVec4 nameClip(nameX, rowTop, gx1 - em * 1.5f, rowTop + row.height);
+    dl->AddText(ImGui::GetFont(), em, ImVec2(nameX, textY), m_palette->text, name, nullptr, 0.0f, &nameClip);
+    const float cx = gx1 - em * 0.7f, r = em * 0.28f;
+    if (row.expanded) {
+      dl->AddTriangleFilled(ImVec2(cx - r, cy - r * 0.6f), ImVec2(cx + r, cy - r * 0.6f),
+                            ImVec2(cx, cy + r * 0.8f), m_palette->textMuted);
+    } else {
+      dl->AddTriangleFilled(ImVec2(cx - r * 0.6f, cy - r), ImVec2(cx - r * 0.6f, cy + r),
+                            ImVec2(cx + r * 0.8f, cy), m_palette->textMuted);
+    }
   }
 
   const bool sampled = modeHasSampled(row.mode);
   dl->PushClipRect(ImVec2(x0, rowTop), ImVec2(x0 + w, rowTop + row.height), true);
   if (cache.pending || cache.band.columns.empty()) {
-    drawPendingLook(dl, x0, bandY0, x0 + w, bandY1);
-    if (sampled) drawPendingLook(dl, x0, stripY0, x0 + w, stripY1);
+    drawPendingLook(dl, *m_palette, x0, bandY0, x0 + w, bandY1);
+    if (sampled) drawPendingLook(dl, *m_palette, x0, stripY0, x0 + w, stripY1);
   } else {
     // State band: merge neighbouring columns of equal colour into one rectangle.
     {
@@ -1195,9 +1335,9 @@ void TimelineWidget::drawRowContents(ImDrawList* dl, const PanelContext& context
       const float colW = w / static_cast<float>(cols);
       RectBatch batch(dl, cols);
       uint32_t runStart = 0;
-      Color32 runColor = bandColumnColor(cache.band.columns[0]);
+      Color32 runColor = bandColumnColor(cache.band.columns[0], m_palette->states);
       for (uint32_t c = 1; c <= cols; ++c) {
-        const Color32 col = c < cols ? bandColumnColor(cache.band.columns[c]) : 0;
+        const Color32 col = c < cols ? bandColumnColor(cache.band.columns[c], m_palette->states) : 0;
         if (c == cols || col != runColor) {
           batch.add(x0 + static_cast<float>(runStart) * colW, bandY0, x0 + static_cast<float>(c) * colW,
                     bandY1, toIm(runColor));
@@ -1246,7 +1386,8 @@ void TimelineWidget::drawFlame(ImDrawList* dl, const PanelContext& context, cons
   const float x0 = m_geometry.plotX0, w = m_geometry.plotWidth;
   if (cache.pending) {
     const float top = rowTop + flameTop(geom);
-    drawPendingLook(dl, x0, top, x0 + w, top + static_cast<float>(row.flameDepths) * geom.flameDepthHeight);
+    drawPendingLook(dl, *m_palette, x0, top, x0 + w,
+                    top + static_cast<float>(row.flameDepths) * geom.flameDepthHeight);
     return;
   }
   std::optional<FunctionKey> selected;
@@ -1272,9 +1413,9 @@ void TimelineWidget::drawFlame(ImDrawList* dl, const PanelContext& context, cons
       const float ya = rowTop + flameDepthTop(geom, s.depth);
       const float yb = ya + geom.flameDepthHeight - 1.0f;
       const bool merged = !s.node.valid();
-      const Color32 color = merged ? kOtherWaitColor
+      const Color32 color = merged ? m_palette->states.otherWait
                                    : callstackColor(model, s.node, m_options.colorMode, context.symbols,
-                                                    FramePosition::NonLeaf);
+                                                    FramePosition::NonLeaf, m_palette->states.unknown);
       batch.add(xa, ya, xb, yb, toIm(merged ? scaleBrightness(color, 0.6f) : color));
       ++m_stats.rects;
       ++m_stats.flameSpans;
@@ -1288,7 +1429,8 @@ void TimelineWidget::drawFlame(ImDrawList* dl, const PanelContext& context, cons
   // Pass 2: outlines and labels.
   uint32_t labels = 0;
   for (const Decor& dc : decor) {
-    if (dc.outline) dl->AddRect(ImVec2(dc.xa, dc.ya), ImVec2(dc.xb, dc.yb), IM_COL32(255, 255, 255, 255));
+    if (dc.outline)
+      dl->AddRect(ImVec2(dc.xa, dc.ya), ImVec2(dc.xb, dc.yb), m_palette->overlay, 0.0f, 0, 2.0f);
     if (dc.label && labels < 48) {
       const std::string text = describeCallstackLeaf(model, dc.node, context.symbols);
       const ImVec4 clip(dc.xa, dc.ya, dc.xb, dc.yb);
@@ -1467,7 +1609,23 @@ void TimelineWidget::applyClick(const PanelContext& context, const Hit& hit) {
     return;
   }
   if (!hit.thread.valid()) return;
+  const float mx = ImGui::GetIO().MousePos.x;
+  if (m_navMode == NavMode::Pan && mx >= m_geometry.plotX0)
+    return;  // Pan mode: a click on the graph selects nothing
   context.selection->setSelectedThread(hit.thread);
+  {
+    // WP-67e: the eye at the left of a label hides the thread; the chevron at its right edge expands it.
+    const float em = ImGui::GetFontSize();
+    if (mx >= m_geometry.gutterX0 && mx < m_geometry.gutterX0 + em * 1.7f) {
+      m_doc->flags[hit.thread.get()].hidden = true;
+      m_doc->orderDirty = true;
+      return;
+    }
+    if (mx < m_geometry.plotX0 && mx >= m_geometry.plotX0 - em * 2.1f) {
+      setExpanded(hit.thread, !flagsOf(hit.thread).expanded);
+      return;
+    }
+  }
   if (hit.section == RowSection::Scope) {  // WP-54: a click on a scope selects it as the function
     if (hit.scope && hit.scope->track.count == 1) {
       const analysis::ScopeInstance& inst = *hit.scope->trackPtr->instance[hit.scope->track.first];
@@ -1533,7 +1691,9 @@ void TimelineWidget::handleViewInput(const PanelContext& context, bool header, b
       if (io.MouseDown[ImGuiMouseButton_Middle]) {
         m_drag.mode = Drag::Mode::Pan;
       } else if (io.MouseDown[ImGuiMouseButton_Left]) {
-        m_drag.mode = (header || io.KeyShift) ? Drag::Mode::Select : Drag::Mode::Pan;
+        m_drag.mode = (header || io.KeyShift || m_navMode == NavMode::Zoom || m_navMode == NavMode::Measure)
+                          ? Drag::Mode::Select
+                          : Drag::Mode::Pan;
       }
     }
     if (m_drag.fromGutter && io.MouseDown[ImGuiMouseButton_Left] &&
@@ -1556,6 +1716,11 @@ void TimelineWidget::handleViewInput(const PanelContext& context, bool header, b
   }
   if (ImGui::IsItemDeactivated()) {
     const bool click = !m_drag.moved;
+    if (m_navMode == NavMode::Zoom && m_drag.mode == Drag::Mode::Select && m_drag.moved && !header &&
+        m_selection) {
+      d.view = viewFromRange(d.limits, *m_selection);  // drag-zoom: the range is consumed
+      m_selection.reset();
+    }
     if (click && !header && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
       const Hit hit = hitTest(context, io.MousePos.x, io.MousePos.y);
       applyClick(context, hit);
@@ -1679,11 +1844,15 @@ void TimelineWidget::drawWakeArrow(ImDrawList* dl, const PanelContext& context,
   if (g.wakerHidden && e.wakerThread.valid()) info.wakerLabel += " (hidden)";
   m_arrows.push_back(info);
 
-  const ImU32 color = selected ? IM_COL32(255, 235, 120, 255) : IM_COL32(255, 255, 255, 230);
+  const ImU32 color = selected ? m_palette->highlight : rgbaWithAlpha(m_palette->overlay, 230);
   const float thickness = selected ? 2.5f : 1.75f;
   const float head = 7.0f * std::max(0.5f, ImGui::GetFontSize() / kBaseUi);
   if (g.visible) {
-    dl->AddLine(ImVec2(g.from.x, g.from.y), ImVec2(g.to.x, g.to.y), IM_COL32(0, 0, 0, 200), thickness + 2.0f);
+    dl->AddLine(
+        ImVec2(g.from.x, g.from.y), ImVec2(g.to.x, g.to.y),
+        rgbaWithAlpha(m_palette->scheme == ColorScheme::Dark ? makeRgba(0, 0, 0) : makeRgba(255, 255, 255),
+                      200),
+        thickness + 2.0f);
     dl->AddLine(ImVec2(g.from.x, g.from.y), ImVec2(g.to.x, g.to.y), color, thickness);
     if (!g.fromClipped) dl->AddCircleFilled(ImVec2(g.from.x, g.from.y), 3.0f, color);
     if (!g.toClipped) {
@@ -1720,7 +1889,9 @@ void TimelineWidget::drawWakeArrow(ImDrawList* dl, const PanelContext& context,
         break;
     }
     dl->AddTriangleFilled(a, b, c, color);
-    dl->AddText(ImVec2(text.x + 1.0f, text.y + 1.0f), IM_COL32(0, 0, 0, 255), info.wakerLabel.c_str());
+    dl->AddText(ImVec2(text.x + 1.0f, text.y + 1.0f),
+                m_palette->scheme == ColorScheme::Dark ? makeRgba(0, 0, 0) : makeRgba(255, 255, 255),
+                info.wakerLabel.c_str());
     dl->AddText(text, color, info.wakerLabel.c_str());
   }
 }

@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 
 #include <chrono>
 #include <filesystem>
@@ -101,7 +102,15 @@ class Harness {
     const symbols::SymbolProgress p = svc->progress();
     return p.total > 0 && p.done == p.total && listSettled() && butterflySettled() && graphSettled();
   }
+  // The default layout tabs the three analysis panels together, which hides two of them: float them all.
+  void floatPanels() {
+    frames(2);
+    for (const char* name : {FunctionListPanel::kName, ButterflyPanel::kName, CallGraphPanel::kName})
+      ImGui::SetWindowDock(ImGui::FindWindowByName(name), 0, ImGuiCond_Always);
+    frames(2);
+  }
   void open(const char* name) {
+    floatPanels();
     app.openFile(fixture(name));
     ASSERT_TRUE(until([&] { return app.document() != nullptr && !app.loading(); }));
     stable();
@@ -164,7 +173,7 @@ class Harness {
   }
   // Places the windows side by side so that clicks hit the intended panel.
   void layout() {
-    frames(2);
+    floatPanels();
     ImGui::SetWindowPos(FunctionListPanel::kName, ImVec2(0, 20));
     ImGui::SetWindowSize(FunctionListPanel::kName, ImVec2(620, 330));
     ImGui::SetWindowPos(ButterflyPanel::kName, ImVec2(640, 20));

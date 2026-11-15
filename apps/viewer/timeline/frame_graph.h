@@ -14,6 +14,8 @@
 // strip never has more bars than pixels, and a 100 k frame trace draws as fast as a short one.
 #pragma once
 
+#include "viewer/theme.h"
+
 #include "analysis/frames.h"
 #include "analysis/query.h"
 #include "model/model.h"
@@ -127,6 +129,11 @@ struct DrawnFrameBar {
 
 class FrameGraphView {
  public:
+  // WP-67e: the palette the view draws with (null = the dark one); set by the timeline widget every frame.
+  void setPalette(const ThemePalette* palette) {
+    m_palette = palette != nullptr ? palette : &paletteFor(ColorScheme::Dark);
+  }
+
   FrameGraphView() = default;
   FrameGraphView(const FrameGraphView&) = delete;
   FrameGraphView& operator=(const FrameGraphView&) = delete;
@@ -176,6 +183,7 @@ class FrameGraphView {
   float lastBudgetY() const { return m_budgetY; }
 
  private:
+  const ThemePalette* m_palette = &paletteFor(ColorScheme::Dark);
   void issue(const PanelContext& context);
 
   common::LatestQuery<FrameGraphData> m_query;
