@@ -1,7 +1,6 @@
-// Analysis query API (spec 3.7). WP-32 implements topDownTree, bottomUpFunctions and butterfly; the remaining
-// 3.7 queries are added by their own work packages and are intentionally not declared here yet:
-//   WP-34 (declared below): linesForFunction, instructionsForFunction (LineAgg, InstructionAgg)
-//   WP-35 (declared below): functionStats, scopeStats, threadStateTotals, frames, slowestFrames
+// Analysis query API (docs/specs/analysis-query.md). WP-32: topDownTree, bottomUpFunctions, butterfly;
+// WP-34: linesForFunction, instructionsForFunction (LineAgg, InstructionAgg); WP-35: functionStats,
+// scopeStats, threadStateTotals, frames, slowestFrames; later WPs add the instance, lock and *Shared queries.
 //
 // Deviation from 3.7 (see the WP-32 report): the queries need symbols to turn frames into FunctionKeys, so
 // the first parameter is a QueryContext (TraceModel + SymbolService + options + a per-filter memo) instead of

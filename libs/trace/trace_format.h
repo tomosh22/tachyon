@@ -130,7 +130,7 @@ struct ModuleRec {
   uint64_t base;
   uint64_t size;
   StringIdx path;
-  uint8_t id_kind;  // 1 pdb guid+age, 2 gnu build-id
+  uint8_t id_kind;  // 1 pdb guid+age, 2 gnu build-id, 3 PE timestamp+size (kModuleId* above)
   uint8_t id_len;
   uint8_t id[32];
   uint32_t age;
