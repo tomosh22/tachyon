@@ -59,6 +59,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-65 | Real-time live view (Linux + Windows; split 65a core / 65w ETW / 65b viewer; design in docs/specs/live.md) | A/W/C | merged (65a core, 65b viewer, 65c 30 s window, 65w Windows ETW) | wp/65a-live-core, wp/65w-live-etw, wp/65b-live-viewer | 2026-11-08 |
 | WP-66b | Output and pipe hardening (O_NOFOLLOW writer, lstat produced paths, relaxed shared-dir refusal, per-agent Windows inst pipe) | A | merged | wp/66b-output-hardening | 2026-11-08 |
 | WP-67c | Viewer default docked layout (first launch) and View > Reset layout | C | merged | wp/67c-default-layout | 2026-11-15 |
+| WP-67d | Readable function-name column in Function List, Call Graph, Butterfly | C | merged | wp/67d-name-columns | 2026-11-15 |
 | WP-68 | Viewer performance pass 2 (LOD direct zoom, flame, WP-54 draw lists, single-decode load, preview symbol reuse) | C | merged (partial: frame targets remain exceptions) | wp/68-perf-pass2 | 2026-11-08 |
 | WP-69 | Report/export/doctor follow-ups and test flakes (WP-62b, symbol-setup helper, Windows doctor) | D | merged (4a moved to WP-66b) | wp/69-tooling | 2026-11-08 |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
@@ -259,6 +260,10 @@ Verifier PASS (no blocking issues). Orchestrator change from its findings: the t
 ## WP-67c notes
 
 Found by running the real viewer under Xvfb (2026-11-14): with a fresh settings directory every panel opened as a floating window stacked on the others. Now the first launch builds a docked layout (Threads Timeline across the top at 55%; Call Graph, Function List and Butterfly side by side below; Thread Interaction, Trace Info and Source as tabs with Butterfly; Function Statistics, Capture, Flight Recorder, Live, Session Explorer and Symbols as tabs with Function List). A saved imgui.ini layout is never replaced; View > Reset layout (command "View: Reset Layout") rebuilds the default. Orchestrator review (451 lines), CI green on all three jobs, local release ctest 2456/2456. Two existing widget tests now use a 1920x1080 harness display (docked panels are smaller than the old floating defaults). Needs Windows verification on a real desktop: DPI scaling, minimised window at first launch.
+
+## WP-67d notes
+
+In the docked layout the six fixed numeric columns (~35.5 em) took the whole ~530 px panel and the stretch Function column shrank to one character. The name column now gets at least max(12 em, min(18 em, 40% of the panel)); when the panel is narrower than that plus the other columns, the table scrolls horizontally with the name column frozen (Function List, Call Graph, Butterfly; Module default 8 → 6.5 em). Column ids and flags unchanged, so saved table settings stay valid. Measured name width: 15–17 em at 1600x900, ≥ 12 em at 1280x720. Orchestrator review (116 lines), CI green on all three jobs, local release ctest 2458/2458.
 
 ## WP-65w / WP-65c status (2026-11-08, work stopped at the user's request)
 
