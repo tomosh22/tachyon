@@ -2,6 +2,9 @@
 
 Date: 2026-10-24
 
+> **Historical document (2026-10-24).** This is the original research and roadmap, kept as written. For what was actually built see [README.md](../README.md), [docs/PROGRESS.md](PROGRESS.md) and the authoritative specifications in [docs/specs/](specs/).
+
+
 Assumptions (adjust if wrong):
 - The engine is C++ and ships first on Windows x64. Linux is secondary. Consoles may follow if you have SDK access (Superluminal's console backends use first-party APIs under NDA, so they are out of scope for this public plan).
 - You control the engine build pipeline, so you can emit PDBs, build IDs, frame pointers, and instrumentation macros in every build configuration.

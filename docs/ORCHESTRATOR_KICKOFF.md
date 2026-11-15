@@ -1,5 +1,7 @@
 # Orchestrator kickoff prompt
 
+> **Historical document.** This is the prompt the project was started with. Current status is in [docs/PROGRESS.md](PROGRESS.md).
+
 Paste the text below as the first message of a new Claude Code session opened in this repository, with Opus selected as the model.
 
 ---
