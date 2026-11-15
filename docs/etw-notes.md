@@ -1,9 +1,15 @@
 # ETW notes (WP-01 `etlstat`)
 
-Status: **documented layouts only**. This file was written on a Linux machine without Windows, so nothing
-below has been observed yet. Every item tagged **[VERIFY]** must be confirmed (or corrected) by running
-`etlstat` on an elevated Windows prompt; replace the tag with `[OBSERVED <date>, <Windows build>]` and fix
-the text. WP-11 and WP-12 depend on this document, so do not leave unverified claims untagged.
+Status (reviewed 2026-11-15): this file was written on a Linux machine without Windows, so most of what it
+says is still **documented layouts, not observations**. Items tagged **[VERIFY]** are unconfirmed; the only
+observed facts are the ones recorded in the last section ("Observed on the GitHub windows-2022 runner") and
+the corrections made from them below, tagged **[OBSERVED]**. The dev-box acceptance run (WP-01 numbers, WP-11
+30 s run, WP-12 hot_a/b/c ranking and stack-thread role histograms) is still pending (see `docs/PROGRESS.md`,
+user queue), so the section 5 tables are still TBD. Replace a tag with `[OBSERVED <date>, <Windows build>]` and
+fix the text when you confirm an item. The recipe here is implemented twice: by `tools/etlstat`
+(`session_config.cpp`, `etw_payload.cpp`) and, as the product code, by `libs/capture/windows_etw`
+(`session_config.cpp`, `etw_session.cpp`; WP-11) with the decoders and stack matcher in `libs/etlconvert`
+(WP-12). The product backend started with the etlstat recipe and differs only where noted below.
 
 Sources: Tachyon spec Appendix B, Microsoft documentation for `EVENT_TRACE_PROPERTIES`,
 `TraceSetInformation`, `TRACE_PROFILE_INTERVAL`, `CLASSIC_EVENT_ID`, and the public kernel MOF classes
@@ -16,8 +22,8 @@ Sources: Tachyon spec Appendix B, Microsoft documentation for `EVENT_TRACE_PROPE
 | Privilege | `AdjustTokenPrivileges(SeSystemProfilePrivilege)` | Required for the PROFILE flag and the sampling interval. Held (but not enabled) by Administrators; a non-elevated token gets `ERROR_NOT_ALL_ASSIGNED` and etlstat reports `NoPrivilege`. [VERIFY: whether `StartTrace` alone also needs `SeSystemProfilePrivilege` or only `TraceSetInformation`] |
 | Session | `StartTraceW(&h, L"Tachyon etlstat <pid>", props)` | `LogFileMode = EVENT_TRACE_FILE_MODE_SEQUENTIAL \| EVENT_TRACE_SYSTEM_LOGGER_MODE`, `Wnode.ClientContext = 1` (QPC), `Wnode.Flags = WNODE_FLAG_TRACED_GUID`. |
 | Flags | `EnableFlags = PROCESS \| THREAD \| IMAGE_LOAD \| PROFILE \| CSWITCH \| DISPATCHER` | = `0x01000817`. |
-| Buffers | `BufferSize = 1024` KB, `MinimumBuffers = max(64, 4 x cores)`, `MaximumBuffers = 4 x MinimumBuffers`, `FlushTimer = 1` s | Formula in `session_config.cpp` (unit tested). |
-| Interval | `TraceSetInformation(h, TraceSampledProfileIntervalInfo, &TRACE_PROFILE_INTERVAL{Source=0, Interval=1221}, ...)` | Units are 100 ns. 1221 = 122.1 us = ~8.19 kHz is the smallest value Windows accepts. `--hz` >= 8000 uses 1221; lower rates use `10,000,000 / hz`. [VERIFY: whether the call takes the session handle or 0. etlstat tries the session handle first, then 0, and prints which one worked: "interval set with session handle".] |
+| Buffers | `BufferSize = 1024` KB, `MinimumBuffers = max(64, 4 x cores)`, `MaximumBuffers = 4 x MinimumBuffers`, `FlushTimer = 1` s | Formula in `session_config.cpp` (unit tested). The product backend uses `MaximumBuffers = MinimumBuffers x (2 + ceil(hz / 4000))` capped at 512 buffers (8 kHz gives the same 4x), and accepts explicit overrides (`libs/capture/windows_etw/session_config.h`). |
+| Interval | `TraceSetInformation(h, TraceSampledProfileIntervalInfo, &TRACE_PROFILE_INTERVAL{Source=0, Interval=1221}, ...)` | Units are 100 ns. 1221 = 122.1 us = ~8.19 kHz is the smallest value Windows accepts. `--hz` >= 8000 uses 1221; lower rates use `10,000,000 / hz`. [OBSERVED 2026-10-25, windows-2022 CI runner: the call fails with the session handle and succeeds with handle 0. The product backend (`EtwSession`) therefore always uses handle 0; etlstat still tries the session handle first and prints which one worked.] |
 | Stacks | `TraceSetInformation(h, TraceStackTracingInfo, CLASSIC_EVENT_ID[3], ...)` | PerfInfo/46 (SampledProfile), Thread/36 (CSwitch), Thread/50 (ReadyThread). |
 | Run | optional `CreateProcessW(--exe)`, wait N s (or until the process exits), `TerminateProcess` if still running | The process is started after the session so its process/thread/image start events are captured. |
 | Stop | `ControlTraceW(h, name, props, EVENT_TRACE_CONTROL_STOP)` | Rewrites `props` with `EventsLost`, `LogBuffersLost`, `RealTimeBuffersLost`, `BuffersWritten`, `NumberOfBuffers`; printed by `record`. |
@@ -29,7 +35,7 @@ fail with `ERROR_ALREADY_EXISTS` (or steal our session). With `EVENT_TRACE_SYSTE
 a session with any name can receive kernel events; up to 8 such system loggers can coexist. etlstat names the
 session `Tachyon etlstat <pid>` and gives it a GUID derived from the pid and a timestamp. If `StartTrace`
 returns `ERROR_INVALID_PARAMETER` it retries with `SystemTraceControlGuid`; the `record` output says when that
-fallback was needed. [VERIFY: which GUID Windows accepts for a custom-named system logger.]
+fallback was needed. [OBSERVED 2026-10-25, windows-2022 CI runner: a unique session name with its own GUID starts without the `SystemTraceControlGuid` fallback. The product backend (`EtwSession`) keeps the fallback and reports it in `SessionStartInfo::kernelGuidFallback`; it also stops orphaned `Tachyon ` sessions left by dead processes at start.]
 
 ### Pitfalls to check on the real machine
 
@@ -160,8 +166,9 @@ A StackWalk/Stack event belongs to an earlier event of the same thread. Matching
 events (the only types stack tracing is enabled for). Because it is not documented which thread id the
 kernel puts in `StackThread` for CSwitch (header thread, NewThreadId, or OldThreadId), every parent is
 registered under all candidates and the report prints a histogram of which role matched
-("matched via header ThreadId / payload thread / payload OldThreadId"). [VERIFY, then reduce to the single
-correct role in WP-11.]
+("matched via header ThreadId / payload thread / payload OldThreadId"). [VERIFY. The converter (`libs/etlconvert/stack_matcher.h`) still registers every candidate and records the
+match-role histogram in CaptureInfo `convert_stats.stack_match_roles`; reduce to the single correct role once the
+dev-box histograms are in.]
 
 Rules: each parent can be matched once; a stack with no pending parent is `unmatched`; a parent not matched
 within one second of trace time (or at end of file) is counted as `withoutStack`. Idle-thread samples
@@ -183,15 +190,15 @@ complete. `--dump-hex N` writes the first N payloads of every (provider, opcode,
 file under `tests/fixtures/etw/` (WP-12 reuses it) and replay it anywhere with `etlstat replay <file>`.
 `tests/fixtures/etw/synthetic_basic.hexevents` is a hand-built file in the same format and is not a capture.
 
-## 5. Measurements (to be filled on Windows)
+## 5. Measurements (to be filled on Windows; the [OBSERVED] CI facts are in the last section)
 
 Machine: _CPU model, cores, Windows build, power plan: TBD_
 
 | Quantity | Target | Measured |
 |---|---|---|
 | Interval accepted by `TraceSetInformation` (100 ns units) | 1221 | TBD |
-| Handle needed for interval call (session / 0) | document | TBD |
-| Session GUID accepted (unique / SystemTraceControlGuid) | document | TBD |
+| Handle needed for interval call (session / 0) | document | 0 (CI runner, 2026-10-25) |
+| Session GUID accepted (unique / SystemTraceControlGuid) | document | unique GUID (CI runner, 2026-10-25) |
 | Samples/s per busy core (min over busy CPUs) | >= 7,500 | TBD |
 | Samples/s total (all CPUs) | n x 8,190 | TBD |
 | Samples/s for tachyon-testbed threads | document | TBD |
@@ -225,3 +232,5 @@ Observed event versions and sizes (copy from `etlstat stats` table):
 - [OBSERVED] A unique session name and GUID with EVENT_TRACE_SYSTEM_LOGGER_MODE start without the SystemTraceControlGuid fallback.
 - [OBSERVED] 2 s system capture at 8 kHz on 4 cores: EventsLost 0, 43,965 samples, 15 MB ETL, 250 KB .tachyon. A 5 s testbed spin: the testbed's busy thread got 41,902 samples (≈ 8,380/s); EventsLost, LogBuffersLost and RealTimeBuffersLost all 0.
 - [OBSERVED] Flush via FLUSH + stop + restart: capture gap ≈ 47–54 ms.
+- [OBSERVED] The product backend and converter reuse these decoders: `.hexevents` dumps made by `etlstat stats --dump-hex` replay through `libs/etlconvert` (`hex_events.cpp`; the converter tests use the hand-built `tests/fixtures/etw/convert_multiproc.hexevents`, etlstat uses the hand-built `synthetic_basic.hexevents`). Neither is a real-machine capture; `testbed.hexevents` from the dev-box run has not been committed yet.
+- Live (WP-65w, 2026-11-14, [OBSERVED] on the CI runner): the same kernel session with `EVENT_TRACE_REAL_TIME_MODE` added to its file mode feeds the live view; real-time latency is bounded below by the 1 s buffer flush timer; the kernel logger's rundown only arrives at session end, so live attach and system captures take a Toolhelp snapshot at start (see `docs/specs/live.md`).

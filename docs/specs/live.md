@@ -1,4 +1,4 @@
-<!-- Orchestrator-owned spec for WP-65 (real-time live view, Linux + Windows). Changes only via orchestrator. -->
+<!-- Orchestrator-owned spec for WP-65 (real-time live view, Linux + Windows); implemented by WP-65a/65b/65c/65w. Sections 1-5 are the original design, kept in sync with the code; the dated clarifications at the end are binding. Changes only via orchestrator. -->
 
 # Live view (WP-65)
 
@@ -18,22 +18,22 @@ Windows (ETW real-time consumer) both feed it. The capture still produces its no
 - `CaptureOptions` gains `bool live = false` (appended at the end of the struct). With `live`, the backend
   decodes events as they arrive (in addition to whatever it writes for the final trace) and hands them to a
   `capture::ILiveSink` set with `ICaptureBackend::setLiveSink(std::shared_ptr<ILiveSink>)` before `start`.
-  Backends that cannot do live return `NotSupported` from `start` when `live` is set and no sink support exists.
+  `ICaptureBackend::supportsLive()` says whether a backend can; a backend that cannot returns `Unsupported` from `start` when `live` is set, and the agent refuses a live `start` on it up front (EINTERNAL "not supported").
 - The sink receives backend-neutral, already-decoded events with **raw identities** (pids, tids, addresses,
-  module paths/ids, strings), never indices: `onProcess`, `onThread` (incl. name changes), `onModule`
+  module paths/ids, strings), never indices: `onSessionInfo` (once, first: clock frequency, platform, sampling rate, start ts), `onProcess`, `onThread` (incl. name changes), `onModule`
   (load/unload, path, base, size, build-id/GUID+age), `onSample(ts, pid, tid, cpu, flags, span<const uint64_t>
   ips /*leaf first*/)`, `onContextSwitch(ContextSwitchRec-like with tids)`, `onReady`, `onScopeEvent`,
   `onFrameMark`, `onMarker`, `onPlot` (instrumentation from the agent's ingest for live captures), and
-  `onTimeAdvance(ts)` (a heartbeat so a quiet capture still scrolls). Calls may come from any one backend thread
+  `onTimeAdvance(ts)` (a heartbeat so a quiet capture still scrolls) and `onDropped(events)`. Calls may come from any one backend thread
   at a time (the sink serialises nothing: the backend guarantees one caller at a time). Timestamps use the
   trace clock (same as the final trace).
 - Live decoding must not lose final-trace data: if the live path falls behind, it drops live events (counted,
-  reported as `dropped` in the next batch), never trace events.
+  reported as a `Dropped` record in the next batch), never trace events.
 
 ## 2. Agent side (`apps/agent`)
 
 - `start` gains optional `"live": true` (any mode; combinable with `circular_mb`). The agent owns a
-  `LiveEncoder` (in `libs/control` or `apps/agent`) implementing `ILiveSink`: it interns raw identities into
+  `LiveEncoder` (`libs/control/live_encoder.h`) implementing `ILiveSink`: it interns raw identities into
   **live indices** (strings, processes, threads, modules, frames = (module, rva) or unmapped address, callstack
   nodes as a prefix tree), batches events every 250 ms (or 256 KiB), and keeps the last `window_s` (default
   30, `--live-window-seconds`) of batches plus all table definitions for late subscribers.
@@ -47,7 +47,7 @@ Windows (ETW real-time consumer) both feed it. The capture still produces its no
   - A client whose outbound queue would exceed its cap gets `{"event":"live_gap","seq":N}` instead of the
     batches it missed and is expected to resubscribe (the next event is a keyframe).
   - `status` reports `"live":true` and `"live_seq":N` while a live capture runs.
-  - Allowed for remote (TCP) clients after auth; `live_subscribe` outside a live capture → ENOTFOUND.
+  - Allowed for remote (TCP) clients after auth; `live_subscribe` outside a live capture → ENOTFOUND; more than `AgentConfig::maxLiveSubscribers` (16) simultaneous subscribers → EBUSY.
 - Batch encoding (`data`, little-endian): a sequence of `{uint32 type; uint32 byte_len; payload}` records:
   `StringDef{u32 idx; bytes}`, `ProcessDef{u32 idx; ProcessRec with string indices}`, `ThreadDef{u32 idx;
   ThreadRec}`, `ThreadName{u32 thread; u32 string}`, `ModuleDef{u32 idx; ModuleRec}`, `FrameDef{u32 idx;
@@ -68,7 +68,7 @@ Windows (ETW real-time consumer) both feed it. The capture still produces its no
   newer ones arrive; `TimeAdvance` moves "now").
 - `std::shared_ptr<const TraceModel> LiveModel::snapshot() const` builds an ordinary `TraceModel` of the window
   (header start/end = window bounds, `isPartial = true`, `loadStatus.complete = false`, `captureInfo.raw_json`
-  with `{"live":true}`), indices remapped so it is a valid model for analysis, LOD, thread states and scope
+  = `{"live":true,"window_s":..,"sampling_hz":..,"dropped_live":..}`), indices remapped so it is a valid model for analysis, LOD, thread states and scope
   pairing. Target: snapshot of 30 s × 8 kHz × 16 threads (~4 M samples) in under 150 ms on the dev VM
   (asserted at 2×). `generation()` increases with every applied batch.
 
@@ -112,7 +112,7 @@ Windows (ETW real-time consumer) both feed it. The capture still produces its no
 
 ## Clarifications added with WP-65b (2026-11-08, binding)
 
-- Live document: pseudo path "Live capture". Successive snapshots share `Document::streamId()`, so the timeline (view, row flags, selection) and Call Graph, Function List and Butterfly keep their state across swaps; Function Statistics, Source and Thread Interaction keep their state too (WP-65c; Interaction keeps its rows until the new scan arrives). The window is at most the viewer's `liveWindowSeconds` (default 30).
+- Live document: pseudo path "Live capture". Successive snapshots share `Document::streamId()`, so the timeline (view, row flags, selection) and Call Graph, Function List and Butterfly keep their state across swaps; Function Statistics, Source and Thread Interaction keep their state too (WP-65c; Interaction keeps its rows until the new scan arrives). The window is at most the viewer's `liveWindowSeconds` (an `App` option, default 30, not a persisted setting).
 - Pipeline: the AgentSession worker subscribes once `status` reports `live`, applies events to the LiveModel, resubscribes after `live_gap`, and once after a CorruptData batch; a second corrupt batch within 30 s stops the live view ("Live view stopped") while the capture continues. A snapshot worker takes a snapshot when the generation changed and the view is not paused, at most every 500 ms (and 100 ms after the previous build finished), drops non-target threads without samples, scope events, frame marks or markers in the window (WP-65c: a thread that only switched is dropped) (`pruneIdleThreads`: ThreadIdx may change between snapshots; selections are remapped with `threadMapBetween`, timeline rows match by pid/tid), builds thread states, the timeline index and the symbol service and publishes into a one-slot mailbox; the UI thread only swaps.
 - Symbols: one SymbolService ("epoch") per set of tables; a new epoch adopts the finished run of the previous one (`adoptRun`) and starts only once that run finished, so each module is loaded once per capture.
 - Pause freezes the document (the LiveModel keeps receiving). Stop opens the final trace regardless of autoOpen (remote agents through the existing fetch). Opening another trace leaves live mode; the capture keeps running.
@@ -134,3 +134,8 @@ Windows (ETW real-time consumer) both feed it. The capture still produces its no
 - Reordering: a process and its modules are kept for 5 s of trace time after Process End / Image Unload; a reused pid is registered only after 1 s of newer data (the new process's first moments can be missing from the live view). ETW real-time buffer loss (`RealTimeBuffersLost`) is polled about once a second and reported through `onDropped` in buffers, plus a capture warning when non-zero.
 - All live sources: an event more than 60 s ahead of the newest plausible time is counted as malformed and never moves time.
 - Not done: deferred launch (`start_immediately=false`) does not see the exe/ntdll modules live; in process mode, samples of a thread with no known pid are dropped; system-mode rundown cost is unmeasured. Measured (CI windows-2022, elevated, 4 vCPU, 20 s spin): latency p50 ~0.95 s / p95 ~1.4 s, no gaps, 0 lost buffers, live vs final shares within 0.015 points, consumer + decoder < 1% of a core.
+
+## Changelog
+- 2026-11-08 (WP-65a, WP-65b): encoding table, keyframe/subscribe semantics, stall rules, hostile-input rules; viewer pipeline.
+- 2026-11-14 (WP-65c, WP-65w): 30 s window pruning and symbol epochs, `--mock-live-speed`; Windows ETW real-time source.
+- 2026-11-15: header comment, `Unsupported` wording, `onSessionInfo`/`onDropped`, subscriber cap and snapshot `raw_json` brought in line with the code.

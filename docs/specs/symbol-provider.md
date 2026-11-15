@@ -1,43 +1,42 @@
-<!-- Orchestrator-owned copy of IMPLEMENTATION_PLAN.md Part 3.6. Keep in sync with the plan and the matching header. Changes only via orchestrator. -->
+<!-- Orchestrator-owned. Part 3.6, kept in sync with libs/symbols/symbol_provider.h, function_key.h, symbol_service.h and symbol_locator.h. Changes only via orchestrator. -->
 
-### 3.6 Symbol provider interface (`libs/symbols/symbol_provider.h`)
+### 3.6 Symbol provider interface (`libs/symbols/symbol_provider.h`, namespace `tachyon::symbols`)
 ```cpp
-struct ModuleId { uint8_t kind; std::array<uint8_t,32> bytes; uint8_t len; uint32_t age; };   // PDB GUID+age or GNU build-id
+struct ModuleId { uint8_t kind; std::array<uint8_t,32> bytes; uint8_t len; uint32_t age; };   // lives in libs/model/model.h: PDB GUID+age (1), GNU build-id (2), PE timestamp+size (3), 0 = none
 struct InlineFrame { StringIdx function; StringIdx file; uint32_t line; };
-struct ResolvedAddress { StringIdx function; uint64_t functionStartRva; StringIdx file; uint32_t line; std::vector<InlineFrame> inlines; /* innermost first */ bool resolved; };
+struct ResolvedAddress { StringIdx function; uint64_t functionStartRva; StringIdx file; uint32_t line; std::vector<InlineFrame> inlines; /* innermost first */
+                         StringIdx callSiteFile; uint32_t callSiteLine; bool resolved; };
+struct LineRange { uint64_t rva; uint32_t size; StringIdx file; uint32_t line; };
+struct FunctionBounds { uint64_t startRva; uint64_t size; StringIdx name; };
 class ISymbolProvider { public:
   virtual Result<void> load(const Module&, const std::filesystem::path& symbolFile) = 0;
   virtual ResolvedAddress resolve(uint64_t rva) = 0;                          // thread-safe after load
   virtual Result<std::vector<LineRange>> linesForFunction(uint64_t functionStartRva) = 0;
   virtual Result<FunctionBounds> functionBounds(uint64_t rva) = 0; };
-class SymbolLocator { public: Result<std::filesystem::path> locate(const Module&); /* local paths, symstore cache, HTTP servers */ };
-class SymbolService { public: SymbolService(std::vector<std::string> servers, std::filesystem::path cacheDir); void resolveAllAsync(TraceModel&, std::function<void(ModuleIdx,SymbolState)> onModule); const ResolvedAddress& lookup(FrameIdx) const; /* memoized */ };
+class SymbolLocator { public: SymbolLocator(); SymbolLocator(servers, cacheDir); explicit SymbolLocator(SymbolLocatorConfig);
+  Result<std::filesystem::path> locate(const Module&, const std::atomic<bool>* cancel = nullptr);   /* search paths, next to the module, symstore cache, servers */
+  void pin(const std::filesystem::path&); void unpin(const std::filesystem::path&); };
+class SymbolService { public: SymbolService(std::vector<std::string> servers, std::filesystem::path cacheDir);
+  SymbolService(servers, cacheDir, std::shared_ptr<SymbolStringTable>);
+  void resolveAllAsync(const TraceModel&, std::function<void(ModuleIdx,SymbolState)> onModule = {});   // also a TraceModel& overload that lets waitAll() write Module::state
+  void waitAll(); void cancel(); SymbolState moduleState(ModuleIdx) const;
+  const ResolvedAddress& lookup(FrameIdx) const;  const ResolvedAddress& lookupCaller(FrameIdx) const;   /* lock-free, memoized */ };
 ```
-Symbol server HTTP layout: `<server>/<pdbfile>/<GUID as 32 upper hex><age hex>/<pdbfile>` (also `file.ptr` redirection and `index2.txt` two-tier). Local cache uses the same two-tier layout under `cacheDir`.
+Symbol server HTTP layout: `<server>/<pdbfile>/<GUID as 32 upper hex><age hex>/<pdbfile>` (also `file.ptr` redirection and `index2.txt` two-tier; debuginfod for ELF build-ids). The local cache uses the same two-tier layout under `cacheDir`. Locate order: explicit `searchPaths`, next to the module, the local cache, then each server in order (HTTP/HTTPS servers or local symbol store directories); ELF debug files are also probed under `.build-id/xx/rest.debug` in `debugDirs` (default `/usr/lib/debug` on POSIX).
 
-## Orchestrator clarifications (binding; merged with WP-20, 2026-10-25)
-Headers `libs/symbols/symbol_provider.h` and `libs/symbols/function_key.h` (`tachyon::symbols`) are now orchestrator-owned.
-- `ModuleId` comes from `libs/model/model.h`. `LineRange { rva, size, file, line }`, `FunctionBounds { startRva, size, name }`.
-- **Strings:** StringIdx values in `ResolvedAddress`, `InlineFrame`, `LineRange` and `FunctionBounds` index `SymbolService::symbolStrings()` (a `symbols::SymbolStringTable`: append-only, lock-free `get`, views stable for the service's lifetime). They do NOT index `TraceModel::strings`. Scope FunctionKeys (`kScopeModule`) carry trace-string-table indices.
-- `FunctionKey { ModuleIdx module; uint64_t value; }`. Resolved: `{module, functionStartRva}`. Unresolved but mapped: `{module, rva}`. Unmapped: `{kInvalidIdx, absolute address}`. Scope: `{kScopeModule = 0xFFFFFFFE, StringIdx}`. Inline (with expandInline): `{module, (1<<63) | symbol StringIdx of the innermost inlined function}`; `isInline()` requires a valid, non-scope module.
-- `SymbolService`: the 3.6 constructor plus `setLocate`, `setProviderFactory`, `stringSink()` and `addSymbolFileOverride`. `resolveAllAsync` runs on a worker pool, and onModule fires from worker threads. `lookup` is lock-free, never blocks, and returns a static unresolved value until the module is published. `moduleState()` is valid during the run; `Module.state` is written only by `waitAll()`. Keys change when a module resolves, so build aggregation trees after `waitAll()`.
+## Rules
+- **Strings:** StringIdx values in `ResolvedAddress`, `InlineFrame`, `LineRange` and `FunctionBounds` index `SymbolService::symbolStrings()` (a `symbols::SymbolStringTable`: append-only, lock-free `get`, views stable for the service's lifetime). They do NOT index `TraceModel::strings`. Scope FunctionKeys (`kScopeModule`) carry trace-string-table indices. Providers intern into `stringSink()`. `SymbolService(servers, cacheDir, std::shared_ptr<SymbolStringTable>)` shares a table between services; `sharedStrings()` returns it.
+- **FunctionKey** (`libs/symbols/function_key.h`): `{ ModuleIdx module; uint64_t value; }`. Resolved: `{module, functionStartRva}`. Unresolved but mapped: `{module, rva}`. Unmapped: `{kInvalidIdx, absolute address}`. Scope: `{kScopeModule = 0xFFFFFFFE, StringIdx}` (`FunctionKey::scope(id)`). Inline (with `expandInline`): `{module, kInlineKeyBit (1<<63) | symbol StringIdx of the innermost inlined function}`; `isInline()` requires a valid, non-scope module. `functionKeyFor(symbols, frame, expandInline)` and `functionKeyForCaller(...)` build keys.
+- **SymbolService:** the constructor above plus `setWorkerThreads`, `setLocate` (plain or cancellable), `configureLocator(SymbolLocatorConfig)`, `setProviderFactory` (default: `JsonSymbolProvider` for `*.json` paths), `stringSink()` and `addSymbolFileOverride` (a tracegen `.symbols.json`, matched by ModuleId or path, ahead of the locate function). `resolveAllAsync` runs on a worker pool (default min(hardware concurrency, 8)) and `onModule` fires from worker threads. `lookup` is lock-free, never blocks, and returns a static unresolved value until the module is published. `moduleState()` is valid during the run; `Module.state` is written only by `waitAll()` (the const `resolveAllAsync` overload never writes the model; use `moduleState()`). Keys change when a module resolves, so build aggregation trees after `waitAll()`. `cancel()` stops a run (in-flight downloads included) and the service stays usable; the destructor does the same and returns promptly even against a stalled server. `progress()` reports modules done/total.
+- **Return-address rule:** see analysis-query.md. `lookupCaller(FrameIdx)` resolves `addr_or_rva − 1` (lock-free and memoized, with the same publication rules as `lookup`); `functionKeyForCaller` is the key variant. Leaf frames, and the interrupted user frame of a kernel-leaf sample, use `lookup`.
+- **ELF modules:** `ModuleRec.base` is the load address of the module's lowest PT_LOAD segment, RVA = address − base. The DWARF provider maps RVA → ELF vaddr as `rva + (lowest PT_LOAD p_vaddr aligned down to 4096)`.
+- **Call sites (WP-34c):** `ResolvedAddress::callSiteFile`/`callSiteLine`: when `inlines` is non-empty, the position in the physical function's own source of the call that the outermost inline frame was expanded from. It is 0/invalid when unknown. Per provider: JSON, the line-table position; DWARF, DW_AT_call_file/line of the outermost inline site; DIA, best effort (the last own-file line row at or before the address). Conventions: `file`/`line` is the line-table position, inside the innermost inlinee for DWARF and DIA; `inlines[k].line` for k ≥ 1 is a position inside that frame's function. `linesForFunction` uses the call site for the physical-function key.
+- **Locator limits (WP-21):** `index2.txt` is probed once per server; a remote `file.ptr` PATH is followed only under configured roots (never UNC); `file.ptr` is capped at 4 KiB; the default download cap is 2 GiB (`SymbolLocatorConfig::maxDownloadBytes`, streamed check, the part file is deleted on overflow); curl is limited to http/https protocols; URL components are percent-encoded; WinHTTP handles truncated bodies and timeouts; 4 simultaneous downloads by default (`maxConcurrentDownloads`); `cacheMaxBytes` (0 = unlimited) evicts least recently used first and never evicts pinned files. Compressed CAB downloads are not supported (reported in the NotFound reason). A located file is pinned until `unpin()` or the provider is discarded; `SymbolService` unpins when a run ends or the provider is discarded after a failed load. The PDB file name falls back to `<image stem>.pdb` because `Module`/`ModuleRec` carry no PDB name.
+- **Run adoption (WP-68):** `SymbolService::adoptRun(previous)` (once, before `resolveAllAsync`, after configuration and any `configureLocator`) cancels and joins `previous`'s run, then takes over the providers, states (Resolved, NotFound, Failed) and cache-file pins of modules whose records are identical (pid, base, size, path, id; not the load timestamps) at the same index; anything else resolves normally. Both services must share one string table (this one built with `previous.sharedStrings()`), otherwise nothing is adopted. Adopted providers are shared (reference counted) and thread-safe after `load()`, so both services may query them concurrently. `previous` stays usable for lookups only while the model it resolved is alive; its workers must be stopped (e.g. `cancel()`) before that model is freed. `modulesAdopted()`/`modulesLoaded()` report the split. The viewer adopts the preview's run when the complete document of a stream replaces it (and between live symbol epochs); reruns never adopt.
+- **Known limits:** hot/cold separated blocks resolve only when the parent's length covers them; an unbounded last public symbol claims trailing addresses (DIA provider).
 
-## Clarification added after the WP-32 review (2026-10-25)
-- **Return-address rule:** see docs/specs/analysis-query.md. `SymbolService` gains `const ResolvedAddress& lookupCaller(FrameIdx) const` (lock-free and memoized, with the same publication rules as `lookup`). It resolves `addr_or_rva - 1`. `functionKeyFor` gets a caller variant. Leaf frames, and the interrupted user frame of a kernel-leaf sample, use `lookup`.
-
-## Clarification added with WP-72 (2026-10-25, binding)
-- ELF modules: `ModuleRec.base` is the load address of the module's lowest PT_LOAD segment (not the executable segment's mmap address). RVA = address − base. The DWARF provider maps RVA → ELF vaddr as `rva + (lowest PT_LOAD p_vaddr aligned down to 4096)`. The perf backend (WP-70) must fill `base` accordingly.
-
-## Clarification added with WP-34c (2026-11-02, binding)
-- `ResolvedAddress::callSiteFile`/`callSiteLine`: when `inlines` is non-empty, the position in the physical function's own source of the call that the outermost inline frame was expanded from. It is 0/invalid when unknown. Per provider:
-  - JSON: the line-table position.
-  - DWARF: DW_AT_call_file/line of the outermost inline site.
-  - DIA: best effort, the last own-file line row at or before the address.
-- Conventions:
-  - `file`/`line` is the line-table position, inside the innermost inlinee for DWARF and DIA.
-  - `inlines[k].line` for k ≥ 1 is a position inside that frame's function.
-- `linesForFunction` uses the call site for the physical-function key.
-
-## Clarifications added with WP-68 (2026-11-08, binding)
-
-- `SymbolService(servers, cacheDir, std::shared_ptr<SymbolStringTable>)` shares a string table between services; `sharedStrings()` returns it. `adoptRun(previous)` (once, before `resolveAllAsync`, after configuration) cancels and joins `previous`'s run, then takes over the providers, states (Resolved, NotFound, Failed) and cache-file pins of modules whose records are identical (pid, base, size, path, id) at the same index; anything else resolves normally. Both services may query the shared providers concurrently (providers are thread-safe after `load()`). `previous` stays usable for lookups only while the model it resolved is alive; its workers must be stopped (e.g. `cancel()`) before that model is freed. The viewer adopts the preview's run when the complete document of a stream replaces it; reruns never adopt.
+## Changelog
+- 2026-10-25 (WP-20, WP-21, WP-32b, WP-72): string table, FunctionKey, SymbolService API, locator limits, return-address rule, ELF base.
+- 2026-11-02 (WP-34c): call-site fields.
+- 2026-11-08 (WP-68): shared string table, `adoptRun`.
+- 2026-11-15: clarifications folded in; interface listing brought up to date (`callSiteFile`/`callSiteLine`, `LineRange::size` is `uint32_t`, locator and service signatures).
