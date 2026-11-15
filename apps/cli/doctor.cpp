@@ -724,7 +724,8 @@ void checkSymbols(Context& c) {
           "no debuginfod URL and no .build-id directory: system libraries and the kernel will show without "
           "names",
           "install the -dbgsym/-debuginfo packages (they populate /usr/lib/debug/.build-id) or set "
-          "$DEBUGINFOD_URLS (e.g. https://debuginfod.elfutils.org/); your own binaries need debug info or a "
+          "$DEBUGINFOD_URLS (e.g. https://debuginfod.elfutils.org/) and add the same URL to the viewer's "
+          "symbolServers (Tachyon does not read $DEBUGINFOD_URLS); your own binaries need debug info or a "
           "symbol path");
   }
 }

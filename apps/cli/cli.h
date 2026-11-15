@@ -31,7 +31,7 @@
 //             --symbols (repeatable) takes a symbol directory, file, or tracegen *.symbols.json override;
 //             --symbol-server (repeatable) a symbol store URL. Symbols matter for speedscope only. --out -
 //             writes to stdout (and prints no summary). With --json the summary is one JSON object on stdout.
-//   doctor  [--hz N] [--agent PATH]
+//   doctor  [--hz N] [--agent PATH] [--socket PATH | --pipe NAME]   (Linux and Windows)
 //             offline (no agent): Linux: checks kernel version, perf_event_paranoid and the other perf
 //             sysctls, capabilities of this process and of the agent binary, tracefs and scheduler
 //             tracepoints, trial perf_event_open calls, rlimits, ptrace scope, the agent socket directory and
