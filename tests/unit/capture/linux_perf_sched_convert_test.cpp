@@ -712,5 +712,208 @@ TEST(SchedConvert, SwitchRecordsAreIgnoredWhenTheSessionDidNotAskForThem) {
   EXPECT_TRUE(sw->empty());
 }
 
+// ---- WP-71b: the final switch-out of an exiting task (tid -1) ---------------------------------------------
+
+constexpr uint32_t kBad = 0xFFFFFFFFu;
+
+void taskIn(SchedSpool& f, uint32_t tid, uint64_t t, uint32_t cpu) {
+  f.data(0).switchTask(false, SchedSpool::id(kHolder, tid, t, cpu));
+}
+void taskOut(SchedSpool& f, uint32_t tid, uint64_t t, uint32_t cpu, bool preempt = false) {
+  f.data(0).switchTask(true, SchedSpool::id(kHolder, tid, t, cpu), preempt);
+}
+void unnamedOut(SchedSpool& f, uint64_t t, uint32_t cpu) {
+  f.data(0).switchTask(true, SchedSpool::id(kBad, kBad, t, cpu));
+}
+void exitOf(SchedSpool& f, uint32_t tid, uint64_t t) {
+  f.meta().exit(kHolder, kHolder, tid, kHolder, t, SchedSpool::id(kHolder, tid, t));
+}
+
+std::vector<trace::ContextSwitchRec> switchesOf(const fs::path& p) {
+  auto reader = trace::TraceReader::open(p);
+  EXPECT_TRUE(reader.ok());
+  auto sw = reader->readContextSwitches();
+  EXPECT_TRUE(sw.ok());
+  return *sw;
+}
+
+void exitingTaskIsAttributed(uint64_t exitTs) {
+  SchedSpool f("context_switch");
+  f.processes();
+  taskIn(f, kWaiter, kStart + 1000, 2);
+  unnamedOut(f, kStart + 3000, 2);
+  exitOf(f, kWaiter, exitTs);
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 0u);
+  const auto sw = switchesOf(f.out());
+  ASSERT_EQ(sw.size(), 2u);
+  EXPECT_EQ(sw[1].old_tid, kWaiter);
+  EXPECT_EQ(sw[1].ts, kStart + 3000);
+  Built b = loadModel(f.out());
+  const auto& st = statesOf(b.model, kWaiter);
+  bool ended = false;
+  for (const auto& iv : st)
+    if (iv.state == ThreadState::Running && iv.cpu == 2u) ended = iv.end == kStart + 3000;
+  EXPECT_TRUE(ended) << "the last running interval ends at the final switch-out";
+}
+
+TEST(SchedConvert, PerTaskUnnamedSwitchOutIsAttributedToTheTaskSwitchedInOnThatCpu) {
+  exitingTaskIsAttributed(kStart + 2990);  // EXIT before the final switch-out (the kernel's order)
+}
+
+TEST(SchedConvert, PerTaskUnnamedSwitchOutIsAttributedWhenTheExitRecordFollows) {
+  exitingTaskIsAttributed(kStart + 3500);
+}
+
+TEST(SchedConvert, PerTaskUnnamedSwitchOutGoesToTheTaskSwitchedInLast) {
+  SchedSpool f("context_switch");
+  f.processes();
+  taskIn(f, kWaiter, kStart + 1000, 2);
+  taskOut(f, kWaiter, kStart + 1500, 2);
+  taskIn(f, kWaiter, kStart + 1600, 3);  // the waiter runs on cpu 3 now
+  taskIn(f, kHolder, kStart + 2000, 2);  // another target task gets cpu 2
+  unnamedOut(f, kStart + 3000, 2);       // ... and exits there
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 0u);
+  const auto sw = switchesOf(f.out());
+  ASSERT_EQ(sw.size(), 5u);
+  EXPECT_EQ(sw[4].ts, kStart + 3000);
+  EXPECT_EQ(sw[4].old_tid, kHolder);
+}
+
+TEST(SchedConvert, PerTaskUnnamedSwitchOutWithoutATrackedTaskStaysUnattributed) {
+  SchedSpool f("context_switch");
+  f.processes();
+  taskIn(f, kWaiter, kStart + 1000, 2);
+  unnamedOut(f, kStart + 3000, 3);  // nothing was switched in on cpu 3
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 1u);
+  EXPECT_EQ(switchesOf(f.out()).size(), 1u);
+}
+
+TEST(SchedConvert, PerTaskUnnamedSwitchOutAfterTheTrackedTasksOwnSwitchOutStaysUnattributed) {
+  SchedSpool f("context_switch");
+  f.processes();
+  taskIn(f, kWaiter, kStart + 1000, 2);
+  taskOut(f, kWaiter, kStart + 2000, 2);
+  unnamedOut(f, kStart + 3000, 2);
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 1u);
+  EXPECT_EQ(switchesOf(f.out()).size(), 2u);
+}
+
+TEST(SchedConvert, PerTaskUnnamedSwitchOutIsNotAttributedToATaskThatExitedBeforeItsSwitchIn) {
+  SchedSpool f("context_switch");
+  f.processes();
+  exitOf(f, kWaiter, kStart + 500);
+  taskIn(f, kWaiter, kStart + 1000, 2);  // a stale tid: the task is long gone
+  unnamedOut(f, kStart + 3000, 2);
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 1u);
+}
+
+TEST(SchedConvert, PerTaskLostRecordsDropTheTrackedTasks) {
+  SchedSpool f("context_switch");
+  f.processes();
+  taskIn(f, kWaiter, kStart + 1000, 2);
+  f.data(0).lostSamples(5, SchedSpool::id(kHolder, kWaiter, kStart + 2000, 2));
+  unnamedOut(f, kStart + 3000, 2);
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 1u);
+}
+
+TEST(SchedConvert, CpuWideUnnamedSwitchOutWithoutARunningTaskStaysUnattributed) {
+  SchedSpool f("context_switch");
+  f.processes();
+  f.data(1).switchCpuWide(true, 0, 0, SchedSpool::id(kBad, kBad, kStart + 2000, 1));
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 1u);
+}
+
+TEST(SchedConvert, CpuWideUnnamedSwitchInOfTheExitingTaskIsNotCountedAgain) {
+  SchedSpool f("context_switch");
+  f.processes();
+  cpuWideSwitch(f, 1, kStart + 1000, 1, 0, 0, kHolder, kWaiter, false, false);
+  // Both records of the exit switch (the waiter -> idle) name the waiter -1.
+  f.data(1).switchCpuWide(true, 0, 0, SchedSpool::id(kBad, kBad, kStart + 2000, 1));
+  f.data(1).switchCpuWide(false, kBad, kBad, SchedSpool::id(0, 0, kStart + 2005, 1));
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 0u);
+  const auto sw = switchesOf(f.out());
+  ASSERT_EQ(sw.size(), 2u);
+  EXPECT_EQ(sw[1].old_tid, kWaiter);
+}
+
+TEST(SchedConvert, CpuWideUnnamedSwitchOutAfterAnUnnamedSwitchInIsNotMisattributed) {
+  SchedSpool f("context_switch");
+  f.processes();
+  cpuWideSwitch(f, 1, kStart + 1000, 1, 0, 0, kHolder, kWaiter, false, false);  // the waiter runs on cpu 1
+  // Whoever got the cpu next is unknown (-1), so the later unnamed switch-out cannot be the waiter.
+  f.data(1).switchCpuWide(false, kHolder, kWaiter, SchedSpool::id(kBad, kBad, kStart + 1500, 1));
+  f.data(1).switchCpuWide(true, 0, 0, SchedSpool::id(kBad, kBad, kStart + 2000, 1));
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 2u);
+}
+
+// A residue below 100 records and 0.1% is information in CaptureInfo, not a warning.
+bool hasUnattributedWarning(const ConvertStats& s) {
+  for (const auto& w : s.warnings)
+    if (w.find("could not be attributed") != std::string::npos) return true;
+  return false;
+}
+
+TEST(SchedConvert, ASmallUnattributedResidueIsInCaptureInfoNotWarnings) {
+  SchedSpool f("context_switch");
+  f.processes();
+  for (uint64_t i = 0; i < 1000; ++i) {
+    taskIn(f, kWaiter, kStart + 1000 + i * 10, 2);
+    taskOut(f, kWaiter, kStart + 1005 + i * 10, 2);
+  }
+  unnamedOut(f, kStart + 20000, 3);
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 1u);
+  EXPECT_FALSE(hasUnattributedWarning(*stats));
+  auto reader = trace::TraceReader::open(f.out());
+  auto info = reader->readCaptureInfo();
+  ASSERT_TRUE(info.ok());
+  const auto doc = nlohmann::json::parse(*info);
+  EXPECT_EQ(doc["convert_stats"]["sched_unattributed_switches"], 1u);
+}
+
+TEST(SchedConvert, ALargeUnattributedShareStaysAWarning) {
+  SchedSpool f("context_switch");
+  f.processes();
+  taskIn(f, kWaiter, kStart + 1000, 2);
+  taskOut(f, kWaiter, kStart + 1005, 2);
+  unnamedOut(f, kStart + 3000, 3);
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_TRUE(hasUnattributedWarning(*stats));
+}
+
+TEST(SchedConvert, MoreThanAHundredUnattributedRecordsStayAWarning) {
+  SchedSpool f("context_switch");
+  f.processes();
+  for (uint64_t i = 0; i < 150000; ++i) {
+    taskIn(f, kWaiter, kStart + 1000 + i * 10, 2);
+    taskOut(f, kWaiter, kStart + 1005 + i * 10, 2);
+  }
+  for (uint64_t i = 0; i < 100; ++i) unnamedOut(f, kStart + 4'000'000 + i, 3);
+  auto stats = convertSpool(f.build(), f.out(), target(kHolder));
+  ASSERT_TRUE(stats.ok());
+  EXPECT_EQ(stats->schedUnnamed, 100u);
+  EXPECT_TRUE(hasUnattributedWarning(*stats));
+}
+
 }  // namespace
 }  // namespace tachyon::capture::perf

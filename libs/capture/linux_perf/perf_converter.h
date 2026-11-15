@@ -87,7 +87,11 @@ struct ConvertStats {
   uint64_t schedDroppedNotTarget = 0;
   uint64_t schedDroppedWindow = 0;
   uint64_t schedMalformed = 0;
-  uint64_t schedUnnamed = 0;  // switch records dropped: the task's tid was the kernel's -1 (exiting task)
+  // Switch records dropped because the task's tid was the kernel's -1 (an exiting task's final switch-out)
+  // and the converter could not name it (see Converter::onSwitchRecord). Fewer than 100 and fewer than 0.1%
+  // of all switch records (schedSwitchEvents + schedUnnamed): reported only as CaptureInfo convert_stats
+  // "sched_unattributed_switches"; otherwise also as a warning.
+  uint64_t schedUnnamed = 0;
   uint64_t framesTotal = 0;
   uint64_t framesUnmapped = 0;  // user frames outside every file mapping (absolute)
   uint64_t framesKernel = 0;

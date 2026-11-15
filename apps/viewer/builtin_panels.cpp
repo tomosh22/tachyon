@@ -4,6 +4,7 @@
 #include "viewer/paths.h"
 
 #include <imgui.h>
+#include <nlohmann/json.hpp>
 
 namespace tachyon::viewer {
 
@@ -46,6 +47,21 @@ class TraceInfoPanel final : public IPanel {
                 m.modules.size(), static_cast<unsigned long long>(doc->totalSamples()));
     ImGui::Text("Callstack nodes: %zu   Resident: %.1f MiB", m.nodes.size(),
                 static_cast<double>(m.residentBytes()) / (1024.0 * 1024.0));
+    // Perf converter: switch records of exiting tasks that could not be attributed (a small residue is not a
+    // warning, see perf_converter.h). Parsed when the trace changes.
+    if (m_infoJson != m.captureInfo.raw_json) {
+      m_infoJson = m.captureInfo.raw_json;
+      m_unattributed = -1;
+      const nlohmann::json info = nlohmann::json::parse(m_infoJson, nullptr, false);
+      if (info.is_object()) {
+        const auto stats = info.find("convert_stats");
+        if (stats != info.end() && stats->is_object()) {
+          const auto n = stats->find("sched_unattributed_switches");
+          if (n != stats->end() && n->is_number_unsigned()) m_unattributed = n->get<long long>();
+        }
+      }
+    }
+    if (m_unattributed >= 0) ImGui::Text("Unattributed switch records: %lld", m_unattributed);
     ImGui::Separator();
 
     if (ImGui::BeginTable("threads", 4,
@@ -88,6 +104,10 @@ class TraceInfoPanel final : public IPanel {
     }
     ImGui::End();
   }
+
+ private:
+  std::string m_infoJson;
+  long long m_unattributed = -1;
 };
 
 }  // namespace
