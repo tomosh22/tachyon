@@ -1,5 +1,7 @@
 #include "viewer/app.h"
 
+#include "viewer/dock_layout.h"
+
 #include "analysis/query_executor.h"
 #include "analysis/thread_states.h"
 #include "core/log.h"
@@ -251,6 +253,7 @@ void App::registerCommands() {
   m_commands.add({"view.scale.down", "View: Decrease UI Scale", "",
                   [this] { setUserScale(m_settings.uiScale / 1.1f); }});
   m_commands.add({"view.scale.reset", "View: Reset UI Scale", "", [this] { setUserScale(1.0f); }});
+  m_commands.add({"view.layout.reset", "View: Reset Layout", "", [this] { resetLayout(); }});
   m_commands.add({"stats.search", "Function Statistics: Search Functions", "Ctrl+F",
                   [this] { m_selection.requestPanel(kFunctionStatsPanelName); }});
   m_commands.add({"help.palette", "Help: Command Palette", "Ctrl+P", [this] { m_paletteRequested = true; }});
@@ -1024,11 +1027,20 @@ void App::drawUi() {
   m_banner.update(m_document.get(), m_documentGeneration);
   m_banner.draw();
   drawStatusBar();
+  updateDockLayout();
   ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 
   const PanelContext context = panelContext();
   for (PanelEntry& e : m_panels.entries()) {
-    if (e.open) e.panel->draw(context, &e.open);
+    if (!e.open) continue;
+    // A panel opened into a layout that was loaded from imgui.ini docks next to its slot's anchor panel
+    // instead of floating over the timeline (a no-op when the window already has saved settings).
+    if (const ImGuiID target = dockTargetFor(e.panel->name()))
+      ImGui::SetNextWindowDockID(target, ImGuiCond_FirstUseEver);
+    // Opened later (View menu, command): bring it to the front of its tab group instead of leaving it as a
+    // hidden tab behind the panel that was showing.
+    if (!e.notifiedOpen && m_frameCount > 0) ImGui::SetNextWindowFocus();
+    e.panel->draw(context, &e.open);
   }
 
   // Tell panels that were opened or closed since the last frame (window X, View menu, commands).
@@ -1051,6 +1063,29 @@ void App::drawUi() {
   m_toasts.draw();
 }
 
+void App::updateDockLayout() {
+  // Runs after the menu bar, banner and status bar took their strips (so the work area is what is left for
+  // the dockspace) and before DockSpaceOverViewport and the panels.
+  const ImGuiViewport* viewport = ImGui::GetMainViewport();
+  const ImGuiID dockspace = mainDockspaceId(viewport);
+  std::vector<std::string> names;
+  for (const PanelEntry& e : m_panels.entries()) names.emplace_back(e.panel->name());
+  if (!m_layoutChecked) {
+    // First frame only: the ini file is loaded by now. Never replace a saved layout.
+    if (hasSavedLayout(dockspace, names) || buildDefaultDockLayout(dockspace, viewport->WorkSize, names))
+      m_layoutChecked = true;  // else: zero-sized viewport (minimised window), try again next frame
+  }
+  if (m_layoutResetRequested && buildDefaultDockLayout(dockspace, viewport->WorkSize, names)) {
+    m_layoutResetRequested = false;
+    m_layoutChecked = true;
+  }
+}
+
+void App::resetLayout() {
+  m_layoutResetRequested = true;
+  requestRedraw();
+}
+
 void App::drawMenuBar() {
   if (!ImGui::BeginMainMenuBar()) return;
   if (ImGui::BeginMenu("File")) {
@@ -1070,6 +1105,8 @@ void App::drawMenuBar() {
   m_capture->drawMenu();
   if (ImGui::BeginMenu("View")) {
     for (PanelEntry& e : m_panels.entries()) ImGui::MenuItem(e.panel->name(), nullptr, &e.open);
+    ImGui::Separator();
+    if (ImGui::MenuItem("Reset layout")) m_commands.run("view.layout.reset");
     ImGui::Separator();
     {
       // WP-54: analysis options that every panel follows (through the SelectionBus).
