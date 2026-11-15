@@ -145,7 +145,7 @@ tachyon/
   tests/
     unit/<lib>/  fixtures/ (LFS)  perf/  windows/ (Windows-only)
   docs/
-    specs/       copies of Part 3 as individual files, kept in sync by orchestrator
+    specs/       the living shared specifications (started as copies of Part 3; now hand-maintained and authoritative)
     engine-integration.md (WP-55)
 ```
 
@@ -189,6 +189,8 @@ No Boost, no Qt, no Abseil.
 ## 3. Shared specifications (orchestrator-owned)
 
 Each subsection becomes a file under `docs/specs/` and, where applicable, a header under `libs/`. Subagents conform to these; proposals to change them go through the report.
+
+> [Orchestrator note 2026-11-15] Part 3 below is the original design and is no longer kept in sync. The authoritative specifications are the files under `docs/specs/` (and the headers they name), which record every later change with a dated changelog. Where Part 3 and `docs/specs/` differ, `docs/specs/` wins.
 
 ### 3.1 `.tachyon` trace file format (v1)
 
@@ -395,13 +397,13 @@ Size: S ≈ 1–2 days, M ≈ 3–5 days, L ≈ 1–2 weeks of a focused subagen
 
 #### WP-00 Repository skeleton and CI (orchestrator)
 - Depends on: nothing. Size: S. Test platform: Linux + Windows.
-- Deliverables: layout from 2.1; CMake presets; `libs/core` with `result.h`, `strong_id.h`, `platform.h`, `time.h` (QPC / clock_gettime wrappers), `log.h`, `arena.h`, `hash.h` (xxHash wrapper), `span_util.h`; third_party via FetchContent pinned to versions in 2.3; GoogleTest wired; GitHub Actions (or equivalent) for `linux-release`, `linux-asan`, `windows-release`; `.clang-format`; `docs/specs/*.md` generated from Part 3.
+- Deliverables: layout from 2.1; CMake presets; `libs/core` with `result.h`, `strong_id.h`, `platform.h`, `time.h` (QPC / clock_gettime wrappers), `log.h`, `arena.h`, `hash.h` (xxHash wrapper), `span_util.h`; third_party via FetchContent pinned to versions in 2.3; GoogleTest wired; GitHub Actions (or equivalent) for `linux-release`, `linux-asan`, `windows-release`; `.clang-format`; `docs/specs/*.md` generated from Part 3 (done at WP-00; since then hand-maintained, see the note under Part 3).
 - Acceptance: both CI jobs green on an empty test; `cmake --preset linux-release && cmake --build --preset linux-release && ctest --preset linux-release` passes.
 
 #### WP-01 ETW spike tool `etlstat` (Windows-only test)
 - Depends on: WP-00. Size: M.
 - Goal: prove the capture recipe and learn the real event layouts before the agent exists.
-- Deliverables: `tools/etlstat`: (1) `etlstat record --out x.etl --seconds N --hz 8000 [--exe path]`: starts a kernel session (`EVENT_TRACE_SYSTEM_LOGGER_MODE`, `ClientContext=1` QPC, flags `PROCESS|THREAD|IMAGE_LOAD|PROFILE|CSWITCH|DISPATCHER`), sets `TraceSampledProfileIntervalInfo` to 1221 (document whether the call needs the session handle or 0), enables stack walking via `TraceStackTracingInfo` for PerfInfo/SampledProfile (type 46), Thread/CSwitch (36), Thread/ReadyThread (50); buffer settings `BufferSize=1024 KB, MinimumBuffers=max(64, 4×cores), MaximumBuffers=…`; stops and reports `EventsLost`, `BuffersLost`. (2) `etlstat stats x.etl`: `OpenTrace`/`ProcessTrace` with `PROCESS_TRACE_MODE_EVENT_RECORD|RAW_TIMESTAMP`, counts per (provider GUID, opcode, version), counts StackWalk events (GUID `def2fe46-7bd6-4b80-bd94-f57fe20d0ce3`, type 32) matched to their parent event by `(EventTimeStamp, StackThread)`, reports unmatched stacks, max stack depth, and whether Thread/SetName (type 72) events appear. (3) `docs/etw-notes.md` recording the exact payload layouts observed for each event/version, the privilege needed (`SeSystemProfilePrivilege`), and the measured lost-event rate on the dev machine at 8 kHz.
+- Deliverables: `tools/etlstat`: (1) `etlstat record --out x.etl --seconds N --hz 8000 [--exe path]`: starts a kernel session (`EVENT_TRACE_SYSTEM_LOGGER_MODE`, `ClientContext=1` QPC, flags `PROCESS|THREAD|IMAGE_LOAD|PROFILE|CSWITCH|DISPATCHER`), sets `TraceSampledProfileIntervalInfo` to 1221 (document whether the call needs the session handle or 0) [Answered on CI 2026-10-25: handle 0; see docs/etw-notes.md], enables stack walking via `TraceStackTracingInfo` for PerfInfo/SampledProfile (type 46), Thread/CSwitch (36), Thread/ReadyThread (50); buffer settings `BufferSize=1024 KB, MinimumBuffers=max(64, 4×cores), MaximumBuffers=…`; stops and reports `EventsLost`, `BuffersLost`. (2) `etlstat stats x.etl`: `OpenTrace`/`ProcessTrace` with `PROCESS_TRACE_MODE_EVENT_RECORD|RAW_TIMESTAMP`, counts per (provider GUID, opcode, version), counts StackWalk events (GUID `def2fe46-7bd6-4b80-bd94-f57fe20d0ce3`, type 32) matched to their parent event by `(EventTimeStamp, StackThread)`, reports unmatched stacks, max stack depth, and whether Thread/SetName (type 72) events appear. (3) `docs/etw-notes.md` recording the exact payload layouts observed for each event/version, the privilege needed (`SeSystemProfilePrivilege`), and the measured lost-event rate on the dev machine at 8 kHz.
 - Acceptance: a 30 s recording of `tachyon-testbed` at 8 kHz on a ≥8-core machine shows ≥ 7,500 samples/s per busy core, > 95% of SampledProfile events have matched stacks, and the notes document is complete. Report the numbers.
 - Pitfalls: requires admin; only one NT Kernel Logger but up to 8 system loggers on Win8+; `DisablePagingExecutive=1` may be needed for complete kernel stacks; 64-bit user stacks truncate when stack pages are paged out.
 
