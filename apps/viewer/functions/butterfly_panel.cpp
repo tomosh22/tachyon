@@ -330,16 +330,18 @@ void ButterflyPanel::drawTable(const PanelContext& context, float height) {
   const double clockHz = m_data->clockHz;
   const fl::ButterflyView& view = m_data->view;
   std::optional<fl::Line> clicked, rightClicked;
-  if (ImGui::BeginTable("##butterfly", 7, flags, ImVec2(0.0f, height))) {
-    ImGui::TableSetupScrollFreeze(0, 1);
+  if (ImGui::BeginTable("##butterfly", 7, flags, ImVec2(0.0f, height),
+                        common::nameColumnInnerWidth(m_fixedColumnsWidth, 42.0f))) {
+    ImGui::TableSetupScrollFreeze(1, 1);  // the name stays visible while the numbers scroll
     ImGui::TableSetupColumn("Function", ImGuiTableColumnFlags_WidthStretch, 5.0f);
-    ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthFixed, em * 8.0f);
+    ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthFixed, em * 6.5f);
     ImGui::TableSetupColumn("Inclusive", ImGuiTableColumnFlags_WidthFixed, em * 6.5f);
     ImGui::TableSetupColumn("Incl %", ImGuiTableColumnFlags_WidthFixed, em * 4.5f);
     ImGui::TableSetupColumn("Exclusive", ImGuiTableColumnFlags_WidthFixed, em * 6.5f);
     ImGui::TableSetupColumn("Excl %", ImGuiTableColumnFlags_WidthFixed, em * 4.5f);
     ImGui::TableSetupColumn("Instances", ImGuiTableColumnFlags_WidthFixed, em * 5.5f);
     ImGui::TableHeadersRow();
+    m_fixedColumnsWidth = common::measuredFixedColumnsWidth();
 
     const float rowH = ImGui::GetTextLineHeight() + ImGui::GetStyle().CellPadding.y * 2.0f;
     char buf[64];

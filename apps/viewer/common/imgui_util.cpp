@@ -1,5 +1,8 @@
 #include "viewer/common/imgui_util.h"
 
+#include <imgui_internal.h>
+
+#include <algorithm>
 #include <cmath>
 
 namespace tachyon::viewer::common {
@@ -38,6 +41,25 @@ void drawSpinner(float radius, ImU32 color) {
   }
   draw->PathStroke(color, 0, 2.0f);
   ImGui::Dummy(ImVec2(radius * 2.0f, radius * 2.0f + 2.0f));
+}
+
+float minNameColumnWidth(float available) {
+  const float em = ImGui::GetFontSize();
+  return std::max(12.0f * em, std::min(18.0f * em, 0.4f * available));
+}
+
+float nameColumnInnerWidth(float fixedColumnsWidth, float defaultFixedColumnsEm) {
+  const float em = ImGui::GetFontSize();
+  const float available = ImGui::GetContentRegionAvail().x;
+  const float fixed = fixedColumnsWidth > 0.0f ? fixedColumnsWidth : defaultFixedColumnsEm * em;
+  return std::max(available, minNameColumnWidth(available) + fixed);
+}
+
+float measuredFixedColumnsWidth() {
+  const ImGuiTable* table = ImGui::GetCurrentTable();
+  if (table == nullptr || table->ColumnsCount < 2) return 0.0f;
+  // Everything that is not the name column: the other columns plus cell padding and spacing.
+  return std::max(0.0f, table->WorkRect.GetWidth() - table->Columns[0].WidthGiven);
 }
 
 }  // namespace tachyon::viewer::common

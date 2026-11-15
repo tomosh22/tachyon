@@ -1,15 +1,18 @@
 // WP-67c: the default docked layout. Runs the real App with the null renderer (ImGui computes dock nodes
 // without a GPU), so docking, saved layouts and "Reset layout" are exercised for real.
 #include "viewer/dock_layout.h"
+#include "analysis/query.h"
 #include "viewer/app.h"
 
 #include <gtest/gtest.h>
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace tachyon;
@@ -260,4 +263,55 @@ TEST(DockLayout, TinyOrZeroSizedViewportDoesNotCrashAndBuildsLater) {
   ASSERT_TRUE(app.init(error)) << error;
   EXPECT_FALSE(buildDefaultDockLayout(1234u, ImVec2(0.0f, 0.0f), {"Call Graph"}));
   EXPECT_FALSE(buildDefaultDockLayout(1234u, ImVec2(100.0f, 3.0f), {"Call Graph"}));
+}
+
+// WP-67d: in the default docked layout the function name column of the analysis tables stays readable.
+namespace {
+
+const ImGuiTable* tableOf(const char* panel, int columns) {
+  const ImGuiWindow* outer = win(panel);
+  ImGuiContext& g = *ImGui::GetCurrentContext();
+  for (int i = 0; i < g.Tables.GetMapSize(); ++i) {
+    const ImGuiTable* t = g.Tables.TryGetMapData(i);
+    if (t != nullptr && t->OuterWindow == outer && t->ColumnsCount == columns &&
+        t->LastFrameActive >= g.FrameCount - 1)
+      return t;
+  }
+  return nullptr;
+}
+
+void expectReadableNameColumns(float w, float h) {
+  App app(makeNullRenderer(w, h), headless());
+  std::string error;
+  ASSERT_TRUE(app.init(error)) << error;
+  app.openFile(fs::path(TACHYON_GENERATED_FIXTURE_DIR) / "tiny.tachyon");
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (app.document() == nullptr || app.loading()) {
+    ASSERT_LT(std::chrono::steady_clock::now(), deadline);
+    app.frame(0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  app.selection().setSelectedFunction(analysis::kRootKey);  // gives the Butterfly something to show
+  const float em = ImGui::GetFontSize();
+  for (const char* panel : {"Function List", "Call Graph", "Butterfly"}) {
+    const ImGuiTable* t = nullptr;
+    for (int i = 0; i < 5000 && (t = tableOf(panel, 7)) == nullptr; ++i) {
+      app.frame(0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_NE(t, nullptr) << panel << " has no table";
+    for (int i = 0; i < 60; ++i) app.frame(0);
+    t = tableOf(panel, 7);
+    ASSERT_NE(t, nullptr) << panel;
+    EXPECT_GE(t->Columns[0].WidthGiven, 12.0f * em) << panel << " at " << w << "x" << h;
+  }
+}
+
+}  // namespace
+
+TEST(DockLayout, NameColumnsStayReadableAt1600x900) {
+  expectReadableNameColumns(1600.0f, 900.0f);
+}
+TEST(DockLayout, NameColumnsStayReadableAt1280x720) {
+  expectReadableNameColumns(1280.0f, 720.0f);
 }
