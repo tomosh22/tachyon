@@ -1064,10 +1064,11 @@ void FunctionStatsPanel::drawInstanceBars(const PanelContext& context, float hei
     int len;
     if (scale.clipping)
       len = std::snprintf(text, sizeof text, "%s scale: %s (p99), max %s clipped",
-                          scale.log ? "Log" : "Linear", top.c_str(),
+                          scale.logActive() ? "Log" : "Linear", top.c_str(),
                           st::formatDuration(static_cast<double>(scale.maxTicks), m_clockHz).c_str());
     else
-      len = std::snprintf(text, sizeof text, "%s scale: %s (max)", scale.log ? "Log" : "Linear", top.c_str());
+      len = std::snprintf(text, sizeof text, "%s scale: %s (max)", scale.logActive() ? "Log" : "Linear",
+                          top.c_str());
     if (threshold > 0 && len > 0 && static_cast<size_t>(len) < sizeof text)
       std::snprintf(text + len, sizeof text - static_cast<size_t>(len), "  |  %u above threshold",
                     m_aboveThreshold);

@@ -59,43 +59,89 @@ TEST(StatsScale, ClipsOnlyWhenTheP99IsBelowTheMaximum) {
   EXPECT_EQ(makeInstanceScale({0, 0}, true, true).top, 1u);
 }
 
-TEST(StatsScale, LogMappingIsMonotonicAndFiniteForZero) {
+TEST(StatsScale, LogMappingIsAnchoredAtTheShortestInstanceMonotonicAndFinite) {
   const InstanceScale s = makeInstanceScale({0, 1, 10, 1000, 1000000}, false, true);
+  EXPECT_EQ(s.lo, 1u);  // floored at one tick
+  EXPECT_TRUE(s.logActive());
   double prev = -1.0;
   for (const uint64_t t : {0ull, 1ull, 2ull, 10ull, 100ull, 1000ull, 123456ull, 1000000ull}) {
     const double f = barFraction(s, t);
     EXPECT_TRUE(std::isfinite(f)) << t;
     EXPECT_GE(f, 0.0);
     EXPECT_LE(f, 1.0);
-    EXPECT_GT(f, prev) << t;
+    if (t > 1)
+      EXPECT_GT(f, prev) << t;
+    else
+      EXPECT_DOUBLE_EQ(f, 0.0);
     prev = f;
   }
-  EXPECT_DOUBLE_EQ(barFraction(s, 0), 0.0);
   EXPECT_DOUBLE_EQ(barFraction(s, 1000000), 1.0);
-  // A 1000x shorter instance is still clearly visible on the log scale.
-  EXPECT_GT(barFraction(s, 1000), 0.4);
+  EXPECT_NEAR(barFraction(s, 1000), 0.5, 1e-9);  // 1 .. 1e6: 1e3 is half way in log terms
+
+  // Anchored at the minimum of the shown durations.
+  const InstanceScale spread = makeInstanceScale({400, 450, 500, 1000, 7000}, false, true);
+  EXPECT_EQ(spread.lo, 400u);
+  EXPECT_DOUBLE_EQ(barFraction(spread, 400), 0.0);
+  EXPECT_DOUBLE_EQ(barFraction(spread, 100), 0.0);  // below the anchor
+  EXPECT_DOUBLE_EQ(barFraction(spread, 7000), 1.0);
+
+  // lo == top (all equal, n == 1) and a lone 0 / 1 tick: finite, falls back to linear.
+  for (const std::vector<uint64_t>& d : {std::vector<uint64_t>{5, 5, 5}, std::vector<uint64_t>{9},
+                                         std::vector<uint64_t>{0}, std::vector<uint64_t>{1}}) {
+    const InstanceScale e = makeInstanceScale(d, false, true);
+    EXPECT_FALSE(e.logActive());
+    for (const uint64_t t : {0ull, 1ull, 5ull, 9ull, 100ull}) {
+      const double f = barFraction(e, t);
+      EXPECT_TRUE(std::isfinite(f));
+      EXPECT_GE(f, 0.0);
+      EXPECT_LE(f, 1.0);
+    }
+  }
+  EXPECT_DOUBLE_EQ(barFraction(makeInstanceScale({4, 4}, false, true), 4), 1.0);
+
   // Log scale combined with clipping tops out at the p99.
   std::vector<uint64_t> d(200, 1000);
   d[3] = 50000000;
+  d[4] = 10;
   const InstanceScale both = makeInstanceScale(d, true, true);
   EXPECT_TRUE(both.clipping);
   EXPECT_TRUE(both.log);
+  EXPECT_EQ(both.lo, 10u);
   EXPECT_DOUBLE_EQ(barFraction(both, 1000), 1.0);
   EXPECT_DOUBLE_EQ(barFraction(both, 50000000), 1.0);
-  EXPECT_LT(barFraction(both, 10), 1.0);
+  EXPECT_DOUBLE_EQ(barFraction(both, 10), 0.0);
+}
+
+TEST(StatsScale, LogScaleSpreadsTheMedianOfASkewedDistribution) {
+  // A median of 448 us and a 7 ms top on a 10 MHz clock: the shape of the demo capture.
+  std::vector<uint64_t> d;
+  for (uint64_t i = 0; i < 1000; ++i)  // geometric spread from 8 us to 7 ms in 0.1 us ticks
+    d.push_back(static_cast<uint64_t>(80.0 * std::pow(875.0, static_cast<double>(i) / 999.0)));
+  const InstanceScale s = makeInstanceScale(d, false, true);
+  std::vector<uint64_t> sorted = d;
+  std::sort(sorted.begin(), sorted.end());
+  const double median = barFraction(s, sorted[sorted.size() / 2]);
+  EXPECT_GT(median, 0.2);
+  EXPECT_LT(median, 0.8);
+  EXPECT_LT(barFraction(makeInstanceScale(d, false, false), sorted[sorted.size() / 2]), 0.8);
 }
 
 TEST(StatsScale, TicksAtFractionInvertsTheBarHeight) {
   for (const bool log : {false, true}) {
-    const InstanceScale s = makeInstanceScale({0, 500, 1000000}, false, log);
-    EXPECT_EQ(ticksAtFraction(s, 0.0), 0u);
+    const InstanceScale s = makeInstanceScale({40, 500, 1000000}, false, log);
+    EXPECT_EQ(ticksAtFraction(s, 0.0), log ? 40u : 0u);
     EXPECT_EQ(ticksAtFraction(s, 1.0), 1000000u);
     EXPECT_EQ(ticksAtFraction(s, 7.0), 1000000u);  // clamped
-    for (const uint64_t t : {1ull, 40ull, 5000ull, 999999ull}) {
+    for (const uint64_t t : {40ull, 41ull, 500ull, 5000ull, 999999ull}) {
       const uint64_t back = ticksAtFraction(s, barFraction(s, t));
       EXPECT_NEAR(static_cast<double>(back), static_cast<double>(t),
                   std::max(1.0, static_cast<double>(t) * 1e-6))
           << t << " " << log;
+    }
+    // And the other way round: height -> ticks -> height.
+    for (const double f : {0.0, 0.1, 0.37, 0.5, 0.9, 1.0}) {
+      const double back = barFraction(s, ticksAtFraction(s, f));
+      EXPECT_NEAR(back, f, 1e-3) << f << " " << log;
     }
   }
 }

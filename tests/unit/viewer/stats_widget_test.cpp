@@ -860,7 +860,7 @@ TEST(StatsChart, ClipButtonTogglesTheScaleAndMarksClippedBars) {
   EXPECT_FLOAT_EQ(heightOfDuration(barDuration), heightOn);
 }
 
-TEST(StatsChart, LogButtonRaisesShortBarsAndKeepsEveryBarFinite) {
+TEST(StatsChart, LogButtonAnchorsTheScaleAtTheShortestInstanceAndKeepsEveryBarFinite) {
   Harness h;
   h.open("scopes.tachyon");
   h.openPanel();
@@ -881,14 +881,21 @@ TEST(StatsChart, LogButtonRaisesShortBarsAndKeepsEveryBarFinite) {
   EXPECT_TRUE(h.panel->logScale());
   EXPECT_TRUE(h.app.settings().statsLogScale);
   EXPECT_TRUE(h.panel->instanceScale().log);
-  EXPECT_TRUE(h.panel->instanceScale().clipping);  // combined with the p99 clip
-  float logged = 0;
+  EXPECT_TRUE(h.panel->instanceScale().clipping);       // combined with the p99 clip
+  EXPECT_EQ(h.panel->instanceScale().lo, barDuration);  // anchored at the shortest shown instance
+  float logged = 0, full = 0, mid = 0;
   for (const auto& b : h.panel->drawnInstanceBars()) {
     EXPECT_TRUE(std::isfinite(b.y0));
     EXPECT_GE(b.y1 - b.y0, 1.0f);
     if (b.longest == barDuration) logged = b.y1 - b.y0;
+    if (b.clipped) full = b.y1 - b.y0;
+    if (b.longest == 15300) mid = b.y1 - b.y0;
   }
-  EXPECT_GT(logged, linear);
+  EXPECT_FLOAT_EQ(logged, 1.0f);  // the shortest sits at the baseline
+  EXPECT_LT(logged, linear);
+  ASSERT_GT(full, 0.0f);
+  EXPECT_GT(mid, full * 0.2f);  // the middle of the distribution lands in the middle of the plot
+  EXPECT_LT(mid, full * 0.8f);
 }
 
 TEST(StatsChart, PreferencesComeFromSettingsAndGoBackToThem) {

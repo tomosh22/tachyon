@@ -98,7 +98,9 @@ struct InstanceScale {
   uint64_t top = 1;       // the duration that fills the full chart height (>= 1)
   uint64_t maxTicks = 1;  // the longest duration
   bool clipping = false;  // top < maxTicks: longer bars are clipped and marked
-  bool log = false;
+  uint64_t lo = 1;        // log scale: the duration at height 0 (the shortest shown, at least 1 tick)
+  bool log = false;       // log requested; it is only applied when top > lo (see logActive)
+  bool logActive() const { return log && top > lo; }
 };
 
 // Thread-safe: pure function. The vertical scale for `durations`: with `clip` the 99th percentile (when it is
@@ -106,7 +108,9 @@ struct InstanceScale {
 InstanceScale makeInstanceScale(const std::vector<uint64_t>& durations, bool clip, bool log);
 
 // Thread-safe: pure function. Bar height in [0,1] of the full height for a duration: d / top (linear) or
-// log1p(d) / log1p(top) (log, finite and monotonic, 0 for 0). Durations above `top` give 1.
+// (log d - log lo) / (log top - log lo) (log, anchored at the shortest shown duration so a spread
+// distribution fills the height; finite and monotonic, 0 at or below lo). Linear when top <= lo. Durations
+// above `top` give 1.
 double barFraction(const InstanceScale& scale, uint64_t duration);
 
 // Thread-safe: pure function. The duration at height fraction `f` (inverse of barFraction, f clamped to

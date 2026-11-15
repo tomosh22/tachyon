@@ -123,8 +123,12 @@ uint64_t percentileTicks(std::vector<uint64_t> durations, double p) {
 InstanceScale makeInstanceScale(const std::vector<uint64_t>& durations, bool clip, bool log) {
   InstanceScale s;
   s.log = log;
-  uint64_t mx = 1;
-  for (const uint64_t d : durations) mx = std::max(mx, d);
+  uint64_t mx = 1, mn = UINT64_MAX;
+  for (const uint64_t d : durations) {
+    mx = std::max(mx, d);
+    mn = std::min(mn, d);
+  }
+  s.lo = durations.empty() ? 1 : std::max<uint64_t>(1, mn);
   s.maxTicks = mx;
   s.top = mx;
   if (clip && durations.size() > 1) {
@@ -140,15 +144,26 @@ InstanceScale makeInstanceScale(const std::vector<uint64_t>& durations, bool cli
 double barFraction(const InstanceScale& scale, uint64_t duration) {
   const uint64_t d = std::min(duration, scale.top);
   const double top = static_cast<double>(std::max<uint64_t>(scale.top, 1));
-  const double f =
-      scale.log ? std::log1p(static_cast<double>(d)) / std::log1p(top) : static_cast<double>(d) / top;
+  double f;
+  if (scale.logActive()) {
+    const double lo = static_cast<double>(scale.lo);
+    f = std::log(std::max(static_cast<double>(d), lo) / lo) / std::log(top / lo);
+  } else {
+    f = static_cast<double>(d) / top;
+  }
   return std::clamp(f, 0.0, 1.0);
 }
 
 uint64_t ticksAtFraction(const InstanceScale& scale, double f) {
   f = std::clamp(f, 0.0, 1.0);
   const double top = static_cast<double>(std::max<uint64_t>(scale.top, 1));
-  const double t = scale.log ? std::expm1(f * std::log1p(top)) : f * top;
+  double t;
+  if (scale.logActive()) {
+    const double lo = static_cast<double>(scale.lo);
+    t = lo * std::exp(f * std::log(top / lo));
+  } else {
+    t = f * top;
+  }
   return static_cast<uint64_t>(std::llround(std::clamp(t, 0.0, top)));
 }
 
