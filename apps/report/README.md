@@ -26,6 +26,20 @@ tachyon-report <trace.tachyon> [--baseline base.json] [--out report.json|report.
 | `--no-blend` | Do not blend instrumentation scopes into the function table. |
 | `--fail-on-lost` | Exit 4 when the trace is partial or lost events. |
 
+## Typical CI use
+
+```sh
+tachyon-cli capture --launch ./game --args "--benchmark" --duration 60 --out /abs/path/run.tachyon
+tachyon-report /abs/path/run.tachyon --out report.json --out report.md          # first run: becomes the baseline
+tachyon-report /abs/path/run.tachyon --baseline baseline/report.json --out report.json --out report.md --fail-on-lost
+```
+
+Store `report.json` of a good run as the baseline, post `report.md` as the pull-request comment, and let the exit
+code (1 regression, 4 partial or lost events with `--fail-on-lost`) fail the job. Symbols: pass
+`--symbols DIR` / `--symbol-server URL` (or keep `<trace stem>.symbols.json` next to the trace); on Linux the
+binaries' own symbol tables are read when the modules are on the machine. Frames that stay unresolved are
+reported as addresses and cannot be matched reliably between runs.
+
 ## Exit codes
 
 | Code | Meaning |

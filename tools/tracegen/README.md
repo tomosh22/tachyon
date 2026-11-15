@@ -12,6 +12,14 @@
 tracegen [--out-dir DIR] [--no-verify] [--manifest FILE] scenario.json...
 ```
 
+The outputs are ordinary traces. Open `<name>.tachyon` in the viewer
+(`tachyon-viewer build/linux-release/fixtures/medium.tachyon`) or run `tachyon-report` on it; the viewer and the
+report tool pick up a `<name>.symbols.json` next to the trace for function names, while `tachyon-cli export` needs
+`--symbols <name>.symbols.json`. The fixtures: `tiny` (2 threads, 1 s), `medium` (16 threads, 60 s, 7.5 M samples),
+`scopes` (instrumentation scopes), `fibers`, `frames` (frame marks with a planted hitch), `recursion`, `partial` and
+`partial_torn` (unfinalized traces); `large` (64 threads x 10 min) is opt-in. To make your own, write a scenario and
+run `tracegen --out-dir /tmp/out my-scenario.json`.
+
 Every run computes the expected results two ways and **fails** if they disagree (integers exact, floats 1e-9
 relative): (a) *analytically*, from the scenario and generation bookkeeping; (b) by a *brute-force reference*
 (`reference.cpp`) that re-reads the emitted `.tachyon` with `TraceReader` plus the `.symbols.json`, and applies

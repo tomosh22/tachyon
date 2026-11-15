@@ -1,8 +1,8 @@
 # tachyon-cli
 
 Command-line client for `tachyon-agent` (the control protocol of `libs/control/protocol.h`) plus offline tools.
-`tachyon-cli --help`-style usage is printed on a usage error; the full option list is the header comment of
-`apps/cli/cli.h`.
+There is no `--help` option: running `tachyon-cli` with no command or an unknown one prints the usage text on
+stderr and exits 3 (the full option list is also the header comment of `apps/cli/cli.h`).
 
 ```
 tachyon-cli [--socket PATH | --pipe NAME | --agent ADDRESS] [--token-file FILE] [--json] [--timeout SECONDS]
@@ -17,6 +17,52 @@ tachyon-cli [--socket PATH | --pipe NAME | --agent ADDRESS] [--token-file FILE] 
 | `merge` | add an SDK sidecar file to a trace | no |
 | `export` | write a speedscope or Chrome trace file | no |
 | `doctor` | check whether this machine can capture | no |
+
+## Commands and options
+
+Global options (before the command): `--socket PATH`, `--pipe NAME` (synonyms) or `--agent ADDRESS` choose the
+agent (default: `$TACHYON_AGENT_PIPE`, else the platform default, see [apps/agent/README.md](../agent/README.md));
+`--token-file FILE` for a `tcp://` agent; `--json`: every response and event becomes one JSON line on stdout (the
+protocol's own encoding) and diagnostics stay on stderr; `--timeout SECONDS` (default 600) bounds every wait
+(`capture` and `live` without `--duration`, `--wait`); `--connect-timeout-ms N` retries the connection for N
+milliseconds (default: one attempt).
+
+| Command | Meaning |
+|---|---|
+| `status` | state of the agent (`idle`, `starting`, `capturing`, `converting`), progress, backend, whether it is elevated |
+| `start <target> [start options] [--no-start] [--wait]` | start a capture and return; `--wait` blocks until `capture_done`; `--no-start` (synonym `--defer-start`) launches the program parked, `resume` begins recording |
+| `stop [--wait]` | end the capture; the agent converts the data and reports `capture_done` with the trace path and `events_lost` |
+| `resume` | begin recording a launch parked with `start --no-start` |
+| `flush --name N --seconds S [--reason R]` | circular captures only: write the last S seconds to `<out dir>/<N>.tachyon` (flight recorder) |
+| `cancel` | abandon the capture, discarding its data |
+| `capture <target> [start options] [--duration S] [--fetch [--fetch-dir DIR]]` | `start`, wait for `--duration` seconds or for the target to exit, `stop`, wait for `capture_done`; `flushed` events (also from `Tachyon_RequestFlush`) are printed while it waits |
+| `live <target> ...` | see [live](#live) |
+| `fetch PATH [--out FILE]`, `processes` | see [Remote agents](#remote-agents-tcp) |
+| `merge TRACE.tachyon INST.tachyon-inst [--out PATH] [--clip] [--no-siblings] [--force]` | offline: merge an SDK sidecar file, plus its numbered siblings `<stem>.<n><ext>` in numeric order, into the trace. Without `--out` the trace is replaced atomically through a temporary file; `--clip` drops records outside the trace window (default: keep them and extend the window); a sidecar merged before is refused without `--force`; unbalanced scopes and dropped records print as warnings on stderr (exit stays 0) |
+| `export TRACE.tachyon --format speedscope\|chrome --out PATH [--threads TID,...] [--from-ms X] [--to-ms Y] [--symbols PATH]... [--symbol-server URL]...` | offline: write a [speedscope](https://www.speedscope.app) file (one sampled profile per thread, names need symbols) or a Chrome / Perfetto trace (scopes, frame marks, markers, plots, per-cpu running slices); `--threads` takes OS thread ids, `--from-ms` / `--to-ms` are milliseconds from the trace start, `--out -` writes to stdout; with `--json` the summary is one JSON object |
+| `doctor [--hz N] [--agent PATH] [--socket PATH]` | see [doctor](#doctor-linux-and-windows) |
+
+**Target** (`start`, `capture`, `live`): `--launch EXE`, `--attach PID` or `--system`; or the long form `--mode
+launch|attach|system [--exe E] [--pid N]`.
+
+**Start options:**
+
+| Option | Meaning |
+|---|---|
+| `--args "A B \"C D\""` | arguments of the launched program as one string, split with the Windows command-line rules |
+| `--args A B C` | legacy form: every following word up to the next `--option` |
+| `--arg A` | one argument, repeatable; the way to pass an argument that itself starts with `--` |
+| `--cwd D`, `--env K=V` (repeatable) | working directory and extra environment of the launched program |
+| `--hz N` | sampling rate (default 8000; Linux: must not exceed `kernel.perf_event_max_sample_rate`) |
+| `--follow-children`, `--child-filter GLOB` | also capture child processes (only those whose image name matches GLOB) |
+| `--circular-mb N` | circular (flight recorder) capture of about N MiB instead of recording everything |
+| `--out PATH` | output trace. **Interpreted by the agent**: a relative name is relative to the agent's working directory; default `capture-<unix time>.tachyon` there |
+| `--no-kernel-stacks` | leave kernel frames out of the call stacks (both backends) |
+| `--no-profile`, `--no-cswitch`, `--no-readythread` | ETW only (ignored by the Linux backend): turn off sampling, context-switch or ready-thread events |
+
+A `capture` of a launched program ends when `--duration` elapses or the program exits, whichever is first.
+`capture_done` is printed as `capture_done: path=... events_lost=N duration_s=...`; warnings from the agent (for
+example that the scheduler tracepoints were unavailable) follow on stderr.
 
 Exit codes: 0 success; 1 the agent or the capture reported an error (offline commands: bad input or output;
 `doctor`: at least one FAIL); 2 cannot reach the agent or a wait timed out; 3 usage error; 4 the trace was

@@ -4,7 +4,8 @@ The Linux agent (`tachyon-agent --backend perf`) samples with `perf_event_open`:
 frame-pointer callchains, plus the `sched` tracepoints for thread states. There is no eBPF and no kernel module.
 This page covers what the kernel has to allow, how to give the agent the right privileges, and how the SDK reaches
 the agent. `tachyon-cli doctor` checks everything below and prints the fix for what it finds
-(see [apps/cli/README.md](../cli/README.md)).
+(see [apps/cli/README.md](../cli/README.md)). The general agent documentation (options, output files, flight
+recorder, exit codes) is in [README.md](README.md).
 
 Quick start:
 
@@ -12,8 +13,11 @@ Quick start:
 tachyon-cli doctor                                       # what is missing on this machine?
 sudo setcap cap_perfmon,cap_sys_ptrace+ep tachyon-agent  # Linux 5.8 or newer
 tachyon-agent --backend perf &
-tachyon-cli capture --launch ./game --duration 30
+tachyon-cli capture --launch ./game --duration 30 --out /abs/path/game.tachyon   # --out is resolved by the agent
 ```
+
+The agent keeps the raw spool directory `<out>.perfspool` next to each trace unless it is started with
+`--perf-delete-raw`; it can be large, delete it when you only need the `.tachyon` file.
 
 ## Privileges
 
