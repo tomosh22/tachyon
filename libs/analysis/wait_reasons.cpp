@@ -24,8 +24,8 @@ constexpr uint8_t kLinuxTraced = 0x08;
 constexpr uint8_t kLinuxExitDead = 0x10;
 constexpr uint8_t kLinuxExitZombie = 0x20;
 constexpr uint8_t kLinuxParked = 0x40;
-constexpr uint8_t kLinuxDead = 0x80;
-constexpr uint8_t kLinuxExitMask = kLinuxExitDead | kLinuxExitZombie | kLinuxDead;
+constexpr uint8_t kLinuxIdle = 0x80;  // TASK_REPORT_IDLE: sched_switch reports TASK_IDLE kthreads as 0x80 ('I')
+constexpr uint8_t kLinuxExitMask = kLinuxExitDead | kLinuxExitZombie;
 
 bool isLinux(uint32_t platform) {
   return platform == trace::kPlatformLinux;
@@ -86,6 +86,7 @@ std::string_view waitReasonName(uint32_t platform, uint8_t reason) {
     if (reason & kLinuxTraced) return "Traced (t)";
     if (reason & kLinuxParked) return "Parked";
     if (reason & kLinuxExitMask) return "Exited";
+    if (reason & kLinuxIdle) return "Idle (I)";
     return "Unknown";
   }
   return reason < kWindowsWaitReasonCount ? kWindowsNames[reason] : std::string_view("Unknown");

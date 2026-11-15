@@ -62,6 +62,9 @@ TEST(WaitReasons, LinuxPrevState) {
   EXPECT_EQ(waitReasonName(kLin, 2), "Uninterruptible (D)");
   EXPECT_EQ(waitReasonName(kLin, 4), "Stopped (T)");
   EXPECT_EQ(waitReasonName(kLin, 0x20), "Exited");
+  // 0x80 in sched_switch prev_state is TASK_REPORT_IDLE (an idle kthread), not an exit.
+  EXPECT_EQ(waitReasonName(kLin, 0x80), "Idle (I)");
+  EXPECT_EQ(waitReasonCategory(kLin, 0x80), WaitCategory::Other);
 }
 
 TEST(WaitReasons, OldStateClassification) {

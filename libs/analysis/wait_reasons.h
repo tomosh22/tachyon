@@ -8,7 +8,7 @@
 //
 //   Linux (platform 2): wait_reason is the sched_switch prev_state & 0xFF. Bits: 0x01 S (TASK_INTERRUPTIBLE),
 //   0x02 D (TASK_UNINTERRUPTIBLE), 0x04 T (stopped), 0x08 t (traced), 0x10 EXIT_DEAD, 0x20 EXIT_ZOMBIE,
-//   0x40 TASK_PARKED, 0x80 TASK_DEAD. 0 (TASK_RUNNING) never reaches a wait from a sched_switch record (a
+//   0x40 TASK_PARKED, 0x80 TASK_REPORT_IDLE (an idle kthread, 'I'; a wait, not an exit). 0 (TASK_RUNNING) never reaches a wait from a sched_switch record (a
 //   preempted thread is old_state Ready); a wait with reason 0 is a PERF_RECORD_SWITCH capture without the
 //   sched tracepoint, where the reason is unknown.
 //
@@ -17,8 +17,8 @@
 // Terminated 4, Waiting 5, Transition 6, DeferredReady 7. States 1, 3 and 7 mean the thread left the CPU
 // still runnable (preempted), so the off-CPU interval is Ready instead of Waiting; state 4 means the thread
 // exited at the switch-out; anything else is a wait. WP-71 encoding for a sched_switch record: old_state = 1
-// when prev_state is TASK_RUNNING (preempted) or 4 when the task is exiting (EXIT_DEAD / EXIT_ZOMBIE /
-// TASK_DEAD), else 5; old_wait_reason = prev_state & 0xFF (the TASK_REPORT_MAX "preempted" flag is folded
+// when prev_state is TASK_RUNNING (preempted) or 4 when the task is exiting (EXIT_DEAD / EXIT_ZOMBIE),
+// else 5; old_wait_reason = prev_state & 0xFF (the TASK_REPORT_MAX "preempted" flag is folded
 // into old_state, not stored).
 #pragma once
 
