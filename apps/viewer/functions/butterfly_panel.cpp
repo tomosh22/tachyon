@@ -1,4 +1,5 @@
 #include "viewer/functions/butterfly_panel.h"
+#include "viewer/theme.h"
 
 #include "viewer/builtin_panels.h"
 #include "viewer/common/function_names.h"
@@ -303,11 +304,11 @@ void ButterflyPanel::drawToolbar(const PanelContext& context) {
     setKernelFrames(static_cast<analysis::KernelFrames>(kernel));
   if (m_forcedInline) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "%s", kInlineForcedHint);
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().info), "%s", kInlineForcedHint);
   }
   if (m_forcedKernel) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "%s", kKernelForcedHint);
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().info), "%s", kKernelForcedHint);
   }
   if (m_query.pending()) {
     ImGui::SameLine();
@@ -316,7 +317,7 @@ void ButterflyPanel::drawToolbar(const PanelContext& context) {
   (void)context;
   if (!m_message.empty()) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "  %s", m_message.c_str());
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().error), "  %s", m_message.c_str());
   }
 }
 

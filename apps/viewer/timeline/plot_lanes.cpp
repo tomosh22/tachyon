@@ -504,7 +504,7 @@ void PlotLanesView::draw(ImDrawList* dl, const model::TraceModel& model, const P
     m_drawnLanes.push_back({lane, y0, y1});
     const bool over = mouse && mouse->y >= y0 && mouse->y < y1;
     if (lane.kind == GlobalLane::Kind::PlotsHeader) {
-      dl->AddRectFilled(ImVec2(gutterX0, y0), ImVec2(x1, y1), IM_COL32(38, 38, 46, 255));
+      dl->AddRectFilled(ImVec2(gutterX0, y0), ImVec2(x1, y1), m_palette->rulerBg);
       char text[64];
       std::snprintf(text, sizeof text, "%s Plots (%zu)", m_plotsCollapsed ? ">" : "v", m_plotCount);
       dl->AddText(ImVec2(gutterX0 + 4.0f, y0), ImGui::GetColorU32(ImGuiCol_Text), text);
@@ -523,14 +523,14 @@ void PlotLanesView::draw(ImDrawList* dl, const model::TraceModel& model, const P
 void PlotLanesView::drawMarkers(ImDrawList* dl, const model::TraceModel& model, const PlotArea& area,
                                 float y0, float y1, float gutterX0, const ImVec2* mouse) {
   const float x0 = area.x0, x1 = area.x0 + area.width;
-  dl->AddRectFilled(ImVec2(gutterX0, y0), ImVec2(x0, y1), IM_COL32(32, 32, 38, 255));
-  dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(24, 24, 29, 255));
+  dl->AddRectFilled(ImVec2(gutterX0, y0), ImVec2(x0, y1), m_palette->laneBgAlt);
+  dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m_palette->laneBg);
   char label[48];
   std::snprintf(label, sizeof label, "Markers (%zu)", model.markers.size());
   dl->AddText(ImVec2(gutterX0 + 4.0f, y0 + 1.0f), ImGui::GetColorU32(ImGuiCol_Text), label);
   const PlotIndex* idx = index();
   if (!idx) {
-    dl->AddText(ImVec2(x0 + 4.0f, y0 + 1.0f), IM_COL32(150, 150, 160, 255), "indexing...");
+    dl->AddText(ImVec2(x0 + 4.0f, y0 + 1.0f), m_palette->textMuted, "indexing...");
     return;
   }
   const MarkerView view{&model.markers, &idx->markerOrder};
@@ -579,8 +579,8 @@ void PlotLanesView::drawPlot(ImDrawList* dl, const model::TraceModel& model, con
   const std::string_view nameView =
       plot < model.plots.size() ? model.strings.get(model.plots[plot].name) : "";
   const std::string name(nameView);
-  dl->AddRectFilled(ImVec2(gutterX0, y0), ImVec2(x0, y1), IM_COL32(32, 32, 38, 255));
-  dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(22, 22, 27, 255));
+  dl->AddRectFilled(ImVec2(gutterX0, y0), ImVec2(x0, y1), m_palette->laneBgAlt);
+  dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m_palette->laneBg);
   {
     const ImVec4 clip(gutterX0, y0, x0 - 4.0f, y1);
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(gutterX0 + 12.0f, y0 + 1.0f),
@@ -588,7 +588,7 @@ void PlotLanesView::drawPlot(ImDrawList* dl, const model::TraceModel& model, con
   }
   const PlotIndex* idx = index();
   if (!idx || plot >= idx->series.size()) {
-    dl->AddText(ImVec2(x0 + 4.0f, y0 + 1.0f), IM_COL32(150, 150, 160, 255), "indexing...");
+    dl->AddText(ImVec2(x0 + 4.0f, y0 + 1.0f), m_palette->textMuted, "indexing...");
     return;
   }
   const PlotSeriesIndex& s = idx->series[plot];
@@ -637,7 +637,7 @@ void PlotLanesView::drawPlot(ImDrawList* dl, const model::TraceModel& model, con
   dl->PushClipRect(ImVec2(x0, y0), ImVec2(x1, y1), true);
   // Zero line when it is in range.
   if (lo < 0.0 && hi > 0.0)
-    dl->AddLine(ImVec2(x0, yOf(0.0)), ImVec2(x1, yOf(0.0)), IM_COL32(255, 255, 255, 36));
+    dl->AddLine(ImVec2(x0, yOf(0.0)), ImVec2(x1, yOf(0.0)), rgbaWithAlpha(m_palette->overlay, 36));
   std::vector<ImVec2> pts;
   pts.reserve(win.columns.size() * 4 + 2);
   if (win.hasBefore && std::isfinite(win.beforeValue)) pts.emplace_back(win.beforeX, yOf(win.beforeValue));
@@ -660,10 +660,10 @@ void PlotLanesView::drawPlot(ImDrawList* dl, const model::TraceModel& model, con
   // Axis labels.
   char text[48];
   std::snprintf(text, sizeof text, "%.4g", hi);
-  dl->AddText(ImVec2(x1 - ImGui::CalcTextSize(text).x - 3.0f, y0), IM_COL32(150, 150, 160, 255), text);
+  dl->AddText(ImVec2(x1 - ImGui::CalcTextSize(text).x - 3.0f, y0), m_palette->textMuted, text);
   std::snprintf(text, sizeof text, "%.4g", lo);
   dl->AddText(ImVec2(x1 - ImGui::CalcTextSize(text).x - 3.0f, y1 - ImGui::GetFontSize()),
-              IM_COL32(150, 150, 160, 255), text);
+              m_palette->textMuted, text);
 
   // Hover readout: the nearest sample, its value and a crosshair.
   if (mouse && mouse->x >= x0 && mouse->x < x1) {
@@ -680,13 +680,13 @@ void PlotLanesView::drawPlot(ImDrawList* dl, const model::TraceModel& model, con
       m_hover.kind = PlotHover::Kind::Plot;
       m_hover.index = plot;
       m_hover.lines = plotTooltipLines(model, s, sample, column, area.clockHz);
-      dl->AddLine(ImVec2(mouse->x, y0), ImVec2(mouse->x, y1), IM_COL32(255, 255, 255, 70));
+      dl->AddLine(ImVec2(mouse->x, y0), ImVec2(mouse->x, y1), rgbaWithAlpha(m_palette->overlay, 70));
       const double v = s.value[sample];
       if (std::isfinite(v)) {
         const float sx = static_cast<float>(area.xOf(s.ts[sample]));
-        dl->AddCircleFilled(ImVec2(sx, yOf(v)), 3.0f, IM_COL32(255, 255, 255, 255));
+        dl->AddCircleFilled(ImVec2(sx, yOf(v)), 3.0f, m_palette->text);
         std::snprintf(text, sizeof text, "%.5g", v);
-        dl->AddText(ImVec2(mouse->x + 6.0f, y0 + 1.0f), IM_COL32(255, 255, 255, 255), text);
+        dl->AddText(ImVec2(mouse->x + 6.0f, y0 + 1.0f), m_palette->text, text);
       }
     }
   }

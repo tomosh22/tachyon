@@ -15,6 +15,8 @@
 // plot width in pixels (times the lines), never by the number of scopes.
 #pragma once
 
+#include "viewer/theme.h"
+
 #include "analysis/fibers.h"
 #include "analysis/query.h"
 #include "analysis/scope_pairing.h"
@@ -201,6 +203,11 @@ struct ScopeHit {
 
 class ScopeLanesView {
  public:
+  // WP-67e: the palette the view draws with (null = the dark one); set by the timeline widget every frame.
+  void setPalette(const ThemePalette* palette) {
+    m_palette = palette != nullptr ? palette : &paletteFor(ColorScheme::Dark);
+  }
+
   ScopeLanesView() = default;
   ScopeLanesView(const ScopeLanesView&) = delete;
   ScopeLanesView& operator=(const ScopeLanesView&) = delete;
@@ -247,6 +254,7 @@ class ScopeLanesView {
   void beginFrame();
 
  private:
+  const ThemePalette* m_palette = &paletteFor(ColorScheme::Dark);
   common::LatestQuery<ScopeLaneSet> m_query;
   std::shared_ptr<const ScopeLaneSet> m_set;
   bool m_shownGrouped = false;

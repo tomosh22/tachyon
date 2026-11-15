@@ -1,4 +1,5 @@
 #include "viewer/status/status_bar.h"
+#include "viewer/theme.h"
 
 #include "viewer/common/query_filter.h"
 #include "viewer/paths.h"
@@ -102,7 +103,7 @@ void StatusBar::draw(const Document* document, const SelectionState& state, cons
   m_symbolsRect = {};
   m_symbolsClicked = false;
   if (!error.empty()) {
-    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", error.c_str());
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().error), "%s", error.c_str());
     return;
   }
   if (!document) {
@@ -119,7 +120,7 @@ void StatusBar::draw(const Document* document, const SelectionState& state, cons
   if (filter == "none") {
     ImGui::TextDisabled("Filter: none");
   } else {
-    ImGui::TextColored(ImVec4(0.45f, 0.7f, 1.0f, 1.0f), "Filter: %s", filter.c_str());
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().info), "Filter: %s", filter.c_str());
   }
 
   const symbols::SymbolService* service = document->symbols().get();
@@ -130,8 +131,8 @@ void StatusBar::draw(const Document* document, const SelectionState& state, cons
   const SymbolSummary& s = m_summary;
   m_symbolsText = "Symbols: " + std::to_string(s.resolved) + "/" + std::to_string(s.total);
   if (s.failed > 0) m_symbolsText += " (" + std::to_string(s.failed) + " failed)";
-  const ImVec4 color =
-      s.failed > 0 ? ImVec4(1.0f, 0.75f, 0.3f, 1.0f) : ImGui::GetStyle().Colors[ImGuiCol_Text];
+  const ImVec4 color = s.failed > 0 ? ImGui::ColorConvertU32ToFloat4(currentPalette().warn)
+                                    : ImGui::GetStyle().Colors[ImGuiCol_Text];
   ImGui::TextColored(color, "%s", m_symbolsText.c_str());
   const ImVec2 rmin = ImGui::GetItemRectMin(), rmax = ImGui::GetItemRectMax();
   m_symbolsRect = {rmin.x, rmin.y, rmax.x, rmax.y};

@@ -456,6 +456,65 @@ TEST(TimelineWidget, ContextMenuAndGutterInteraction) {
   h.frames(2);
 }
 
+// WP-67e: the thread label column: eye (hide), thread id, name, chevron (expand) at the right edge.
+TEST(TimelineWidget, GutterChevronExpandsAndEyeHidesTheThread) {
+  Harness h;
+  h.open("tiny.tachyon");
+  const TimelineScreenGeometry g = h.widget().screenGeometry();
+  const ThreadIdx first = h.widget().rowOrder().front();
+  const size_t rows = h.widget().rowOrder().size();
+  const float em = ImGui::GetFontSize();
+  ASSERT_FALSE(h.widget().flagsOf(first).expanded);
+  const float y = h.bandY();
+
+  // The chevron sits at the right edge of the label column.
+  h.mouse(g.plotX0 - em * 0.9f, y);
+  h.frames(2);
+  h.button(0, true);
+  h.button(0, false);
+  EXPECT_TRUE(h.widget().flagsOf(first).expanded);
+  EXPECT_EQ(h.bus().state().selectedThread, first);
+  h.frames(40);  // not a double click (that toggles too)
+  h.button(0, true);
+  h.button(0, false);
+  EXPECT_FALSE(h.widget().flagsOf(first).expanded);
+  h.frames(40);
+
+  // The eye at the left edge hides the row.
+  h.mouse(g.gutterX0 + em * 0.9f, y);
+  h.frames(2);
+  h.button(0, true);
+  h.button(0, false);
+  h.frames(2);
+  EXPECT_TRUE(h.widget().flagsOf(first).hidden);
+  EXPECT_EQ(h.widget().rowOrder().size(), rows - 1);
+}
+
+// WP-67e: the navigation mode toolbar above the labels: Zoom turns a drag into a zoom to the dragged range.
+TEST(TimelineWidget, NavigationModeZoomZoomsToTheDraggedRange) {
+  Harness h;
+  h.open("medium.tachyon");
+  h.frames(2);
+  ASSERT_EQ(h.widget().navMode(), NavMode::Pointer);
+  const double before = h.widget().view().span;
+  h.widget().setNavMode(NavMode::Zoom);
+  const TimelineScreenGeometry g = h.widget().screenGeometry();
+  h.dragFrom(g.plotX0 + g.plotWidth * 0.3f, h.bandY(), g.plotX0 + g.plotWidth * 0.5f);
+  h.frames(2);
+  EXPECT_LT(h.widget().view().span, before * 0.35);       // about a fifth of the view is left
+  EXPECT_FALSE(h.widget().selectionRange().has_value());  // consumed by the zoom
+
+  // Pan mode: a click selects nothing.
+  h.widget().fit();
+  h.widget().setNavMode(NavMode::Pan);
+  h.bus().setSelectedThread(ThreadIdx());
+  h.mouse(g.plotX0 + g.plotWidth * 0.5f, h.bandY());
+  h.button(0, true);
+  h.button(0, false);
+  EXPECT_FALSE(h.bus().state().selectedThread.valid());
+  h.widget().setNavMode(NavMode::Pointer);
+}
+
 TEST(TimelineWidget, OverviewDragMovesTheView) {
   Harness h;
   h.open("medium.tachyon");

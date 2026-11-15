@@ -44,6 +44,7 @@ add_library(tachyon_viewer_core STATIC
   live/live_session.cpp
   live/live_symbols.cpp
   null_renderer.cpp
+  os_theme.cpp
   panel_registry.cpp
   paths.cpp
   sdl_gl_renderer.cpp

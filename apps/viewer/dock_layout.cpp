@@ -2,40 +2,61 @@
 
 #include <imgui_internal.h>
 
+#include <algorithm>
+#include <iterator>
+
 namespace tachyon::viewer {
 
 namespace {
 
 constexpr float kMinLayoutExtent = 16.0f;
-constexpr float kTimelineFraction = 0.55f;     // of the height; the three analysis panels share the rest
-constexpr float kCallGraphFraction = 0.36f;    // of the bottom row
-constexpr float kFunctionListFraction = 0.5f;  // of what is left of the bottom row
+// Fractions of the dockspace (Superluminal proportions): stats strip ~20% of the height, timeline ~45%, the
+// bottom row the remaining ~35%; the analysis tab group takes ~65% of the bottom row's width.
+constexpr float kStatsFraction = 0.20f;
+constexpr float kTimelineFractionOfRest = 0.45f / (1.0f - kStatsFraction);
+constexpr float kAnalysisFraction = 0.65f;
 
 // The window that stands for a slot once the layout exists (its dock node is the slot's node).
 const char* anchorName(DockSlot slot) {
   switch (slot) {
+    case DockSlot::Stats: return "Function Statistics";
     case DockSlot::Timeline: return "Threads Timeline";
-    case DockSlot::CallGraph: return "Call Graph";
-    case DockSlot::FunctionList: return "Function List";
-    case DockSlot::Butterfly: return "Butterfly";
+    case DockSlot::Analysis: return "Call Graph";
+    case DockSlot::Source: return "Source";
     case DockSlot::None: break;
   }
   return nullptr;
+}
+
+// Position of a panel in its tab group (the order of this list).
+short tabOrderOf(const std::string& name) {
+  static constexpr const char* kOrder[] = {"Function Statistics",
+                                           "Trace Info",
+                                           "Call Graph",
+                                           "Function List",
+                                           "Butterfly",
+                                           "Thread Interaction",
+                                           "Capture",
+                                           "Session Explorer",
+                                           "Live",
+                                           "Flight Recorder",
+                                           "Symbols"};
+  for (size_t i = 0; i < std::size(kOrder); ++i) {
+    if (name == kOrder[i]) return static_cast<short>(i);
+  }
+  return static_cast<short>(std::size(kOrder));
 }
 
 }  // namespace
 
 DockSlot dockSlotFor(const std::string& name) {
   if (name == "Threads Timeline") return DockSlot::Timeline;
-  if (name == "Call Graph") return DockSlot::CallGraph;
-  // The Function List node also takes Function Statistics (a function-centric view) and the capture family:
-  // they are used while no trace is open, when the analysis panels have nothing to show anyway.
-  for (const char* n : {"Function List", "Function Statistics", "Capture", "Flight Recorder", "Live",
-                        "Session Explorer", "Symbols"}) {
-    if (name == n) return DockSlot::FunctionList;
-  }
-  for (const char* n : {"Butterfly", "Thread Interaction", "Trace Info", "Source"}) {
-    if (name == n) return DockSlot::Butterfly;
+  if (name == "Function Statistics" || name == "Trace Info") return DockSlot::Stats;
+  if (name == "Source") return DockSlot::Source;
+  // The capture family (used mostly while no trace is open) shares the roomy bottom-left group.
+  for (const char* n : {"Call Graph", "Function List", "Butterfly", "Thread Interaction", "Capture",
+                        "Flight Recorder", "Live", "Session Explorer", "Symbols"}) {
+    if (name == n) return DockSlot::Analysis;
   }
   return DockSlot::None;
 }
@@ -55,7 +76,8 @@ bool hasSavedLayout(ImGuiID dockspaceId, const std::vector<std::string>& panelNa
   return false;
 }
 
-bool buildDefaultDockLayout(ImGuiID dockspaceId, ImVec2 size, const std::vector<std::string>& panelNames) {
+bool buildDefaultDockLayout(ImGuiID dockspaceId, ImVec2 size, const std::vector<std::string>& panelNames,
+                            const std::vector<std::string>* openNames) {
   if (!(size.x >= kMinLayoutExtent) || !(size.y >= kMinLayoutExtent)) return false;
 
   ImGui::DockBuilderRemoveNode(dockspaceId);  // also undocks every window that sat in it
@@ -63,30 +85,42 @@ bool buildDefaultDockLayout(ImGuiID dockspaceId, ImVec2 size, const std::vector<
                                              ImGuiDockNodeFlags_PassthruCentralNode);
   ImGui::DockBuilderSetNodeSize(dockspaceId, size);
 
-  ImGuiID top = 0, bottom = 0;
-  ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Up, kTimelineFraction, &top, &bottom);
-  ImGuiID callGraph = 0, rest = 0;
-  ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Left, kCallGraphFraction, &callGraph, &rest);
-  ImGuiID functionList = 0, butterfly = 0;
-  ImGui::DockBuilderSplitNode(rest, ImGuiDir_Left, kFunctionListFraction, &functionList, &butterfly);
+  ImGuiID stats = 0, rest = 0;
+  ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Up, kStatsFraction, &stats, &rest);
+  ImGuiID timeline = 0, bottom = 0;
+  ImGui::DockBuilderSplitNode(rest, ImGuiDir_Up, kTimelineFractionOfRest, &timeline, &bottom);
+  ImGuiID analysis = 0, source = 0;
+  ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Left, kAnalysisFraction, &analysis, &source);
 
   auto nodeOf = [&](DockSlot slot) -> ImGuiID {
     switch (slot) {
-      case DockSlot::Timeline: return top;
-      case DockSlot::CallGraph: return callGraph;
-      case DockSlot::FunctionList: return functionList;
-      case DockSlot::Butterfly: return butterfly;
+      case DockSlot::Stats: return stats;
+      case DockSlot::Timeline: return timeline;
+      case DockSlot::Analysis: return analysis;
+      case DockSlot::Source: return source;
       case DockSlot::None: break;
     }
     return 0;
   };
   for (const std::string& name : panelNames) {
-    if (const ImGuiID node = nodeOf(dockSlotFor(name))) ImGui::DockBuilderDockWindow(name.c_str(), node);
+    const ImGuiID node = nodeOf(dockSlotFor(name));
+    if (node == 0) continue;
+    ImGui::DockBuilderDockWindow(name.c_str(), node);
+    // Tab order inside a group: the main panel first (registration order would put Thread Interaction there).
+    const short order = tabOrderOf(name);
+    if (ImGuiWindow* window = ImGui::FindWindowByName(name.c_str())) {
+      window->DockOrder = order;
+    } else if (ImGuiWindowSettings* settings = ImGui::FindWindowSettingsByID(ImHashStr(name.c_str()))) {
+      settings->DockOrder = order;
+    }
   }
   // Tab groups open on the main panel of their node.
-  for (const DockSlot slot : {DockSlot::FunctionList, DockSlot::Butterfly}) {
+  for (const DockSlot slot : {DockSlot::Stats, DockSlot::Analysis}) {
+    const std::string anchor = anchorName(slot);
+    if (openNames != nullptr && std::find(openNames->begin(), openNames->end(), anchor) == openNames->end())
+      continue;  // the main panel is closed: whatever opens first is shown
     if (ImGuiDockNode* node = ImGui::DockBuilderGetNode(nodeOf(slot)))
-      node->SelectedTabId = ImHashStr(anchorName(slot));
+      node->SelectedTabId = ImHashStr("#TAB", 0, ImHashStr(anchorName(slot)));  // = ImGuiWindow::TabId
   }
   ImGui::DockBuilderFinish(dockspaceId);
   return true;

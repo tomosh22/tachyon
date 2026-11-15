@@ -549,8 +549,7 @@ void ScopeLanesView::drawRow(ImDrawList* dl, const model::TraceModel& model, con
   const float x0 = area.x0, x1 = area.x0 + area.width;
   if (!m_set) {
     const float y0 = rowTop + scopeLineTop(row, geom, 0);
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + geom.scopeLineHeight - 1.0f),
-                      IM_COL32(44, 44, 52, 255));
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + geom.scopeLineHeight - 1.0f), m_palette->pendingFill);
     return;
   }
   const std::vector<LaneLine> lines = m_set->lines(row.thread, row.expanded);
@@ -559,7 +558,7 @@ void ScopeLanesView::drawRow(ImDrawList* dl, const model::TraceModel& model, con
   ImFont* font = ImGui::GetFont();
   const size_t maxItems = static_cast<size_t>(area.width) + 8;
   const uint32_t shown = std::min<uint32_t>(row.scopeLines, static_cast<uint32_t>(lines.size()));
-  const ImU32 stripe = IM_COL32(20, 20, 24, 255);
+  const ImU32 stripe = m_palette->laneBg;
   const float labelMinWidth = charPx * 3.0f;
   for (uint32_t li = 0; li < shown; ++li) {
     const LaneLine ll = lines[li];
@@ -578,8 +577,8 @@ void ScopeLanesView::drawRow(ImDrawList* dl, const model::TraceModel& model, con
         std::snprintf(label, sizeof label, m_set->grouped ? "  thread" : "  scopes");
       }
       const ImVec4 clip(gutterX0, y0, x0 - 4.0f, y1);
-      dl->AddText(font, fontSize * 0.9f, ImVec2(gutterX0 + 4.0f, y0), IM_COL32(150, 190, 220, 255), label,
-                  nullptr, 0.0f, &clip);
+      dl->AddText(font, fontSize * 0.9f, ImVec2(gutterX0 + 4.0f, y0), m_palette->info, label, nullptr, 0.0f,
+                  &clip);
     }
     m_scratch.clear();
     layoutTrack(track, area, maxItems, m_scratch);
@@ -630,20 +629,20 @@ void ScopeLanesView::drawRow(ImDrawList* dl, const model::TraceModel& model, con
           dl->PushClipRect(ImVec2(it.x0, y0), ImVec2(it.x1, y1), true);
           const float h = y1 - y0;
           for (float x = it.x0 - h; x < it.x1; x += 6.0f) {
-            dl->AddLine(ImVec2(x, y1), ImVec2(x + h, y0), IM_COL32(255, 220, 200, 120));
+            dl->AddLine(ImVec2(x, y1), ImVec2(x + h, y0), rgbaWithAlpha(m_palette->overlay, 120));
           }
           dl->PopClipRect();
         } else if (w < 6.0f) {
-          dl->AddLine(ImVec2(it.x0, y0), ImVec2(it.x1, y0), IM_COL32(255, 220, 200, 255));
+          dl->AddLine(ImVec2(it.x0, y0), ImVec2(it.x1, y0), m_palette->overlay);
         }
       }
       if ((flags & kTrackOpen) != 0 && it.x1 < x1 - 1.0f) {
         ++m_stats.openEnds;
         dl->AddTriangleFilled(ImVec2(it.x1 - 5.0f, y0), ImVec2(it.x1, (y0 + y1) * 0.5f),
-                              ImVec2(it.x1 - 5.0f, y1), IM_COL32(255, 255, 255, 230));
+                              ImVec2(it.x1 - 5.0f, y1), rgbaWithAlpha(m_palette->overlay, 230));
       }
       if (!merged && m_highlightId && *m_highlightId == inst.id) {
-        dl->AddRect(ImVec2(it.x0, y0), ImVec2(it.x1, y1), IM_COL32(255, 255, 255, 255));
+        dl->AddRect(ImVec2(it.x0, y0), ImVec2(it.x1, y1), m_palette->overlay);
       }
       if (!merged && w > labelMinWidth && m_labelBudget > 0) {
         const std::string text =

@@ -8,6 +8,7 @@
 #include "viewer/live/live_panel.h"
 #include "viewer/live/live_session.h"
 #include "viewer/memory_governor.h"
+#include "viewer/os_theme.h"
 #include "viewer/panel.h"
 #include "viewer/renderer.h"
 #include "viewer/selection_bus.h"
@@ -103,6 +104,14 @@ struct AppOptions {
   int liveFrameEpochMs = 3000;
   // WP-65b (tests): called on the snapshot worker before each snapshot starts.
   std::function<void()> liveBeforeSnapshot;
+  // WP-67e: what ThemeKind::System resolves to. Polled on a background thread every `osThemePollMs`; the
+  // theme follows live. Null (the default: tests, --selftest, --bench) means no OS probing and System is
+  // dark. The interactive viewer passes queryOsColorScheme.
+  OsSchemeProbe osThemeProbe;
+  int osThemePollMs = 3000;
+  // WP-67e (screenshots): once the Call Graph has its tree, select the function at the end of its heaviest
+  // chain (re-done for a while as symbols resolve), so that the Call Graph and Source panels show content.
+  bool demoSelect = false;
 };
 
 // Thread-safe: pure function. WP-67: the options of the headless entry points (--selftest and --bench): no
@@ -173,7 +182,14 @@ class App {
   // Main-thread only. Delivers pending symbol events from the workers: bumps the symbol generation and asks
   // for a redraw. Called by frame() and by the idle path of run(). Returns true if anything was delivered.
   bool pumpSymbolEvents();
+  // Main-thread only. The theme choice (System / Light / Dark); applied at the next frame.
   void setTheme(ThemeKind theme);
+  // Main-thread only. The look in use now: Settings::theme resolved against the OS preference.
+  ColorScheme colorScheme() const { return m_scheme; }
+  const ThemePalette& palette() const { return *m_palette; }
+  // Main-thread only. True when the resolved look differs from the one applied (a System theme whose OS
+  // preference changed): the next frame restyles. Called by the idle loop.
+  bool themeChanged() const { return resolveScheme() != m_scheme; }
   void setUserScale(float scale);
 
   // ---- WP-41: capture ----
@@ -258,7 +274,10 @@ class App {
   void finishSymbolSetup();                     // the search-path worker is done
   void notifyDocumentChanged();
   void applyPendingStyle();
+  ColorScheme resolveScheme() const;
   void drawUi();
+  void drawSessionTabs();
+  void demoSelect();
   void drawMenuBar();
   void updateDockLayout();
   void drawStatusBar();
@@ -312,6 +331,9 @@ class App {
   std::shared_ptr<StreamMailbox> m_stream;
   std::string m_lastError;
   bool m_styleDirty = true;
+  ColorScheme m_scheme = ColorScheme::Dark;               // WP-67e: the look applied last
+  const ThemePalette* m_palette = &paletteFor(m_scheme);  // its palette
+  std::unique_ptr<OsThemeWatcher> m_osTheme;              // null without AppOptions::osThemeProbe
   bool m_quit = false;
   uint64_t m_frameCount = 0;
   int m_redrawFrames = 3;  // frames still to draw after the last input (ImGui needs a few to settle)
@@ -324,6 +346,8 @@ class App {
   PathPicker m_pathPicker;
 
   bool m_paletteRequested = false;
+  const void* m_demoTree = nullptr;  // WP-67e: the call-graph tree the last demo selection came from
+  uint32_t m_demoSelections = 0;
   bool m_layoutChecked = false;         // WP-67c: default dock layout built, or a saved one found
   bool m_layoutResetRequested = false;  // WP-67c: View > Reset layout
   bool m_paletteOpen = false;

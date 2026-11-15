@@ -26,14 +26,9 @@ constexpr auto kThrottleWhileResolving = std::chrono::milliseconds(200);
 constexpr size_t kSearchBufferSize = 256;
 constexpr float kPitchPadding = 2.0f;
 
-// Colours (ImGui packing 0xAABBGGRR). Running / ready match the timeline's state colours.
-constexpr ImU32 kRunningColor = IM_COL32(70, 190, 90, 255);
-constexpr ImU32 kReadyColor = IM_COL32(240, 170, 30, 255);
-constexpr ImU32 kWaitingColor = IM_COL32(215, 70, 65, 255);
-constexpr ImU32 kBarColor = IM_COL32(90, 150, 230, 255);
-
+// Colours come from the active theme (WP-67e): running / ready / waiting match the timeline's state colours.
 ImU32 heatColor(float heat) {
-  return IM_COL32(255, 140, 20, static_cast<int>(heat * 120.0f));
+  return rgbaWithAlpha(currentPalette().highlight, static_cast<uint8_t>(heat * 120.0f));
 }
 
 }  // namespace
@@ -558,7 +553,7 @@ void SourcePanel::draw(const PanelContext& context, bool* open) {
       ImGui::SameLine();
       ImGui::TextUnformatted("Loading source...");
     } else if (!m_message.empty()) {
-      ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "%s", m_message.c_str());
+      ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().error), "%s", m_message.c_str());
     } else {
       ImGui::TextDisabled("Select a function in the Call Graph or the Function List to see its source.");
     }
@@ -711,14 +706,15 @@ void SourcePanel::drawTimeCells(const RowContext& c, float x, const LineTime& t,
   const double denom = denominator ? static_cast<double>(denominator) : 1.0;
   const float barW = static_cast<float>(L.bar - 1) * c.charW;
   const float w = std::max(1.0f, barW * static_cast<float>(static_cast<double>(t.ticks) / denom));
-  c.dl->AddRectFilled(ImVec2(x, y0), ImVec2(x + std::min(w, barW), y1), kBarColor);
+  c.dl->AddRectFilled(ImVec2(x, y0), ImVec2(x + std::min(w, barW), y1), currentPalette().barFill);
   float cx = x + static_cast<float>(L.bar) * c.charW;
   if (!L.disassembly) {
     const float miniW = static_cast<float>(L.mini - 1) * c.charW;
     float mx = cx;
     const double tt = static_cast<double>(t.ticks);
-    const std::array<std::pair<uint64_t, ImU32>, 3> parts{
-        {{t.running, kRunningColor}, {t.ready, kReadyColor}, {t.waiting, kWaitingColor}}};
+    const std::array<std::pair<uint64_t, ImU32>, 3> parts{{{t.running, currentPalette().states.running},
+                                                           {t.ready, currentPalette().states.ready},
+                                                           {t.waiting, currentPalette().states.syncWait}}};
     for (const auto& [ticks, color] : parts) {
       if (ticks == 0) continue;
       const float pw = std::max(1.0f, miniW * static_cast<float>(static_cast<double>(ticks) / tt));
@@ -758,10 +754,11 @@ void SourcePanel::drawRow(const RowContext& c, size_t rowIndex) {
   // Background: function extent tint, heat, selection.
   const ImVec2 bgMin(c.fixedLeft, y0), bgMax(c.visRight, y1);
   if (!ins && v.firstLine != 0 && row.line >= v.firstLine && row.line <= v.lastLine)
-    dl->AddRectFilled(bgMin, bgMax, IM_COL32(128, 128, 170, 16));
-  if (ins && c.mode == Mode::Mixed) dl->AddRectFilled(bgMin, bgMax, IM_COL32(100, 140, 200, 18));
+    dl->AddRectFilled(bgMin, bgMax, rgbaWithAlpha(currentPalette().textMuted, 20));
+  if (ins && c.mode == Mode::Mixed)
+    dl->AddRectFilled(bgMin, bgMax, rgbaWithAlpha(currentPalette().accent, 18));
   if (time.ticks != 0) dl->AddRectFilled(bgMin, bgMax, heatColor(source::heatOf(time.ticks, maxTicks)));
-  if (rowIndex == m_selectedRow) dl->AddRectFilled(bgMin, bgMax, IM_COL32(90, 140, 255, 55));
+  if (rowIndex == m_selectedRow) dl->AddRectFilled(bgMin, bgMax, rgbaWithAlpha(currentPalette().accent, 70));
 
   // Code column (clipped to the right of the fixed columns).
   const float codeX = c.originX + c.fixedW;

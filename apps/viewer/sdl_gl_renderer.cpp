@@ -8,6 +8,7 @@
 #include <imgui_impl_sdl2.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace tachyon::viewer {
 
@@ -31,7 +32,21 @@ class SdlGlRenderer final : public IRenderer {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
 
-    m_window = SDL_CreateWindow("Tachyon", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
+    // Initial window size: 1600x900, or TACHYON_WINDOW_SIZE=<w>x<h> (a developer hook, e.g. for screenshots).
+    int width = 1600, height = 900;
+    if (const char* size = SDL_getenv("TACHYON_WINDOW_SIZE")) {
+      char* end = nullptr;
+      const long w = std::strtol(size, &end, 10);
+      if (end != size && (*end == 'x' || *end == 'X')) {
+        char* end2 = nullptr;
+        const long h = std::strtol(end + 1, &end2, 10);
+        if (end2 != end + 1 && w >= 320 && w <= 16384 && h >= 240 && h <= 16384) {
+          width = static_cast<int>(w);
+          height = static_cast<int>(h);
+        }
+      }
+    }
+    m_window = SDL_CreateWindow("Tachyon", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
                                 SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!m_window) {
       error = std::string("SDL_CreateWindow failed: ") + SDL_GetError();

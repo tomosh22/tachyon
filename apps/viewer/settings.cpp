@@ -15,7 +15,12 @@ namespace tachyon::viewer {
 using json = nlohmann::json;
 
 const char* themeName(ThemeKind theme) {
-  return theme == ThemeKind::Light ? "light" : "dark";
+  switch (theme) {
+    case ThemeKind::Light: return "light";
+    case ThemeKind::Dark: return "dark";
+    case ThemeKind::System: break;
+  }
+  return "system";
 }
 
 namespace {
@@ -148,12 +153,25 @@ Settings Settings::load(const std::filesystem::path& path) {
       TACHYON_LOG_WARN("settings: 'cacheDir' is not a string, using default");
     }
   }
+  // WP-67e: "settingsVersion" 2 marks a file written with the System theme. Before it, "dark" was the default
+  // and not a choice, so an older file's "dark" becomes System ("light" stays an explicit choice).
+  const auto versionIt = j.find("settingsVersion");
+  const bool legacyTheme =
+      !(versionIt != j.end() && versionIt->is_number_integer() && versionIt->get<int64_t>() >= 2);
   if (const auto it = j.find("theme"); it != j.end()) {
-    if (it->is_string() && it->get<std::string>() == "light") {
+    const std::string name = it->is_string() ? it->get<std::string>() : std::string();
+    if (name == "light") {
       s.theme = ThemeKind::Light;
-    } else if (!it->is_string() || it->get<std::string>() != "dark") {
-      TACHYON_LOG_WARN("settings: unknown theme, using dark");
+    } else if (name == "dark") {
+      s.theme = legacyTheme ? ThemeKind::System : ThemeKind::Dark;
+    } else if (name != "system") {
+      TACHYON_LOG_WARN("settings: unknown theme, using system");
     }
+  }
+  s.layoutVersion = 0;  // a file without the key predates the versioned default layout
+  if (const auto it = j.find("layoutVersion");
+      it != j.end() && it->is_number_integer() && it->get<int64_t>() >= 0) {
+    s.layoutVersion = static_cast<uint32_t>(std::min<int64_t>(it->get<int64_t>(), 1'000'000));
   }
   if (const auto it = j.find("uiScale"); it != j.end()) {
     if (it->is_number()) {
@@ -218,7 +236,9 @@ Result<void> Settings::save(const std::filesystem::path& path) const {
   for (const SourcePathMapping& m : sourcePathMappings) mappings.push_back({{"from", m.from}, {"to", m.to}});
   j["sourcePathMappings"] = mappings;
   j["sourceRoots"] = sourceRoots;
+  j["settingsVersion"] = 2;
   j["theme"] = themeName(theme);
+  j["layoutVersion"] = layoutVersion;
   j["uiScale"] = uiScale;
   j["recentFiles"] = recentFiles;
   j["blendScopes"] = blendScopes;

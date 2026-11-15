@@ -3,6 +3,7 @@
 
 #include "viewer/selection_bus.h"
 #include "viewer/settings.h"
+#include "viewer/theme.h"
 
 #include <cstdint>
 #include <memory>
@@ -46,6 +47,9 @@ struct PanelContext {
   // WP-64: the memory ceiling in bytes (0 = none) for panels that build big derived data (the timeline index
   // budgets its levels with it).
   uint64_t memoryCeilingBytes = 0;
+  // WP-67e: the palette of the active theme (App-owned, stable until the theme changes). Null in bare test
+  // setups: use paletteOf().
+  const ThemePalette* palette = nullptr;
   // Hook behind requestRedraw(); set by App.
   void (*redrawFn)(void*) = nullptr;
   void* redrawUser = nullptr;
@@ -55,6 +59,11 @@ struct PanelContext {
     if (redrawFn) redrawFn(redrawUser);
   }
 };
+
+// Main-thread only. The palette of `context`; the one of the current ImGui context when it has none.
+inline const ThemePalette& paletteOf(const PanelContext& context) {
+  return context.palette != nullptr ? *context.palette : currentPalette();
+}
 
 class IPanel {
  public:

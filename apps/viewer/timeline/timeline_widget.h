@@ -31,6 +31,14 @@
 
 namespace tachyon::viewer::timeline {
 
+// WP-67e: what a drag on the graph does (the small navigation toolbar above the thread labels).
+enum class NavMode : uint8_t {
+  Pointer,  // click selects, drag pans, Shift+drag selects a range (the default)
+  Zoom,     // drag selects a range and zooms to it on release
+  Pan,      // drag pans, clicks select nothing
+  Measure   // drag selects a range, kept and measured in the status line
+};
+
 struct TimelineOptions {
   SortKey sortKey = SortKey::RunningTime;
   bool reverseSort = false;
@@ -40,7 +48,7 @@ struct TimelineOptions {
   bool showFrameMarks = true;
   // Width of one query column in pixels (1 = a query column per pixel). Bigger is cheaper to draw.
   uint32_t columnPixels = 2;
-  float gutterWidth = 150.0f;
+  float gutterWidth = 200.0f;
   // Cap on the flame depths shown for an expanded row.
   uint32_t maxFlameDepths = 40;
   // Test hook: build the LOD synchronously on the first draw instead of on the JobQueue.
@@ -147,6 +155,9 @@ class TimelineWidget {
   void clearSelection(SelectionBus* bus);
   // Rows in display order (empty before the document is known).
   const std::vector<ThreadIdx>& rowOrder() const;
+  // WP-67e: what a drag on the graph does (the navigation toolbar above the labels).
+  NavMode navMode() const { return m_navMode; }
+  void setNavMode(NavMode mode) { m_navMode = mode; }
   void setExpanded(ThreadIdx thread, bool expanded);
   void setPinned(ThreadIdx thread, bool pinned);
   void setHidden(ThreadIdx thread, bool hidden);
@@ -211,6 +222,7 @@ class TimelineWidget {
   void startBuild(const PanelContext& context);
   void resetDocument();
   void drawToolbar(const PanelContext& context);
+  void drawNavToolbar(const PanelContext& context, float x0, float y0, float x1, float y1);
   void drawStatusLine(const PanelContext& context);
   void drawOverview(const PanelContext& context);
   void drawHeader(const PanelContext& context);
@@ -244,6 +256,9 @@ class TimelineWidget {
   uint32_t flameDepthFor(ThreadIdx thread) const;
 
   TimelineOptions m_options;
+  // WP-67e: the active theme's palette (set at the start of every draw).
+  const ThemePalette* m_palette = nullptr;
+  NavMode m_navMode = NavMode::Pointer;
   TimelineFrameStats m_stats;
   TimelineScreenGeometry m_geometry;
   RowGeometry m_rowGeometry;

@@ -3,6 +3,7 @@
 #include "viewer/app.h"
 #include "viewer/bench.h"
 #include "viewer/cli_args.h"
+#include "viewer/os_theme.h"
 #include "viewer/paths.h"
 
 #include <SDL_main.h>
@@ -59,6 +60,9 @@ int main(int argc, char** argv) {
     return rc;
   }
 
+  // WP-67e: the interactive viewer follows the OS light / dark preference (ThemeKind::System).
+  options.osThemeProbe = &queryOsColorScheme;
+  options.demoSelect = cli.demoSelect;
   App app(makeSdlGlRenderer(), options);
   std::string error;
   if (!app.init(error)) {

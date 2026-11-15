@@ -67,6 +67,7 @@ TEST_F(SettingsTest, MissingFieldsAreDefaulted) {
   Settings expected;
   expected.theme = ThemeKind::Light;
   expected.recentFiles = {"x.tachyon"};
+  expected.layoutVersion = 0;  // WP-67e: a file without the key predates the versioned default layout
   EXPECT_EQ(s, expected);
 }
 
@@ -75,7 +76,7 @@ TEST_F(SettingsTest, WrongTypesAreDefaultedPerField) {
   write(file, R"({"theme":5,"uiScale":"big","symbolServers":"x","cacheDir":"/c",
                   "sourcePathMappings":[{"from":"a","to":"b"},{"from":1},"junk"]})");
   const Settings s = Settings::load(file);
-  EXPECT_EQ(s.theme, ThemeKind::Dark);
+  EXPECT_EQ(s.theme, ThemeKind::System);  // WP-67e: the default is now System (was Dark)
   EXPECT_EQ(s.uiScale, 1.0f);
   EXPECT_EQ(s.symbolServers, Settings{}.symbolServers);
   EXPECT_EQ(s.cacheDir, "/c");

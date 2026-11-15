@@ -1,4 +1,5 @@
 #include "viewer/stats/function_stats_panel.h"
+#include "viewer/theme.h"
 
 #include "viewer/builtin_panels.h"
 #include "viewer/common/function_names.h"
@@ -46,7 +47,8 @@ const char* kindLabel(st::EntryKind kind) {
 }
 
 ImVec4 kindColor(st::EntryKind kind) {
-  return kind == st::EntryKind::Scope ? ImVec4(0.55f, 0.85f, 0.55f, 1.0f) : ImVec4(0.55f, 0.75f, 1.0f, 1.0f);
+  const ThemePalette& p = currentPalette();
+  return ImGui::ColorConvertU32ToFloat4(kind == st::EntryKind::Scope ? p.states.running : p.info);
 }
 
 }  // namespace
@@ -485,6 +487,14 @@ void FunctionStatsPanel::draw(const PanelContext& context, bool* open) {
     ImGui::End();
     return;
   }
+  // A wide, short panel (the top strip of the default layout) lays its parts side by side; anything taller or
+  // narrower keeps the stacked arrangement.
+  const ImVec2 room = ImGui::GetContentRegionAvail();
+  if (room.x >= ImGui::GetFontSize() * 90.0f && room.y <= ImGui::GetFontSize() * 30.0f) {
+    drawWide(context);
+    ImGui::End();
+    return;
+  }
   drawSearch(context);
   const float em = ImGui::GetFontSize();
   const float resultsHeight = std::max(em * 9.0f, ImGui::GetContentRegionAvail().y * 0.30f);
@@ -542,7 +552,8 @@ void FunctionStatsPanel::drawSearch(const PanelContext& context) {
       common::drawSpinner(em * 0.3f, ImGui::GetColorU32(ImGuiCol_PlotHistogram));
     }
   }
-  if (!m_message.empty()) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "%s", m_message.c_str());
+  if (!m_message.empty())
+    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().error), "%s", m_message.c_str());
 }
 
 void FunctionStatsPanel::drawResults(const PanelContext& context, float height) {
@@ -579,7 +590,8 @@ void FunctionStatsPanel::drawResults(const PanelContext& context, float height) 
           ImGui::TableSetColumnIndex(1);
           const bool chosen = m_selected && m_selected->key == e.key;
           if (chosen) {
-            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f), "%s", e.name.c_str());
+            ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().highlight), "%s",
+                               e.name.c_str());
           } else {
             ImGui::TextUnformatted(e.name.c_str());
           }
@@ -655,18 +667,18 @@ void FunctionStatsPanel::drawStats(const PanelContext& context) {
   drawInstanceNav(context);
 }
 
-void FunctionStatsPanel::drawHistogram(double clockHz) {
+void FunctionStatsPanel::drawHistogram(double clockHz, float plotHeight) {
   const analysis::Stats& s = *m_result->stats;
   const float em = ImGui::GetFontSize();
   const float width = std::max(ImGui::GetContentRegionAvail().x, em * 10.0f);
-  const float plotH = em * 6.0f, labelH = em * 1.4f;
+  const float plotH = plotHeight > 0.0f ? plotHeight : em * 6.0f, labelH = em * 1.4f;
   const ImVec2 p = ImGui::GetCursorScreenPos();
   ImGui::InvisibleButton("##statshist", ImVec2(width, plotH + labelH));
   const bool hovered = ImGui::IsItemHovered();
   ImDrawList* dl = ImGui::GetWindowDrawList();
   const st::PlotRect area{p.x, p.y, p.x + width, p.y + plotH};
   m_histogram = st::layoutHistogram(s, area);
-  dl->AddRectFilled(ImVec2(area.x0, area.y0), ImVec2(area.x1, area.y1), IM_COL32(24, 24, 28, 255));
+  dl->AddRectFilled(ImVec2(area.x0, area.y0), ImVec2(area.x1, area.y1), currentPalette().laneBg);
   const ImVec2 mouse = ImGui::GetIO().MousePos;
   const st::HistogramBar* hot = nullptr;
   for (const st::HistogramBar& bar : m_histogram.bars) {
@@ -674,7 +686,7 @@ void FunctionStatsPanel::drawHistogram(double clockHz) {
     if (over) hot = &bar;
     if (bar.count == 0) continue;
     dl->AddRectFilled(ImVec2(bar.x0, bar.y0), ImVec2(bar.x1, bar.y1),
-                      over ? IM_COL32(255, 200, 90, 255) : IM_COL32(90, 150, 230, 255));
+                      over ? currentPalette().highlight : currentPalette().barFill);
   }
   // Axis labels: the lower edge of the first bucket, then every few buckets as far as the text fits.
   if (!m_histogram.bars.empty()) {
@@ -684,10 +696,10 @@ void FunctionStatsPanel::drawHistogram(double clockHz) {
     for (size_t i = 0; i < m_histogram.bars.size(); i += step) {
       const st::HistogramBar& bar = m_histogram.bars[i];
       const std::string label = st::formatDuration(st::bucketLowerTicks(bar.bucket), clockHz);
-      dl->AddText(ImVec2(bar.x0, area.y1 + 2.0f), IM_COL32(170, 170, 175, 255), label.c_str());
+      dl->AddText(ImVec2(bar.x0, area.y1 + 2.0f), currentPalette().textMuted, label.c_str());
     }
     const std::string maxLabel = std::to_string(m_histogram.maxCount);
-    dl->AddText(ImVec2(area.x0 + 3.0f, area.y0 + 1.0f), IM_COL32(170, 170, 175, 255), maxLabel.c_str());
+    dl->AddText(ImVec2(area.x0 + 3.0f, area.y0 + 1.0f), currentPalette().textMuted, maxLabel.c_str());
   }
   if (hot) {
     const double lo = st::bucketLowerTicks(hot->bucket);
@@ -710,20 +722,20 @@ void FunctionStatsPanel::drawBoxPlot(double clockHz) {
   m_boxPlot = st::layoutBoxPlot(s, area);
   if (!m_boxPlot.valid) return;
   const st::BoxPlotLayout& b = m_boxPlot;
-  const ImU32 line = IM_COL32(210, 210, 215, 255);
+  const ImU32 line = currentPalette().text;
   dl->AddLine(ImVec2(b.xMin, b.yMid), ImVec2(b.xQ1, b.yMid), line, 1.5f);
   dl->AddLine(ImVec2(b.xQ3, b.yMid), ImVec2(b.xMax, b.yMid), line, 1.5f);
   dl->AddLine(ImVec2(b.xMin, b.yTop), ImVec2(b.xMin, b.yBottom), line, 1.5f);
   dl->AddLine(ImVec2(b.xMax, b.yTop), ImVec2(b.xMax, b.yBottom), line, 1.5f);
   dl->AddRectFilled(ImVec2(b.xQ1, b.yTop), ImVec2(std::max(b.xQ3, b.xQ1 + 1.0f), b.yBottom),
-                    IM_COL32(90, 150, 230, 140));
+                    rgbaWithAlpha(currentPalette().barFill, 140));
   dl->AddRect(ImVec2(b.xQ1, b.yTop), ImVec2(std::max(b.xQ3, b.xQ1 + 1.0f), b.yBottom), line, 0.0f, 0, 1.5f);
-  dl->AddLine(ImVec2(b.xMedian, b.yTop), ImVec2(b.xMedian, b.yBottom), IM_COL32(255, 200, 90, 255), 2.5f);
-  dl->AddCircleFilled(ImVec2(b.xMean, b.yMid), 3.0f, IM_COL32(255, 120, 120, 255));
+  dl->AddLine(ImVec2(b.xMedian, b.yTop), ImVec2(b.xMedian, b.yBottom), currentPalette().highlight, 2.5f);
+  dl->AddCircleFilled(ImVec2(b.xMean, b.yMid), 3.0f, currentPalette().error);
   const std::string lo = st::formatDuration(s.min, clockHz), hi = st::formatDuration(s.max, clockHz);
-  dl->AddText(ImVec2(area.x0, area.y1 + 2.0f), IM_COL32(170, 170, 175, 255), lo.c_str());
+  dl->AddText(ImVec2(area.x0, area.y1 + 2.0f), currentPalette().textMuted, lo.c_str());
   const float hiW = ImGui::CalcTextSize(hi.c_str()).x;
-  dl->AddText(ImVec2(area.x1 - hiW, area.y1 + 2.0f), IM_COL32(170, 170, 175, 255), hi.c_str());
+  dl->AddText(ImVec2(area.x1 - hiW, area.y1 + 2.0f), currentPalette().textMuted, hi.c_str());
   if (ImGui::IsItemHovered()) {
     ImGui::SetTooltip(
         "min %s  p25 %s  median %s  p75 %s  max %s  mean %s", lo.c_str(),
@@ -759,6 +771,139 @@ void FunctionStatsPanel::drawInstanceNav(const PanelContext& context) {
   } else {
     ImGui::Text("%zu instances highlighted in the timeline", n);
   }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// WP-67e: the wide arrangement
+
+void FunctionStatsPanel::drawWide(const PanelContext& context) {
+  const float em = ImGui::GetFontSize();
+  const ImVec2 avail = ImGui::GetContentRegionAvail();
+  const float gap = ImGui::GetStyle().ItemSpacing.x;
+  const float listW = avail.x * 0.30f;
+  const float statsW = std::clamp(avail.x * 0.17f, em * 12.0f, em * 22.0f);
+  const float histW = std::clamp(avail.x * 0.17f, em * 12.0f, em * 22.0f);
+  const float barsW = std::max(avail.x - listW - statsW - histW - gap * 3.0f, em * 8.0f);
+  const ImGuiWindowFlags quiet = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+
+  if (ImGui::BeginChild("##sw_list", ImVec2(listW, avail.y), ImGuiChildFlags_None, quiet)) {
+    drawSearch(context);
+    drawResults(context, std::max(ImGui::GetContentRegionAvail().y, em * 3.0f));
+  }
+  ImGui::EndChild();
+  ImGui::SameLine();
+
+  const bool haveStats = m_selected && m_result && m_result->stats && m_result->stats->count > 0;
+  if (ImGui::BeginChild("##sw_bars", ImVec2(barsW, avail.y), ImGuiChildFlags_Borders, quiet)) {
+    if (!m_selected) {
+      ImGui::TextDisabled("Type to search, Up / Down + Enter to choose. Ctrl+F focuses the search box.");
+    } else {
+      ImGui::TextColored(kindColor(m_selected->kind), "%s", kindLabel(m_selected->kind));
+      ImGui::SameLine();
+      ImGui::TextUnformatted(m_selected->name.c_str());
+      if (m_statsQuery.pending()) {
+        ImGui::SameLine();
+        common::drawSpinner(em * 0.4f, ImGui::GetColorU32(ImGuiCol_PlotHistogram));
+      }
+      if (haveStats) {
+        drawInstanceNav(context);
+        drawInstanceBars(context, std::max(ImGui::GetContentRegionAvail().y, em * 2.0f));
+      } else if (!m_statsQuery.pending()) {
+        ImGui::TextDisabled("No instances in the selected time range.");
+      }
+    }
+  }
+  ImGui::EndChild();
+  ImGui::SameLine();
+
+  if (ImGui::BeginChild("##sw_hist", ImVec2(histW, avail.y), ImGuiChildFlags_Borders, quiet)) {
+    ImGui::TextUnformatted("Histogram");
+    if (haveStats)
+      drawHistogram(m_clockHz, std::max(ImGui::GetContentRegionAvail().y - em * 1.6f, em * 2.0f));
+  }
+  ImGui::EndChild();
+  ImGui::SameLine();
+
+  if (ImGui::BeginChild("##sw_stats", ImVec2(0.0f, avail.y), ImGuiChildFlags_Borders)) {
+    ImGui::TextUnformatted("Statistics");
+    if (haveStats) drawStatisticsBox(m_clockHz);
+  }
+  ImGui::EndChild();
+}
+
+// One bar per instance (bucketed to at most one bar per two pixels), the height being the duration; the
+// current instance is highlighted and a click on a bar navigates to its longest instance.
+void FunctionStatsPanel::drawInstanceBars(const PanelContext& context, float height) {
+  if (!m_result || !m_result->instances || m_result->instances->empty()) {
+    ImGui::TextDisabled("No instances.");
+    return;
+  }
+  const std::vector<analysis::Instance>& all = *m_result->instances;
+  const ThemePalette& pal = currentPalette();
+  const float width = std::max(ImGui::GetContentRegionAvail().x, 20.0f);
+  const ImVec2 p0 = ImGui::GetCursorScreenPos();
+  ImGui::InvisibleButton("##instbars", ImVec2(width, height));
+  const bool hovered = ImGui::IsItemHovered();
+  const bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+  dl->AddRectFilled(p0, ImVec2(p0.x + width, p0.y + height), pal.laneBg);
+  const size_t n = all.size();
+  const size_t columns = std::max<size_t>(1, std::min(n, static_cast<size_t>(width / 2.0f)));
+  uint64_t maxDuration = 1;
+  for (const analysis::Instance& i : all) maxDuration = std::max(maxDuration, i.end - i.begin);
+  const float colW = width / static_cast<float>(columns);
+  const float mouseX = ImGui::GetIO().MousePos.x;
+  const size_t hotColumn =
+      hovered ? static_cast<size_t>(std::clamp((mouseX - p0.x) / colW, 0.0f, static_cast<float>(columns - 1)))
+              : columns;
+  size_t hotInstance = SIZE_MAX;
+  for (size_t c = 0; c < columns; ++c) {
+    const size_t first = c * n / columns, last = std::max(first + 1, (c + 1) * n / columns);
+    size_t best = first;
+    uint64_t bestDuration = 0;
+    for (size_t i = first; i < last && i < n; ++i) {
+      const uint64_t d = all[i].end - all[i].begin;
+      if (d >= bestDuration) {
+        bestDuration = d;
+        best = i;
+      }
+    }
+    const bool current = m_current && *m_current >= first && *m_current < last;
+    const float h =
+        std::max(1.0f, (height - 2.0f) * static_cast<float>(bestDuration) / static_cast<float>(maxDuration));
+    ImU32 color = current ? pal.highlight : pal.barFill;
+    if (c == hotColumn) {
+      color = pal.accent;
+      hotInstance = best;
+    }
+    dl->AddRectFilled(
+        ImVec2(p0.x + static_cast<float>(c) * colW, p0.y + height - h),
+        ImVec2(p0.x + static_cast<float>(c + 1) * colW - (colW > 3.0f ? 1.0f : 0.0f), p0.y + height), color);
+  }
+  if (hotInstance != SIZE_MAX) {
+    const analysis::Instance& inst = all[hotInstance];
+    ImGui::SetTooltip("Instance %zu of %zu: %s", hotInstance + 1, n,
+                      st::formatDuration(static_cast<double>(inst.end - inst.begin), m_clockHz).c_str());
+    if (clicked) goToInstance(context, static_cast<uint32_t>(hotInstance));
+  }
+}
+
+// Count / total / average / median (and the rest of the summary) as label : value rows.
+void FunctionStatsPanel::drawStatisticsBox(double clockHz) {
+  const analysis::Stats& s = *m_result->stats;
+  const auto row = [&](const char* label, const std::string& value) {
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(ImGui::CalcTextSize("Average ").x + 8.0f);
+    ImGui::TextUnformatted(value.c_str());
+  };
+  row("Count", std::to_string(s.count));
+  row("Total", st::formatDuration(static_cast<double>(s.totalTicks), clockHz));
+  row("Average", st::formatDuration(s.mean, clockHz));
+  row("Median", st::formatDuration(s.median, clockHz));
+  row("Min", st::formatDuration(s.min, clockHz));
+  row("p25", st::formatDuration(s.p25, clockHz));
+  row("p75", st::formatDuration(s.p75, clockHz));
+  row("Max", st::formatDuration(s.max, clockHz));
 }
 
 // ---------------------------------------------------------------------------------------------------------

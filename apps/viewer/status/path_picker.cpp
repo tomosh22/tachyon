@@ -1,4 +1,5 @@
 #include "viewer/status/path_picker.h"
+#include "viewer/theme.h"
 
 #include "viewer/paths.h"
 
@@ -64,7 +65,8 @@ std::optional<std::filesystem::path> PathPicker::draw() {
       }
     }
     if (!m_listing.error.empty())
-      ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", m_listing.error.c_str());
+      ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(currentPalette().error), "%s",
+                         m_listing.error.c_str());
     const float footer = ImGui::GetFrameHeightWithSpacing() * 1.5f;
     if (ImGui::BeginChild("##entries", ImVec2(0.0f, -footer), ImGuiChildFlags_Borders)) {
       for (size_t i = 0; i < m_listing.entries.size(); ++i) {

@@ -27,6 +27,14 @@ TEST(CliArgs, ParsesPositionalConfigAndSelftest) {
   EXPECT_TRUE(parseCliArgs({"-h"}).help);
 }
 
+TEST(CliArgs, DemoSelectIsAFlagForScreenshots) {  // WP-67e
+  EXPECT_FALSE(parseCliArgs({"t.tachyon"}).demoSelect);
+  const CliArgs a = parseCliArgs({"--demo-select", "t.tachyon"});
+  EXPECT_TRUE(a.error.empty());
+  EXPECT_TRUE(a.demoSelect);
+  EXPECT_EQ(a.openPath, fs::path("t.tachyon"));
+}
+
 TEST(CliArgs, RejectsBadInput) {
   EXPECT_FALSE(parseCliArgs({"--selftest"}).error.empty());
   EXPECT_FALSE(parseCliArgs({"--bogus"}).error.empty());

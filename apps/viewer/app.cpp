@@ -9,10 +9,12 @@
 #include "symbols/dia/dia_provider.h"
 #include "symbols/dwarf/dwarf_provider.h"
 #include "viewer/builtin_panels.h"
+#include "viewer/callgraph/callgraph_panel.h"
 #include "viewer/capture/capture_controller.h"
 #include "viewer/capture/session_explorer_panel.h"
 #include "viewer/paths.h"
 #include "viewer/source/source_panel.h"
+#include "viewer/stats/function_stats_panel.h"
 #include "viewer/status/symbol_paths.h"
 #include "viewer/status/symbols_panel.h"
 #include "viewer/theme.h"
@@ -59,6 +61,7 @@ App::App(std::unique_ptr<IRenderer> renderer, AppOptions options)
       m_toasts(m_options.toastClock) {}
 
 App::~App() {
+  m_osTheme.reset();  // joins the probe thread (it wakes the renderer) before the renderer is shut down
   m_jobs.cancelAll();
   m_capture.reset();  // joins the agent worker (it wakes the renderer) before the renderer is shut down
   m_live.reset();     // joins the live snapshot worker and the symbol workers of the live services
@@ -99,6 +102,11 @@ bool App::init(std::string& error) {
     return false;
   }
   m_rendererUp = true;
+  if (m_options.osThemeProbe) {
+    // Never on the UI thread: the probe may run child processes. Until it answers, System means dark.
+    m_osTheme = std::make_unique<OsThemeWatcher>(m_options.osThemeProbe, m_options.osThemePollMs,
+                                                 ColorScheme::Dark, [this] { m_renderer->wake(); });
+  }
 
   m_panels.add(makeTraceInfoPanel());
   m_panels.add(makeThreadsTimelinePanel());
@@ -106,7 +114,7 @@ bool App::init(std::string& error) {
   m_panels.add(makeCallGraphPanel());
   m_panels.add(makeFunctionListPanel());
   m_panels.add(makeButterflyPanel());
-  m_panels.add(makeFunctionStatsPanel(), false);  // opened by Ctrl+F or from the View menu
+  m_panels.add(makeFunctionStatsPanel());  // the top strip of the default layout (Ctrl+F focuses its search)
   {
     SymbolsPanelHost host;
     host.addSymbolPath = [this] { m_commands.run("symbols.addPath"); };
@@ -130,7 +138,7 @@ bool App::init(std::string& error) {
       requestRedraw();
     };
     host.toast = [this](ToastLevel level, std::string text) { toast(level, std::move(text)); };
-    m_panels.add(makeSourcePanel(std::move(host)), false);  // opened by "Show source" requests
+    m_panels.add(makeSourcePanel(std::move(host)));  // bottom right of the default layout
   }
   {
     // WP-41: the agent connection / capture dialogs, the Capture panel and the Session Explorer.
@@ -229,6 +237,7 @@ PanelContext App::panelContext() const {
   c.symbols = m_document ? m_document->symbols().get() : nullptr;
   c.symbolGeneration = m_symbolGeneration;
   c.memoryCeilingBytes = memoryCeiling();
+  c.palette = m_palette;
   c.redrawFn = [](void* app) { static_cast<App*>(app)->requestRedraw(); };
   c.redrawUser = const_cast<App*>(this);
   return c;
@@ -245,8 +254,13 @@ void App::registerCommands() {
                   }});
   m_commands.add({"file.close", "File: Close Trace", "", [this] { closeDocument(); }});
   m_commands.add({"app.quit", "File: Quit", "Ctrl+Q", [this] { requestQuit(); }});
-  m_commands.add({"view.theme.toggle", "View: Toggle Dark/Light Theme", "", [this] {
-                    setTheme(m_settings.theme == ThemeKind::Dark ? ThemeKind::Light : ThemeKind::Dark);
+  // Cycles System -> Light -> Dark -> System.
+  m_commands.add({"view.theme.toggle", "View: Cycle Theme (System / Light / Dark)", "", [this] {
+                    switch (m_settings.theme) {
+                      case ThemeKind::System: setTheme(ThemeKind::Light); break;
+                      case ThemeKind::Light: setTheme(ThemeKind::Dark); break;
+                      case ThemeKind::Dark: setTheme(ThemeKind::System); break;
+                    }
                   }});
   m_commands.add(
       {"view.scale.up", "View: Increase UI Scale", "", [this] { setUserScale(m_settings.uiScale * 1.1f); }});
@@ -309,10 +323,16 @@ void App::setUserScale(float scale) {
   m_styleDirty = true;
 }
 
+ColorScheme App::resolveScheme() const {
+  return resolveTheme(m_settings.theme, m_osTheme ? m_osTheme->current() : ColorScheme::Dark);
+}
+
 void App::applyPendingStyle() {
-  if (!m_styleDirty) return;
+  if (!m_styleDirty && resolveScheme() == m_scheme) return;
   m_styleDirty = false;
-  applyTheme(m_settings.theme, effectiveUiScale(m_renderer->dpiScale(), m_settings.uiScale));
+  m_scheme = resolveScheme();
+  m_palette = &paletteFor(m_scheme);
+  applyTheme(m_scheme, effectiveUiScale(m_renderer->dpiScale(), m_settings.uiScale));
 }
 
 void App::saveSettings() {
@@ -945,6 +965,7 @@ bool App::frame(int waitMs) {
                      Clock::now() - m_lastMemoryCheck >= std::chrono::milliseconds(m_options.memoryCheckMs)))
     checkMemory();
 
+  demoSelect();
   applyPendingStyle();
   m_renderer->beginFrame();
   drawUi();
@@ -973,7 +994,7 @@ int App::run() {
       if (events.quit) m_quit = true;
       // The agent's events wake the loop; a running capture redraws its timer every idle timeout.
       const bool captureWork = m_capture->hasPending() || m_capture->active() || m_live->hasPublished();
-      if (pumpSymbolEvents() || captureWork) frame(0);
+      if (pumpSymbolEvents() || captureWork || themeChanged()) frame(0);
       if (events.hadInput || !events.droppedFiles.empty()) {
         m_redrawFrames = 3;
         for (const std::string& dropped : events.droppedFiles) openFile(pathFromUtf8(dropped));
@@ -1024,6 +1045,7 @@ void App::drawUi() {
   }
 
   drawMenuBar();
+  drawSessionTabs();
   m_banner.update(m_document.get(), m_documentGeneration);
   m_banner.draw();
   drawStatusBar();
@@ -1068,14 +1090,28 @@ void App::updateDockLayout() {
   // the dockspace) and before DockSpaceOverViewport and the panels.
   const ImGuiViewport* viewport = ImGui::GetMainViewport();
   const ImGuiID dockspace = mainDockspaceId(viewport);
-  std::vector<std::string> names;
-  for (const PanelEntry& e : m_panels.entries()) names.emplace_back(e.panel->name());
-  if (!m_layoutChecked) {
-    // First frame only: the ini file is loaded by now. Never replace a saved layout.
-    if (hasSavedLayout(dockspace, names) || buildDefaultDockLayout(dockspace, viewport->WorkSize, names))
-      m_layoutChecked = true;  // else: zero-sized viewport (minimised window), try again next frame
+  // The work area this frame's side bars (menu bar, session tabs, status bar) leave: viewport->WorkSize only
+  // reflects them from the next frame on, which would size the first layout too big by their height.
+  const ImVec2 workSize = static_cast<const ImGuiViewportP*>(viewport)->GetBuildWorkRect().GetSize();
+  std::vector<std::string> names, openNames;
+  for (const PanelEntry& e : m_panels.entries()) {
+    names.emplace_back(e.panel->name());
+    if (e.open) openNames.emplace_back(e.panel->name());
   }
-  if (m_layoutResetRequested && buildDefaultDockLayout(dockspace, viewport->WorkSize, names)) {
+  if (!m_layoutChecked) {
+    // First frame only: the ini file is loaded by now. A layout saved by this version is never replaced; one
+    // saved before the current default layout existed (Settings::layoutVersion) is replaced once.
+    const bool keepSaved =
+        m_settings.layoutVersion >= Settings::kLayoutVersion && hasSavedLayout(dockspace, names);
+    if (keepSaved || buildDefaultDockLayout(dockspace, workSize, names, &openNames)) {
+      m_layoutChecked = true;  // else: zero-sized viewport (minimised window), try again next frame
+      if (m_settings.layoutVersion != Settings::kLayoutVersion) {
+        m_settings.layoutVersion = Settings::kLayoutVersion;
+        if (m_options.persist) saveSettings();
+      }
+    }
+  }
+  if (m_layoutResetRequested && buildDefaultDockLayout(dockspace, workSize, names, &openNames)) {
     m_layoutResetRequested = false;
     m_layoutChecked = true;
   }
@@ -1121,8 +1157,10 @@ void App::drawMenuBar() {
     }
     ImGui::Separator();
     if (ImGui::BeginMenu("Theme")) {
-      if (ImGui::MenuItem("Dark", nullptr, m_settings.theme == ThemeKind::Dark)) setTheme(ThemeKind::Dark);
-      if (ImGui::MenuItem("Light", nullptr, m_settings.theme == ThemeKind::Light)) setTheme(ThemeKind::Light);
+      if (ImGui::RadioButton("System (follow the OS)", m_settings.theme == ThemeKind::System))
+        setTheme(ThemeKind::System);
+      if (ImGui::RadioButton("Light", m_settings.theme == ThemeKind::Light)) setTheme(ThemeKind::Light);
+      if (ImGui::RadioButton("Dark", m_settings.theme == ThemeKind::Dark)) setTheme(ThemeKind::Dark);
       ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Memory limit")) {
@@ -1160,6 +1198,73 @@ void App::drawMenuBar() {
   ImGui::EndMainMenuBar();
 }
 
+// WP-67e: the session tab strip below the toolbar position: one tab per open session (this app has one
+// document, so one tab: the trace file name with a close button; closing it closes the document).
+void App::drawSessionTabs() {
+  const ThemePalette& p = *m_palette;
+  const float em = ImGui::GetFontSize();
+  const float height = em + ImGui::GetStyle().FramePadding.y * 2.0f + 2.0f;
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 0.0f));
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, ImGui::ColorConvertU32ToFloat4(p.chromeBg));
+  const ImGuiWindowFlags flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings;
+  if (ImGui::BeginViewportSideBar("##SessionTabs", ImGui::GetMainViewport(), ImGuiDir_Up, height, flags)) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetWindowPos();
+    const ImVec2 size = ImGui::GetWindowSize();
+    dl->AddLine(ImVec2(origin.x, origin.y + size.y - 1.0f),
+                ImVec2(origin.x + size.x, origin.y + size.y - 1.0f), p.border);
+    if (m_document) {
+      const std::string name = m_document->path().empty() ? std::string("Live capture")
+                                                          : pathToUtf8(m_document->path().filename());
+      const float pad = em * 0.6f;
+      const float closeSize = em * 0.9f;
+      const float width = ImGui::CalcTextSize(name.c_str()).x + pad * 3.0f + closeSize;
+      const ImVec2 a(origin.x + 6.0f, origin.y + 2.0f), b(a.x + width, origin.y + size.y);
+      dl->AddRectFilled(a, b, p.windowBg, 3.0f, ImDrawFlags_RoundCornersTop);
+      dl->AddRect(a, b, p.border, 3.0f, ImDrawFlags_RoundCornersTop);
+      dl->AddLine(ImVec2(a.x + 1.0f, a.y), ImVec2(b.x - 1.0f, a.y), p.accent, 2.0f);
+      dl->AddRectFilled(ImVec2(a.x + 1.0f, b.y - 1.0f), ImVec2(b.x - 1.0f, b.y), p.windowBg);
+      dl->AddText(ImVec2(a.x + pad, a.y + (b.y - a.y - em) * 0.5f), p.text, name.c_str());
+      ImGui::SetCursorScreenPos(ImVec2(b.x - pad - closeSize, a.y + (b.y - a.y - closeSize) * 0.5f));
+      const bool close = ImGui::InvisibleButton("##closesession", ImVec2(closeSize, closeSize));
+      const ImVec2 cmin = ImGui::GetItemRectMin(), cmax = ImGui::GetItemRectMax();
+      if (ImGui::IsItemHovered()) {
+        dl->AddRectFilled(cmin, cmax, p.hover, 2.0f);
+        ImGui::SetTooltip("Close the trace");
+      }
+      const float m = closeSize * 0.3f;
+      dl->AddLine(ImVec2(cmin.x + m, cmin.y + m), ImVec2(cmax.x - m, cmax.y - m), p.textMuted, 1.5f);
+      dl->AddLine(ImVec2(cmin.x + m, cmax.y - m), ImVec2(cmax.x - m, cmin.y + m), p.textMuted, 1.5f);
+      if (close) closeDocument();
+    } else {
+      ImGui::SetCursorPos(ImVec2(8.0f, (height - em) * 0.5f));
+      ImGui::TextDisabled("No trace open. File > Open (Ctrl+O), or drop a .tachyon file here.");
+    }
+  }
+  ImGui::End();
+  ImGui::PopStyleColor();
+  ImGui::PopStyleVar();
+}
+
+void App::demoSelect() {
+  if (!m_options.demoSelect || !m_document || m_demoSelections >= 12) return;
+  for (const PanelEntry& e : m_panels.entries()) {
+    const auto* graph = dynamic_cast<const CallGraphPanel*>(e.panel.get());
+    if (graph == nullptr || !graph->tree() || graph->tree()->children.empty()) continue;
+    if (graph->tree().get() == m_demoTree) continue;  // select once per tree the Call Graph delivers
+    m_demoTree = graph->tree().get();
+    const analysis::NodeAgg* node = graph->tree().get();
+    for (int depth = 0; depth < 3 && !node->children.empty(); ++depth) node = &node->children.front();
+    m_selection.setSelectedFunction(node->key);
+    for (const PanelEntry& other : m_panels.entries()) {  // the statistics strip shows the same function
+      if (auto* stats = dynamic_cast<FunctionStatsPanel*>(other.panel.get()))
+        stats->populateFromSelection(panelContext());
+    }
+    ++m_demoSelections;
+    requestRedraw();
+  }
+}
+
 void App::drawStatusBar() {
   const ImGuiWindowFlags flags =
       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_MenuBar;
@@ -1176,7 +1281,8 @@ void App::drawStatusBar() {
         ImGui::SameLine();
         ImGui::TextDisabled("|");
         ImGui::SameLine();
-        const ImVec4 red(1.0f, 0.4f, 0.4f, 1.0f), amber(1.0f, 0.75f, 0.2f, 1.0f);
+        const ImVec4 red = ImGui::ColorConvertU32ToFloat4(m_palette->error),
+                     amber = ImGui::ColorConvertU32ToFloat4(m_palette->warn);
         const bool hot = (live.phase == LiveUiState::Phase::Running && !live.paused) ||
                          live.phase == LiveUiState::Phase::Failed;
         ImGui::TextColored(hot ? red : amber, "%s", m_liveStatusLine.c_str());
