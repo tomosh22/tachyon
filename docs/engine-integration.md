@@ -5,8 +5,11 @@ that make jobs, fibers, locks, frames, streaming and hitches visible in the view
 exercised by `sdk/examples/engine_hooks_example.cpp` (a fake engine) and `sdk/examples/dynamic_load_example.cpp`,
 both built and run by CI. Code fragments below are lifted from them.
 
-Status markers: anything marked **available after WP-xx** depends on a work package that has not merged yet.
-The SDK itself (WP-50, WP-51) and the control protocol / `tachyon-cli` (WP-10) are done.
+Everything described here is implemented and merged: the SDK (header and runtime), the agent's ingestion of the
+instrumentation stream, the Windows and Linux capture backends, symbol resolution, the flight recorder and the
+viewer's instrumentation views. The one gap is GPU clock calibration, which the frozen API version 1 cannot
+express (section 5.7). What has not happened yet is a capture of *your* engine (the project's WP-14); the
+verification steps in section 9 are how to do it.
 
 ## 0. Assumptions (open questions from the plan, Part 7)
 
@@ -21,13 +24,15 @@ The Part 7 answers have not arrived. This guide assumes the defaults:
   emit symbols and keep frame pointers (sections 3 and 4).
 
 If an assumption is wrong, say so before wiring the hooks: both change the hook shape (section 5.2 and 5.3).
+(The project's progress file still lists these answers as assumed defaults.)
 
 ## 1. What you get from the SDK
 
 `sdk/include/tachyon/tachyon.h` is a C99/C++17 header with a C ABI (API version `0x00010000`, frozen). The
-runtime behind it (`sdk/src`, WP-51) gives each thread a lock-free ring buffer (64 KiB default) that a
+runtime behind it (`sdk/src`) gives each thread a lock-free ring buffer (64 KiB default) that a
 background thread drains to the capture agent, or to a sidecar `.tachyon-inst` file when no agent is
-reachable. After the first call on a thread there are no allocations and no locks on the recording path.
+reachable. The agent merges the stream into the `.tachyon` trace when the capture ends, so the viewer shows
+scopes, frame marks, markers, plots and fibers next to the sampled data. After the first call on a thread there are no allocations and no locks on the recording path.
 
 Contracts to keep in mind everywhere:
 
@@ -52,8 +57,9 @@ Tachyon commit you copied from in a `VENDORED.txt` next to it.
 ### 2.2 Option A: link statically (recommended default)
 
 Build `tachyon_sdk` (`add_library(tachyon_sdk STATIC ...)` in `sdk/CMakeLists.txt`) and link it into the
-executable, or vendor the three sources `sdk/src/sdk_impl.cpp`, `sdk_runtime.cpp`, `sdk_platform.cpp` (they
-need C++17 and a thread library) into the engine's build. With CMake from this repository:
+executable, or vendor the three sources `sdk/src/sdk_impl.cpp`, `sdk_runtime.cpp`, `sdk_platform.cpp` together
+with the private headers beside them (`sdk_internal.h`, `sdk_platform.h`, `sdk_ring.h`, `sdk_runtime.h`,
+`inst_wire.h`; they need C++17 and a thread library) into the engine's build. With CMake from this repository:
 
 ```cmake
 target_link_libraries(engine PRIVATE tachyon::sdk)            # static, ENABLED by default on Windows/Linux
@@ -132,7 +138,7 @@ cleaned: use `/DEBUG:FULL` for anything you archive.
 -Wl,--build-id        # linker: embed a GNU build-id note (Clang's driver often does this; be explicit)
 ```
 
-Linux capture (**available after WP-70**; scheduler events after WP-71) uses `perf_event_open` with frame-pointer callchains, so *every* function (including leaf
+Linux capture uses `perf_event_open` with frame-pointer callchains, so *every* function (including leaf
 functions and the system libraries you control) must keep its frame pointer. Do not strip release binaries
 before archiving them (section 4.3).
 
@@ -164,9 +170,18 @@ symstore add /r /f <build-output-dir>\*.pdb /s \\symbols\store /t "MyEngine" /v 
 store for as long as you want to open old captures.
 
 The viewer finds PDBs by the `ModuleRec` identity (PDB GUID+age, or PE timestamp+size when no CodeView record
-exists) through a local cache, then your symbol server. Pointing the viewer at the store over HTTP and the
-two-tier cache arrive with the symbol server client: **available after WP-21**. Until then, keep the PDBs next
-to the executables in the machine that opens the capture (the symbol locator searches next to the module path first: **available after WP-21/WP-22**).
+exists). The lookup order is: the explicit symbol search paths you added (Symbols panel, `symbolSearchPaths`
+in `settings.json`), next to the module's path, the local two-tier cache, then each entry of `symbolServers`
+in order. An entry is an `https://` symbol server (the symstore layout; a server's `index2.txt` two-tier layout
+is detected) or a plain directory that holds a store, such as the share `symstore` writes to. Nothing is
+configured by default, so a fresh install never touches the network:
+
+```json
+{ "symbolServers": ["D:/symbols/store", "https://msdl.microsoft.com/download/symbols"] }
+```
+
+`tachyon-report` and `tachyon-cli export` take the same sources as `--symbols PATH` and `--symbol-server URL`
+(section 4.4). Without a store, keep the PDBs next to the executables on the machine that opens the capture.
 
 ### 4.2 Build ids (Linux)
 
@@ -187,9 +202,19 @@ objcopy --strip-debug --add-gnu-debuglink=engine.debug engine
 # store engine.debug as   <store>/.build-id/ab/cdef....debug   (first byte as directory, rest as filename)
 ```
 
-Serve that directory with `debuginfod` (`debuginfod -F <store>`) and give clients `DEBUGINFOD_URLS`. The
-`.gnu_debuglink`/debuginfod lookup in the viewer is part of the symbol locator: **available after WP-21**
-(libdw/DWARF provider: WP-72; DIA/PDB provider: WP-22).
+The viewer needs no server for this: add the store directory itself to the symbol search paths (it is probed
+for `.build-id/xx/rest.debug`, for `<image>.debug`, and for files named like the wanted symbol file). To serve
+it to a team, run `debuginfod -F <store>` and add its URL to `symbolServers` (the locator speaks the debuginfod
+protocol for build-ids). **The viewer, the report tool and the exporter do not read `DEBUGINFOD_URLS`**; the
+server has to be listed explicitly. A debug file reached through a `.gnu_debuglink` works only when the image
+itself is on the machine that opens the trace.
+
+### 4.4 Symbols for CI reports
+
+`tachyon-report trace.tachyon --symbols <dir> --symbol-server <url> --symbol-cache <dir>` (and the same
+`--symbols` / `--symbol-server` options of `tachyon-cli export`) resolve names the same way. (A
+`<trace stem>.symbols.json` next to the trace is picked up automatically by the viewer and the report tool, which
+is how the synthetic fixtures resolve; `export` needs it passed with `--symbols`.) See [apps/report/README.md](../apps/report/README.md).
 
 ## 5. Instrumenting the engine
 
@@ -292,7 +317,7 @@ Lock waits are recognised through the reserved color `TACHYON_LOCK_COLOR_SENTINE
 SDK sets for you: do not use that color elsewhere. If `lockName` is `NULL` the event is called
 `Tachyon.LockAcquire`. Wrap only locks that can actually block (contended mutexes, `SRWLOCK`, futex-based
 locks); a `try_lock` fast path does not need an event. Combined with context-switch data, the viewer then shows
-who held the lock (the callstack that unblocked the waiter; on Linux this needs scheduler events, **available after WP-71**).
+who held the lock (the callstack that unblocked the waiter; on Linux this needs the scheduler tracepoints, see apps/agent/LINUX.md).
 
 ### 5.5 Frame marks on main and render threads
 
@@ -338,7 +363,7 @@ Tachyon_Marker("GPU.FrameSubmitted", frameLabel, kColorRender);  // CPU time the
 
 The viewer shows them against the CPU timeline at the time the plot sample was *recorded*, so they are
 accurate to the latency of your query readback, not to GPU timestamp resolution. A future API version (see
-the report for WP-55) should add a calibration call.
+the project plan) should add a calibration call.
 
 ### 5.8 Mapping an existing profiling layer
 
@@ -408,12 +433,16 @@ if (line == "prof.stop")   return runCli("stop --wait");
 if (line == "prof.status") return runCli("status");
 ```
 
-`tachyon-cli` subcommands: `status`, `start --mode launch|attach|system [--exe E] [--args ...] [--pid N]
-[--hz N] [--circular-mb N] [--out PATH] [--wait]`, `stop [--wait]`, `flush --name N --seconds S`, `cancel`;
-global options `--socket PATH | --pipe NAME`, `--json`, `--timeout S`. Exit status is non-zero on errors.
-Starting a capture needs an agent that is running with the privilege the backend requires (an elevated agent on
-Windows for ETW). Capturing with ETW sampling and context switches in the agent: **available after WP-11 (ETW), WP-13 (launch/attach) and WP-52 (ingestion)**
-on the Windows backend; sidecar-only instrumentation works today.
+`tachyon-cli` commands for a capture: `status`, `start <target> [start options] [--no-start] [--wait]`
+(target: `--launch EXE`, `--attach PID` or `--system`, or `--mode launch|attach|system [--exe E] [--pid N]`),
+`stop [--wait]`, `resume`, `flush --name N --seconds S [--reason R]`, `cancel`, `capture <target> ...
+[--duration S]` (start, wait, stop in one call) and `live <target> ...`; global options `--socket PATH | --pipe
+NAME | --agent ADDRESS`, `--json`, `--timeout S`. Exit status is non-zero on errors (see
+[apps/cli/README.md](../apps/cli/README.md) for the full list and the exit codes). Starting a capture needs an
+agent that is running with the privilege the backend requires (an elevated agent on Windows for ETW; on Linux see
+[apps/agent/LINUX.md](../apps/agent/LINUX.md)). A program launched by the agent finds it through
+`TACHYON_AGENT_PIPE`, which the agent sets in the child's environment; a program started by hand uses the
+default address, or the sidecar file when no agent runs.
 
 **Speaking the control protocol directly** (JSON lines, one object per line, `\n`-terminated; every request has
 an `id` that the response echoes). Linux socket path: `/run/user/<uid>/tachyon-agent.sock`, falling back to
@@ -486,9 +515,9 @@ Read once, at first use of the SDK in the process:
 | Variable | Effect |
 |---|---|
 | `TACHYON_AGENT_PIPE` | Agent control address (Windows pipe name, Linux socket path). Default: `\\.\pipe\tachyon-agent`; `/run/user/<uid>/tachyon-agent.sock`, else `/tmp/tachyon-agent.sock` |
-| `TACHYON_SIDECAR` | Path of the sidecar `.tachyon-inst` file used when no agent is connected; `off` disables the sidecar. Default `<cwd>/<exe-name>-<pid>.tachyon-inst` |
+| `TACHYON_SIDECAR` | Path of the sidecar `.tachyon-inst` file used when no agent is connected; `off` (or `0`) disables the sidecar. Default `<cwd>/<exe-name>-<pid>.tachyon-inst`. When the agent comes and goes, later sidecar files get a numbered name `<stem>.<n><ext>`; `tachyon-cli merge` picks the numbered siblings up |
 | `TACHYON_DISABLE` | `1`, `true`, `TRUE` or `on` turns the runtime off: every call returns after one relaxed atomic load |
-| `TACHYON_RING_KB` | Per-thread ring buffer size in KiB (default 64). Raise it if the viewer shows `tachyon.dropped` markers |
+| `TACHYON_RING_KB` | Per-thread ring buffer size in KiB (default 64; rounded up to a power of two, clamped to 16 KiB to 64 MiB). Raise it if the viewer shows `tachyon.dropped` markers |
 
 If the agent is not reachable at the first call the runtime writes the sidecar instead, and retries the agent
 about once a second; when the agent appears, the stream switches to it. Dropped records are counted and shown
@@ -498,7 +527,7 @@ the example's `prof.*` console commands honour `TACHYON_CLI` (path to the execut
 
 ## 8. Overhead expectations
 
-Measured on the CI VM by the SDK perf test (WP-51), Begin+End pair, median:
+Measured on the CI VM by the SDK perf test, Begin+End pair, median:
 
 | Case | Linux | Windows |
 |---|---|---|
@@ -541,7 +570,7 @@ granularity, not micro-optimisation:
 
 Treat the M5 gate as a statement about what the runtime can sustain without loss (ring size, drain rate, dropped
 counters), not as an overhead target for typical frames: re-measure with the real engine and `tachyon-cli`
-after WP-52 lands.
+(the capture's warnings and the `tachyon.dropped` markers show whether records were lost).
 
 ## 9. Checklist
 
@@ -572,18 +601,23 @@ Instrumentation
 
 Verification
 - [ ] Run the engine with `TACHYON_SIDECAR=/tmp/test.tachyon-inst`: the file is non-empty after exit.
-- [ ] `Tachyon_IsConnected()` is 1 while an agent is running (after WP-52 the agent ingests the stream).
+- [ ] `Tachyon_IsConnected()` is 1 while an agent is running a capture of the process (the agent ingests the stream).
+- [ ] Capture the engine with the agent (`tachyon-cli capture --launch <engine> --duration 30`), run
+      `tachyon-report` on the trace and check that the frame series (`Main`, `Render`) and the scope tables are
+      there; open it in the viewer and look at the scope lanes and the frame graph.
 - [ ] No `tachyon.dropped` markers at normal scope rates; if present, raise `TACHYON_RING_KB` or reduce scopes.
-- [ ] Symbols resolve for the engine's modules in the viewer (symbol server: after WP-21).
+- [ ] Symbols resolve for the engine's modules in the viewer (the Symbols panel shows every module Resolved; add
+      the symbol store to `symbolServers` or to the search paths).
 
-## 10. Dependencies on unfinished work packages
+## 10. Availability
 
 | Feature | Status |
 |---|---|
-| SDK, sidecar, `Tachyon_RequestFlush` client side, control protocol, `tachyon-cli` | available (WP-50, WP-51, WP-10) |
-| Agent ingests the instrumentation stream and merges it into a `.tachyon` capture | available after WP-52 |
-| Windows ETW capture, 8 kHz sampling, context switches | available after WP-11 |
-| Flight recorder end to end (circular buffer dump on `flush`) | available after WP-60 |
-| Symbol server client, `.gnu_debuglink`/debuginfod lookup, local cache | available after WP-21 (DWARF provider WP-72, DIA provider WP-22) |
-| Linux capture (`perf_event_open` sampling, scheduler events) | available after WP-70 / WP-71 |
+| SDK header, runtime, sidecar file, `Tachyon_RequestFlush`, shared library and loader | available |
+| Agent ingests the instrumentation stream and merges it into the `.tachyon` capture | available (Windows and Linux) |
+| Windows ETW capture, 8 kHz sampling, context switches | available; real-machine runs of some acceptance checks are still queued (see `docs/PROGRESS.md`) |
+| Linux capture (`perf_event_open` sampling; scheduler events when tracefs is readable) | available |
+| Flight recorder (circular buffer, flush on request or from `Tachyon_RequestFlush`) | available |
+| Symbol server client, `.gnu_debuglink` / `.build-id` lookup, local cache | available |
+| Capture of the real engine (project work package WP-14) | not done: needs the engine owner |
 | GPU clock calibration records | needs an SDK API addition (not in API version 1) |

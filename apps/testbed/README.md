@@ -5,8 +5,10 @@ threads, and prints on stdout a JSON document stating what a profiler should see
 workload itself measured with `rdtsc` (`measured`). Diagnostics go to stderr; stdout is JSON only.
 
 ```
-tachyon-testbed [--scenario <name[,name...]|all>] [--duration <seconds>] [--hitch-interval-ms <ms>] [--instrument] [--flush-on-hitch] [--pretty] [--list]
+tachyon-testbed [--scenario <name[,name...]|all>] [--duration <seconds>] [--hitch-interval-ms <ms>] [--instrument] [--flush-on-hitch] [--pretty] [--list] [--help]
 ```
+
+`--list` prints the scenario names; `--scenario` defaults to `all` and `--duration` to 5 seconds (it must be positive); `--pretty` indents the JSON. An unknown option prints the usage text on stderr.
 
 Built with frame pointers (`-fno-omit-frame-pointer` / `/Oy-`), debug info, and no sibling-call optimization on the
 testbed targets only. Work functions are `noinline`, `extern "C"` (unmangled names), and each has distinct machine
