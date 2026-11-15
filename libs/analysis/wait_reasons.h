@@ -8,7 +8,9 @@
 //
 //   Linux (platform 2): wait_reason is the sched_switch prev_state & 0xFF. Bits: 0x01 S (TASK_INTERRUPTIBLE),
 //   0x02 D (TASK_UNINTERRUPTIBLE), 0x04 T (stopped), 0x08 t (traced), 0x10 EXIT_DEAD, 0x20 EXIT_ZOMBIE,
-//   0x40 TASK_PARKED, 0x80 TASK_DEAD; 0 is TASK_RUNNING (a preempted thread).
+//   0x40 TASK_PARKED, 0x80 TASK_DEAD. 0 (TASK_RUNNING) never reaches a wait from a sched_switch record (a
+//   preempted thread is old_state Ready); a wait with reason 0 is a PERF_RECORD_SWITCH capture without the
+//   sched tracepoint, where the reason is unknown.
 //
 // ContextSwitchRec::old_state uses the KTHREAD_STATE numbering on BOTH platforms (this is what tracegen
 // writes for its Linux scenarios, and what WP-71 must write): Initialized 0, Ready 1, Running 2, Standby 3,
@@ -40,7 +42,7 @@ std::string_view waitReasonName(uint32_t platform, uint8_t reason);
 // WrQuantumEnd/WrDispatchInt/WrPreempted/WrYieldExecution -> Preempted; Executive/WrExecutive/UserRequest/
 // WrUserRequest/WrQueue/WrEventPair/WrRendezvous/WrKeyedEvent/WrResource/WrPushLock/WrMutex/WrFastMutex/
 // WrGuardedMutex/WrRundown/WrAlertByThreadId -> Synchronization; everything else -> Other.
-// Linux: D -> IO, S -> Synchronization, preempted (0) -> Preempted, others -> Other.
+// Linux: D -> IO, S -> Synchronization, others (including 0, reason unknown) -> Other.
 WaitCategory waitReasonCategory(uint32_t platform, uint8_t reason);
 
 // Thread-safe: pure function.

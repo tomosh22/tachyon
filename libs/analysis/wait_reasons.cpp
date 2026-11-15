@@ -77,7 +77,9 @@ WaitCategory windowsCategory(uint8_t r) {
 
 std::string_view waitReasonName(uint32_t platform, uint8_t reason) {
   if (isLinux(platform)) {
-    if (reason == 0) return "Preempted (R)";
+    // A wait with reason 0 comes from PERF_RECORD_SWITCH captures (no sched tracepoint, so the reason is
+    // unknown); a preempted thread (prev_state 0) is encoded as old_state Ready, never as a wait.
+    if (reason == 0) return "Unknown (no sched tracepoint)";
     if (reason & kLinuxUninterruptible) return "Uninterruptible (D)";
     if (reason & kLinuxInterruptible) return "Interruptible (S)";
     if (reason & kLinuxStopped) return "Stopped (T)";
@@ -91,7 +93,7 @@ std::string_view waitReasonName(uint32_t platform, uint8_t reason) {
 
 WaitCategory waitReasonCategory(uint32_t platform, uint8_t reason) {
   if (isLinux(platform)) {
-    if (reason == 0) return WaitCategory::Preempted;
+    if (reason == 0) return WaitCategory::Other;  // reason unknown, see waitReasonName
     if (reason & kLinuxUninterruptible) return WaitCategory::IO;
     if (reason & kLinuxInterruptible) return WaitCategory::Synchronization;
     return WaitCategory::Other;

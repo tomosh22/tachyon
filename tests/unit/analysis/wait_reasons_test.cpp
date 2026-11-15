@@ -51,12 +51,13 @@ TEST(WaitReasons, WindowsCategories) {
 }
 
 TEST(WaitReasons, LinuxPrevState) {
-  EXPECT_EQ(waitReasonCategory(kLin, 0), WaitCategory::Preempted);
+  // Reason 0 on a wait only comes from switch-record captures (reason unknown); it must not look like Ready.
+  EXPECT_EQ(waitReasonCategory(kLin, 0), WaitCategory::Other);
   EXPECT_EQ(waitReasonCategory(kLin, 1), WaitCategory::Synchronization);
   EXPECT_EQ(waitReasonCategory(kLin, 2), WaitCategory::IO);
   EXPECT_EQ(waitReasonCategory(kLin, 3), WaitCategory::IO);  // D wins when both bits are set
   EXPECT_EQ(waitReasonCategory(kLin, 4), WaitCategory::Other);
-  EXPECT_EQ(waitReasonName(kLin, 0), "Preempted (R)");
+  EXPECT_EQ(waitReasonName(kLin, 0), "Unknown (no sched tracepoint)");
   EXPECT_EQ(waitReasonName(kLin, 1), "Interruptible (S)");
   EXPECT_EQ(waitReasonName(kLin, 2), "Uninterruptible (D)");
   EXPECT_EQ(waitReasonName(kLin, 4), "Stopped (T)");
