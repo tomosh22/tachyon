@@ -60,6 +60,7 @@ Maintained by the orchestrator. Updated after every merge. Status values: not st
 | WP-66b | Output and pipe hardening (O_NOFOLLOW writer, lstat produced paths, relaxed shared-dir refusal, per-agent Windows inst pipe) | A | merged | wp/66b-output-hardening | 2026-11-08 |
 | WP-67c | Viewer default docked layout (first launch) and View > Reset layout | C | merged | wp/67c-default-layout | 2026-11-15 |
 | WP-67d | Readable function-name column in Function List, Call Graph, Butterfly | C | merged | wp/67d-name-columns | 2026-11-15 |
+| WP-71b | Attribute exiting tasks' switch records; small residue to Trace Info | L | merged | wp/71b-exit-switch | 2026-11-15 |
 | WP-68 | Viewer performance pass 2 (LOD direct zoom, flame, WP-54 draw lists, single-decode load, preview symbol reuse) | C | merged (partial: frame targets remain exceptions) | wp/68-perf-pass2 | 2026-11-08 |
 | WP-69 | Report/export/doctor follow-ups and test flakes (WP-62b, symbol-setup helper, Windows doctor) | D | merged (4a moved to WP-66b) | wp/69-tooling | 2026-11-08 |
 | WP-70 | `perf_event_open` backend | A | merged; privileged tests verified in this container (CI step non-gating) | wp/70-perf-backend | 2026-10-25 |
@@ -431,3 +432,12 @@ Check by hand: window opens, Trace Info panel shows 16 threads / 7,486,737 sampl
 
 - Linux dev container: Clang 18.1.3, CMake 3.28, Ninja; libdw/libelf, libcurl, SDL2 2.30.0, libGL, libclang-rt-18 installed via apt.
 - Network: GitHub release assets and git clones work; `github.com/<o>/<r>/archive/...` source tarballs are blocked by the proxy, so dependencies use release archives (with SHA256) or pinned git commits.
+
+## WP-71b notes
+- The demo capture's 11 unattributed switch records came from the system-wide (SWITCH_CPU_WIDE) path, not the per-task path. They were the exiting task's switch-in records, which name the previous task -1. They repeated a switch-out that had already been attributed, but were counted as unnamed. switchesWritten was unchanged (36855), so no data was lost. schedUnnamed went from 11 to 0. A live run of the jobs scenario also gave 0.
+- Per-task PERF_RECORD_SWITCH: a per-cpu "target task switched in" entry attributes an unnamed switch-out. It is not set for a tid that has already exited, and it is cleared by any switch-out and by LOST records. This path is verified with synthetic data only; the launch plan here is system-wide.
+- CPU_WIDE: m_cpuRunning is now erased on an unnamed record and cleared on LOST. Before, a stale entry could misattribute a later unnamed switch-out.
+- A residue under 100 records and under 0.1% of switch records goes only to CaptureInfo convert_stats.sched_unattributed_switches, shown in Trace Info. Anything larger stays a warning.
+- Follow-up: the tracepoint path still records readying_tid 0 for an unhashed waker (exit_notify wakeups).
+- Spec text: capture-backend.md, "Clarifications added with WP-71b".
+
