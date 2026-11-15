@@ -1,20 +1,27 @@
-<!-- Orchestrator-owned copy of sdk/src/inst_wire.md (WP-51, WP-51b). Keep both in sync. -->
+<!-- Orchestrator-owned. Canonical prose for the instrumentation wire format (WP-51, WP-51b); sdk/src/inst_wire.md is a pointer to this file. -->
 
 # Tachyon instrumentation wire format, version 1
 
-Produced by the SDK runtime (`sdk/src`, WP-51), consumed by the agent (WP-52) and by tests. The normative
-definition is `sdk/src/inst_wire.h` (namespace `tachyon::inst`); this file explains it.
+Produced by the SDK runtime (`sdk/src`, WP-51), consumed by the agent (`libs/inst`, WP-52; decoder in
+`libs/inst/decoder.h`) and by tests. The normative definition is `sdk/src/inst_wire.h` (namespace
+`tachyon::inst`); this file explains it and is the only prose copy.
 
 ## Transports
 
 The same byte stream is used for all of them:
 
 - Agent connection: after the control-channel `inst_hello` handshake (see control-protocol.md) the SDK
-  connects to the returned pipe/socket (named in the `inst_hello` reply: see control-protocol.md; Linux `<agent socket dir>/tachyon-inst-<pid>.sock`)
-  and writes the stream. The SDK never reads from this connection.
+  connects to the pipe/socket named in the `inst_hello` reply and writes the stream. The SDK never reads from
+  this connection. The name is chosen by the agent: Linux `<agent socket dir>/tachyon-inst-<pid>.sock`;
+  Windows `\\.\pipe\tachyon-inst-<pid>` for the default agent pipe, `<agent pipe>-tachyon-inst-<pid>` for any
+  other, or `\\.\pipe\tachyon-inst-<hash>-<pid>` when that would exceed 256 characters (exact rule in
+  control-protocol.md). The SDK always uses the name from the reply. The agent address the SDK dials is
+  `TACHYON_AGENT_PIPE` when set, else the platform default (Windows `\\.\pipe\tachyon-agent`, Linux
+  `/run/user/<uid>/tachyon-agent.sock`, or `/tmp/tachyon-agent.sock` when that directory does not exist).
 - Sidecar file `.tachyon-inst`: exactly the same byte stream written to a file. Default path
   `<cwd>/<exe-name>-<pid>.tachyon-inst` (exe name without directory or extension); `TACHYON_SIDECAR=<path>`
-  overrides, `TACHYON_SIDECAR=off` disables the sidecar. Each sidecar file holds exactly one stream (one
+  overrides, `TACHYON_SIDECAR=off` (or `OFF`, `0`) disables the sidecar. `TACHYON_DISABLE=1` (or `true`, `on`)
+  turns the whole runtime off. Each sidecar file holds exactly one stream (one
   StreamHeader). If the SDK has to open the sidecar again in the same process (it switched to an agent and the
   agent was lost), earlier files are never truncated: the n-th re-open (n >= 1) writes `<stem>.<n>.<ext>`, e.g.
   `app-1234.1.tachyon-inst`, inserted before the last extension of the configured path. Consumers that import a
@@ -68,7 +75,8 @@ name or the reserved string `Tachyon.LockAcquire`, and data `0x<hex lock address
 
 ## Dropped records
 
-Each thread writes into a fixed-size ring (64 KiB default). When it is full the record is dropped and counted;
+Each thread writes into a fixed-size ring (64 KiB default; `TACHYON_RING_KB` overrides it, rounded up to a
+power of two between 16 KiB and 64 MiB). When it is full the record is dropped and counted;
 the runtime later emits a `Dropped` frame with the number of records lost on that thread since the previous
 report (frame ts = time of the report). A `ScopeBegin` that is dropped also drops its matching `ScopeEnd`, and
 the SDK reserves ring space so that the `ScopeEnd` of a recorded `ScopeBegin` is never dropped (outside fiber
