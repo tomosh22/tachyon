@@ -891,14 +891,10 @@ void FunctionStatsPanel::drawInstanceBars(const PanelContext& context, float hei
 // Count / total / average / median (and the rest of the summary) as label : value rows.
 void FunctionStatsPanel::drawStatisticsBox(double clockHz) {
   const analysis::Stats& s = *m_result->stats;
-  if (!ImGui::BeginTable("##swnumbers", 2, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY))
-    return;
   const auto row = [&](const char* label, const std::string& value) {
-    ImGui::TableNextRow();
-    ImGui::TableSetColumnIndex(0);
     ImGui::TextUnformatted(label);
-    ImGui::TableSetColumnIndex(1);
-    common::textRight(value.c_str());
+    ImGui::SameLine(ImGui::CalcTextSize("Average ").x + 8.0f);
+    ImGui::TextUnformatted(value.c_str());
   };
   row("Count", std::to_string(s.count));
   row("Total", st::formatDuration(static_cast<double>(s.totalTicks), clockHz));
@@ -908,7 +904,6 @@ void FunctionStatsPanel::drawStatisticsBox(double clockHz) {
   row("p25", st::formatDuration(s.p25, clockHz));
   row("p75", st::formatDuration(s.p75, clockHz));
   row("Max", st::formatDuration(s.max, clockHz));
-  ImGui::EndTable();
 }
 
 // ---------------------------------------------------------------------------------------------------------

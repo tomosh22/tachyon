@@ -3,6 +3,7 @@
 #include <imgui_internal.h>
 
 #include <algorithm>
+#include <iterator>
 
 namespace tachyon::viewer {
 

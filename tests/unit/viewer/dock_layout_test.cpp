@@ -5,6 +5,7 @@
 #include "viewer/dock_layout.h"
 #include "analysis/query.h"
 #include "viewer/app.h"
+#include "viewer/stats/function_stats_panel.h"
 
 #include <gtest/gtest.h>
 #include <imgui.h>
@@ -13,6 +14,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -468,4 +471,92 @@ TEST(DockLayout, SessionTabStripSitsBetweenTheMenuBarAndTheDockspace) {
   EXPECT_EQ(app.document(), nullptr);
   io.AddMousePosEvent(-1000.0f, -1000.0f);
   runFrames(app, 2);
+}
+
+// ---- WP-67e: the wide Function Statistics strip and the Call Graph pie beside the table
+// -------------------------
+
+namespace {
+
+bool hasChildWindow(const char* parent, const char* childPart) {
+  ImGuiContext& g = *ImGui::GetCurrentContext();
+  for (ImGuiWindow* w : g.Windows) {
+    const std::string name = w->Name;
+    if (w->Active && w->ParentWindow != nullptr && name.find(parent) == 0 &&
+        name.find(childPart) != std::string::npos)
+      return true;
+  }
+  return false;
+}
+
+void openTiny(App& app) {
+  app.openFile(fs::path(TACHYON_GENERATED_FIXTURE_DIR) / "tiny.tachyon");
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (app.document() == nullptr || app.loading()) {
+    ASSERT_LT(std::chrono::steady_clock::now(), deadline);
+    app.frame(0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
+}  // namespace
+
+TEST(DockLayout, TheStatisticsStripLaysItsPartsOutSideBySide) {
+  App app(makeNullRenderer(1600.0f, 900.0f), headless());
+  std::string error;
+  ASSERT_TRUE(app.init(error)) << error;
+  openTiny(app);
+  auto* panel = dynamic_cast<FunctionStatsPanel*>(app.panels().find(FunctionStatsPanel::kName)->panel.get());
+  ASSERT_NE(panel, nullptr);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  const auto until = [&](const std::function<bool()>& pred) {
+    while (!pred()) {
+      if (std::chrono::steady_clock::now() > deadline) return false;
+      app.frame(0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+  };
+  ASSERT_TRUE(
+      until([&] { return panel->index() != nullptr && !panel->indexPending() && !panel->hits().empty(); }));
+  PanelContext context;
+  context.document = app.document().get();
+  context.selection = &app.selection();
+  context.settings = &app.settings();
+  context.jobs = &app.jobs();
+  context.queryExecutor = &app.queryExecutor();
+  context.documentGeneration = app.documentGeneration();
+  context.symbols = app.document()->symbols().get();
+  context.symbolGeneration = app.symbolGeneration();
+  panel->chooseResult(context, 0);
+  ASSERT_TRUE(until([&] { return panel->result() != nullptr && !panel->statsPending(); }));
+  runFrames(app, 3);
+
+  ASSERT_TRUE(docked("Function Statistics"));
+  // The four parts are child windows of the strip; the stacked arrangement's extras are not drawn.
+  for (const char* part : {"##sw_list", "##sw_bars", "##sw_hist", "##sw_stats"})
+    EXPECT_TRUE(hasChildWindow("Function Statistics", part)) << part;
+  EXPECT_FALSE(panel->lastHistogram().bars.empty());  // the histogram box
+  EXPECT_FALSE(panel->lastBoxPlot().valid);           // the box plot belongs to the stacked arrangement
+  ASSERT_TRUE(panel->result()->instances != nullptr);
+  EXPECT_FALSE(panel->result()->instances->empty());
+  ASSERT_TRUE(panel->goToInstance(context, 0));
+  EXPECT_EQ(panel->currentInstance(), std::optional<uint32_t>(0));
+}
+
+TEST(DockLayout, TheCallGraphPieSitsBesideTheTableOnlyWhereThereIsRoom) {
+  struct Case {
+    float w, h;
+    bool aside;
+  };
+  for (const Case c : {Case{1600.0f, 900.0f, true}, Case{1280.0f, 720.0f, false}}) {
+    App app(makeNullRenderer(c.w, c.h), headless());
+    std::string error;
+    ASSERT_TRUE(app.init(error)) << error;
+    openTiny(app);
+    runFrames(app, 30);
+    EXPECT_EQ(hasChildWindow("Call Graph", "##cgpiecol"), c.aside) << c.w << "x" << c.h;
+    EXPECT_TRUE(hasChildWindow("Call Graph", "##cgpie"))
+        << c.w << "x" << c.h;  // the pie itself is always there
+  }
 }
