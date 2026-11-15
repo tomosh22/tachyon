@@ -145,6 +145,8 @@ class Harness {
     c.document = app.document().get();
     c.selection = &app.selection();
     c.symbols = app.document() ? app.document()->symbols().get() : nullptr;
+    c.settings = &app.settings();
+    c.mutableSettings = &app.settings();
     c.queryExecutor = &app.queryExecutor();
     c.documentGeneration = app.documentGeneration();
     c.symbolGeneration = app.symbolGeneration();
@@ -738,4 +740,227 @@ TEST(StatsWidget, ClosingThePanelWithTheXTakesTheHighlightOffTheTimeline) {
   h.frames(3);
   EXPECT_TRUE(h.bus().state().instanceHighlight.active());
   EXPECT_FALSE(h.widget().lastHighlightRects().empty());
+}
+
+// ---- WP-67f: the per-instance duration chart
+// ---------------------------------------------------------------
+
+namespace {
+
+// The statistics panel as a wide, short strip (the wide arrangement draws the chart).
+void makeWide(Harness& h) {
+  ImGui::SetWindowSize(FunctionStatsPanel::kName, ImVec2(1800, 330));
+  h.frames(4);
+}
+
+// 300 instances of ~15 us with one 400 us outlier (index 123) and one 90 us one (index 200).
+std::vector<analysis::Instance> outlierInstances(ThreadIdx thread) {
+  std::vector<analysis::Instance> v;
+  uint64_t t = 1000000;
+  for (uint32_t i = 0; i < 300; ++i) {
+    uint64_t d = 15000 + (i % 7) * 100;
+    if (i == 123) d = 400000;
+    if (i == 200) d = 90000;
+    v.push_back({thread, t, t + d});
+    t += d + 1000;
+  }
+  return v;
+}
+
+void injectOutliers(Harness& h) {
+  const ThreadIdx thread = h.panel->result()->instances->front().thread;
+  h.panel->injectInstancesForTest(outlierInstances(thread));
+  h.frames(3);
+}
+
+std::vector<uint64_t> durationsOf(const FunctionStatsPanel& panel) {
+  std::vector<uint64_t> d;
+  for (const analysis::Instance& i : *panel.result()->instances) d.push_back(i.end - i.begin);
+  return d;
+}
+
+void clickButton(Harness& h, const FunctionStatsPanel::ButtonRect& r) {
+  ASSERT_TRUE(r.drawn);
+  h.click((r.x0 + r.x1) * 0.5f, (r.y0 + r.y1) * 0.5f);
+}
+
+// The shortest bar that is not clipped, if any.
+const FunctionStatsPanel::DrawnInstanceBar* plainBar(const FunctionStatsPanel& panel) {
+  const FunctionStatsPanel::DrawnInstanceBar* best = nullptr;
+  for (const auto& b : panel.drawnInstanceBars())
+    if (!b.clipped && b.longest > 0 && (!best || b.longest < best->longest)) best = &b;
+  return best;
+}
+
+}  // namespace
+
+TEST(StatsChart, ClipButtonTogglesTheScaleAndMarksClippedBars) {
+  Harness h;
+  h.open("scopes.tachyon");
+  h.openPanel();
+  makeWide(h);
+  h.choose("JobWait");
+  h.frames(3);
+  ASSERT_TRUE(h.panel->result());
+  injectOutliers(h);
+  const std::vector<uint64_t> d = durationsOf(*h.panel);
+  ASSERT_GE(d.size(), 100u);
+  const uint64_t maxD = *std::max_element(d.begin(), d.end());
+
+  // On by default (and in the settings).
+  EXPECT_TRUE(h.panel->clipOutliers());
+  EXPECT_TRUE(h.app.settings().statsClipOutliers);
+  EXPECT_TRUE(h.panel->clipButton().drawn);
+  EXPECT_TRUE(h.panel->logButton().drawn);
+  const st::InstanceScale on = st::makeInstanceScale(d, true, false);
+  ASSERT_TRUE(on.clipping) << "the fixture needs a unique longest instance";
+  EXPECT_EQ(h.panel->instanceScale().top, on.top);
+  EXPECT_TRUE(h.panel->instanceScale().clipping);
+  ASSERT_FALSE(h.panel->drawnInstanceBars().empty());
+
+  // The clipped bars carry the marker flag, are at full height and the column maximum is real.
+  uint32_t clippedBars = 0;
+  float plotTop = 1e9f;
+  for (const auto& b : h.panel->drawnInstanceBars()) plotTop = std::min(plotTop, b.y0);
+  for (const auto& b : h.panel->drawnInstanceBars()) {
+    EXPECT_EQ(b.clipped, b.longest > on.top);
+    if (b.clipped) {
+      ++clippedBars;
+      EXPECT_FLOAT_EQ(b.y0, plotTop);
+      EXPECT_TRUE(b.longest == maxD || b.longest == 90000u);  // the two outliers, real durations
+    }
+  }
+  EXPECT_EQ(clippedBars, 2u);
+  const FunctionStatsPanel::DrawnInstanceBar* bar = plainBar(*h.panel);
+  ASSERT_NE(bar, nullptr);
+  const uint64_t barDuration = bar->longest;
+  const auto heightOfDuration = [&](uint64_t duration) {
+    for (const auto& b : h.panel->drawnInstanceBars())
+      if (b.longest == duration) return b.y1 - b.y0;
+    return -1.0f;
+  };
+  const float heightOn = heightOfDuration(barDuration);
+
+  // Off: scaled to the maximum, a non-outlier bar gets shorter, nothing is marked.
+  clickButton(h, h.panel->clipButton());
+  h.frames(2);
+  EXPECT_FALSE(h.panel->clipOutliers());
+  EXPECT_FALSE(h.app.settings().statsClipOutliers);  // the preference is written through
+  EXPECT_EQ(h.panel->instanceScale().top, maxD);
+  EXPECT_FALSE(h.panel->instanceScale().clipping);
+  const float heightOff = heightOfDuration(barDuration);
+  EXPECT_LT(heightOff, heightOn);
+  for (const auto& b : h.panel->drawnInstanceBars()) EXPECT_FALSE(b.clipped);
+
+  // And on again: the bar grows back.
+  clickButton(h, h.panel->clipButton());
+  h.frames(2);
+  EXPECT_TRUE(h.panel->clipOutliers());
+  EXPECT_TRUE(h.app.settings().statsClipOutliers);
+  EXPECT_FLOAT_EQ(heightOfDuration(barDuration), heightOn);
+}
+
+TEST(StatsChart, LogButtonRaisesShortBarsAndKeepsEveryBarFinite) {
+  Harness h;
+  h.open("scopes.tachyon");
+  h.openPanel();
+  makeWide(h);
+  h.choose("JobWait");
+  h.frames(3);
+  ASSERT_TRUE(h.panel->result());
+  injectOutliers(h);
+  EXPECT_FALSE(h.panel->logScale());
+  const FunctionStatsPanel::DrawnInstanceBar* bar = plainBar(*h.panel);
+  ASSERT_NE(bar, nullptr);
+  const uint64_t barDuration = bar->longest;
+  float linear = 0;
+  for (const auto& b : h.panel->drawnInstanceBars())
+    if (b.longest == barDuration) linear = b.y1 - b.y0;
+  clickButton(h, h.panel->logButton());
+  h.frames(2);
+  EXPECT_TRUE(h.panel->logScale());
+  EXPECT_TRUE(h.app.settings().statsLogScale);
+  EXPECT_TRUE(h.panel->instanceScale().log);
+  EXPECT_TRUE(h.panel->instanceScale().clipping);  // combined with the p99 clip
+  float logged = 0;
+  for (const auto& b : h.panel->drawnInstanceBars()) {
+    EXPECT_TRUE(std::isfinite(b.y0));
+    EXPECT_GE(b.y1 - b.y0, 1.0f);
+    if (b.longest == barDuration) logged = b.y1 - b.y0;
+  }
+  EXPECT_GT(logged, linear);
+}
+
+TEST(StatsChart, PreferencesComeFromSettingsAndGoBackToThem) {
+  Harness h;
+  h.app.settings().statsClipOutliers = false;
+  h.app.settings().statsLogScale = true;
+  h.open("scopes.tachyon");
+  h.openPanel();
+  makeWide(h);
+  h.choose("JobWait");
+  h.frames(3);
+  EXPECT_FALSE(h.panel->clipOutliers());
+  EXPECT_TRUE(h.panel->logScale());
+  EXPECT_TRUE(h.panel->instanceScale().log);
+  EXPECT_FALSE(h.panel->instanceScale().clipping);
+  // A threshold typed into the field is stored (in microseconds) as well.
+  h.panel->setThresholdUs(h.context(), 250.0);
+  EXPECT_EQ(h.app.settings().statsThresholdUs, 250.0);
+  h.panel->setThresholdUs(h.context(), 0.0);
+  EXPECT_EQ(h.app.settings().statsThresholdUs, 0.0);
+}
+
+TEST(StatsChart, ThresholdCountsInstancesAndDrawsALineThatCanBeDragged) {
+  Harness h;
+  h.open("scopes.tachyon");
+  h.openPanel();
+  makeWide(h);
+  h.choose("JobWait");
+  h.frames(3);
+  ASSERT_TRUE(h.panel->result());
+  injectOutliers(h);
+  EXPECT_EQ(h.panel->thresholdUs(), 0.0);
+  EXPECT_EQ(h.panel->aboveThreshold(), 0u);
+  EXPECT_TRUE(std::isnan(h.panel->thresholdLineY()));  // no line until one is set
+  const double hz = h.model().header.clock_frequency_hz;
+  std::vector<uint64_t> d = durationsOf(*h.panel);
+  std::vector<uint64_t> sorted = d;
+  std::sort(sorted.begin(), sorted.end());
+  const uint64_t median = sorted[sorted.size() / 2];
+  const double us = static_cast<double>(median) / hz * 1e6;
+  h.panel->setThresholdUs(h.context(), us);
+  h.frames(3);
+  const uint64_t ticks = std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(us * 1e-6 * hz)));
+  const uint32_t want =
+      static_cast<uint32_t>(std::count_if(d.begin(), d.end(), [&](uint64_t v) { return v > ticks; }));
+  EXPECT_GT(want, 0u);
+  EXPECT_LT(want, d.size());
+  EXPECT_EQ(h.panel->aboveThreshold(), want);
+  EXPECT_FALSE(std::isnan(h.panel->thresholdLineY()));
+  for (const auto& b : h.panel->drawnInstanceBars()) EXPECT_EQ(b.aboveThreshold, b.longest > ticks);
+
+  // Dragging the line up raises the threshold and lowers the count.
+  const auto& bars = h.panel->drawnInstanceBars();
+  const float x = (bars.front().x0 + bars.back().x1) * 0.5f;
+  const float y0 = h.panel->thresholdLineY();
+  ImGuiIO& io = ImGui::GetIO();
+  io.AddMousePosEvent(x, y0);
+  h.frames(2);
+  io.AddMouseButtonEvent(0, true);
+  h.frames(2);
+  io.AddMousePosEvent(x, y0 - 25.0f);
+  h.frames(2);
+  io.AddMouseButtonEvent(0, false);
+  h.frames(3);
+  EXPECT_GT(h.panel->thresholdUs(), us);
+  EXPECT_LT(h.panel->aboveThreshold(), want);
+  EXPECT_LT(h.panel->thresholdLineY(), y0);
+  EXPECT_EQ(h.app.settings().statsThresholdUs, h.panel->thresholdUs());
+
+  // 0 turns it off again.
+  h.panel->setThresholdUs(h.context(), 0.0);
+  h.frames(3);
+  EXPECT_EQ(h.panel->aboveThreshold(), 0u);
+  EXPECT_TRUE(std::isnan(h.panel->thresholdLineY()));
 }

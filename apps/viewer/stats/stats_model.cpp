@@ -4,8 +4,10 @@
 #include "viewer/common/query_filter.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace tachyon::viewer::stats {
@@ -104,6 +106,71 @@ std::string formatDuration(double ticks, double clockHz) {
     std::snprintf(buf, sizeof buf, "%.0f ns", ms * 1e6);
   }
   return buf;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Per-instance chart scale
+
+uint64_t percentileTicks(std::vector<uint64_t> durations, double p) {
+  if (durations.empty()) return 0;
+  const size_t n = durations.size();
+  const double rank = std::ceil(std::clamp(p, 0.0, 1.0) * static_cast<double>(n));
+  const size_t k = std::clamp<size_t>(rank < 1.0 ? 1 : static_cast<size_t>(rank), 1, n) - 1;
+  std::nth_element(durations.begin(), durations.begin() + static_cast<std::ptrdiff_t>(k), durations.end());
+  return durations[k];
+}
+
+InstanceScale makeInstanceScale(const std::vector<uint64_t>& durations, bool clip, bool log) {
+  InstanceScale s;
+  s.log = log;
+  uint64_t mx = 1;
+  for (const uint64_t d : durations) mx = std::max(mx, d);
+  s.maxTicks = mx;
+  s.top = mx;
+  if (clip && durations.size() > 1) {
+    const uint64_t p99 = std::max<uint64_t>(1, percentileTicks(durations, 0.99));
+    if (p99 < mx) {
+      s.top = p99;
+      s.clipping = true;
+    }
+  }
+  return s;
+}
+
+double barFraction(const InstanceScale& scale, uint64_t duration) {
+  const uint64_t d = std::min(duration, scale.top);
+  const double top = static_cast<double>(std::max<uint64_t>(scale.top, 1));
+  const double f =
+      scale.log ? std::log1p(static_cast<double>(d)) / std::log1p(top) : static_cast<double>(d) / top;
+  return std::clamp(f, 0.0, 1.0);
+}
+
+uint64_t ticksAtFraction(const InstanceScale& scale, double f) {
+  f = std::clamp(f, 0.0, 1.0);
+  const double top = static_cast<double>(std::max<uint64_t>(scale.top, 1));
+  const double t = scale.log ? std::expm1(f * std::log1p(top)) : f * top;
+  return static_cast<uint64_t>(std::llround(std::clamp(t, 0.0, top)));
+}
+
+std::optional<double> parseDurationUs(const std::string& text) {
+  size_t b = 0, e = text.size();
+  while (b < e && std::isspace(static_cast<unsigned char>(text[b]))) ++b;
+  while (e > b && std::isspace(static_cast<unsigned char>(text[e - 1]))) --e;
+  if (b == e) return 0.0;
+  const std::string t = text.substr(b, e - b);
+  char* end = nullptr;
+  const double v = std::strtod(t.c_str(), &end);
+  if (end == t.c_str() || !std::isfinite(v) || v < 0.0) return std::nullopt;
+  std::string unit(end);
+  size_t ub = 0;
+  while (ub < unit.size() && std::isspace(static_cast<unsigned char>(unit[ub]))) ++ub;
+  unit = unit.substr(ub);
+  for (char& c : unit) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (unit.empty() || unit == "ms") return v * 1000.0;
+  if (unit == "us" || unit == "\xC2\xB5s") return v;
+  if (unit == "ns") return v / 1000.0;
+  if (unit == "s") return v * 1e6;
+  return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------------------------------------

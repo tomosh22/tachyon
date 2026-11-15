@@ -831,15 +831,142 @@ void FunctionStatsPanel::drawWide(const PanelContext& context) {
   ImGui::EndChild();
 }
 
-// One bar per instance (bucketed to at most one bar per two pixels), the height being the duration; the
-// current instance is highlighted and a click on a bar navigates to its longest instance.
+// ---- WP-67f: per-instance chart
+// ------------------------------------------------------------------------------
+
+void FunctionStatsPanel::injectInstancesForTest(std::vector<analysis::Instance> instances) {
+  if (!m_result) return;
+  auto r = std::make_shared<StatsResult>(*m_result);
+  r->instances = std::make_shared<const std::vector<analysis::Instance>>(std::move(instances));
+  m_result = std::move(r);
+  m_current.reset();
+}
+
+// Takes the three preferences from Settings once (they are per user); without Settings they stay per session.
+void FunctionStatsPanel::adoptPreferences(const PanelContext& context) {
+  if (m_prefsAdopted || !context.settings) return;
+  m_prefsAdopted = true;
+  m_clip = context.settings->statsClipOutliers;
+  m_log = context.settings->statsLogScale;
+  m_thresholdUs = context.settings->statsThresholdUs;
+}
+
+void FunctionStatsPanel::setClipOutliers(const PanelContext& context, bool on) {
+  adoptPreferences(context);
+  m_clip = on;
+  if (context.mutableSettings && context.mutableSettings->statsClipOutliers != on) {
+    context.mutableSettings->statsClipOutliers = on;
+    context.saveSettings();
+  }
+}
+
+void FunctionStatsPanel::setLogScale(const PanelContext& context, bool on) {
+  adoptPreferences(context);
+  m_log = on;
+  if (context.mutableSettings && context.mutableSettings->statsLogScale != on) {
+    context.mutableSettings->statsLogScale = on;
+    context.saveSettings();
+  }
+}
+
+void FunctionStatsPanel::setThresholdUs(const PanelContext& context, double us) {
+  adoptPreferences(context);
+  m_thresholdUs = std::isfinite(us) && us > 0.0 ? us : 0.0;
+  if (context.mutableSettings && context.mutableSettings->statsThresholdUs != m_thresholdUs) {
+    context.mutableSettings->statsThresholdUs = m_thresholdUs;
+    context.saveSettings();
+  }
+}
+
+// Clip / Log toggle buttons and the threshold field. Toggled buttons read "ON" and carry the accent tint.
+void FunctionStatsPanel::drawChartToolbar(const PanelContext& context) {
+  const ThemePalette& pal = paletteOf(context);
+  const auto toggle = [&](const char* label, bool on, ButtonRect& rect, const char* tip) {
+    if (on) {
+      ImGui::PushStyleColor(ImGuiCol_Button, pal.accentSoft);
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, pal.accentSoft);
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive, pal.accentSoft);
+      ImGui::PushStyleColor(ImGuiCol_Border, pal.accent);
+      ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    }
+    const bool pressed = ImGui::Button(label);
+    if (on) {
+      ImGui::PopStyleVar();
+      ImGui::PopStyleColor(4);
+    }
+    const ImVec2 bmin = ImGui::GetItemRectMin(), bmax = ImGui::GetItemRectMax();
+    rect = {bmin.x, bmin.y, bmax.x, bmax.y, true};
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+    return pressed;
+  };
+  if (toggle(m_clip ? "Clip p99: ON##clip" : "Clip p99: OFF##clip", m_clip, m_clipButton,
+             "Scale to the 99th percentile; longer instances are clipped and marked"))
+    setClipOutliers(context, !m_clip);
+  ImGui::SameLine();
+  if (toggle(m_log ? "Log: ON##log" : "Log: OFF##log", m_log, m_logButton,
+             "Logarithmic bar height (makes short and long instances comparable)"))
+    setLogScale(context, !m_log);
+  ImGui::SameLine();
+  ImGui::AlignTextToFramePadding();
+  ImGui::TextUnformatted("Threshold:");
+  ImGui::SameLine();
+  if (!m_thresholdTextActive && !m_draggingThreshold)
+    m_thresholdText =
+        m_thresholdUs > 0.0 ? st::formatDuration(m_thresholdUs * 1e-6 * m_clockHz, m_clockHz) : "";
+  char buf[48];
+  std::snprintf(buf, sizeof buf, "%s", m_thresholdText.c_str());
+  ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.5f);
+  const bool entered =
+      ImGui::InputTextWithHint("##thr", "e.g. 1.5 ms", buf, sizeof buf,
+                               ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+  m_thresholdTextActive = ImGui::IsItemActive();
+  if (m_thresholdTextActive) m_thresholdText = buf;
+  if (entered || ImGui::IsItemDeactivatedAfterEdit()) {
+    if (const std::optional<double> us = st::parseDurationUs(buf)) setThresholdUs(context, *us);
+    m_thresholdTextActive = false;
+  }
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip(
+        "Draws a line at this duration (e.g. 143 ms, 300 us); instances above it are\n"
+        "highlighted. Drag the line to change it; empty or 0 turns it off.");
+  if (m_thresholdUs > 0.0) {
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear##thr")) setThresholdUs(context, 0.0);
+  }
+}
+
+// One bar per instance (bucketed to at most one bar per two pixels, the longest of the column), the height
+// being the duration on the scale of makeInstanceScale; a click on a bar navigates to its longest instance.
 void FunctionStatsPanel::drawInstanceBars(const PanelContext& context, float height) {
+  m_instanceBars.clear();
+  m_thresholdY = std::numeric_limits<float>::quiet_NaN();
+  m_aboveThreshold = 0;
+  m_clipButton = m_logButton = {};
   if (!m_result || !m_result->instances || m_result->instances->empty()) {
     ImGui::TextDisabled("No instances.");
     return;
   }
+  adoptPreferences(context);
+  drawChartToolbar(context);
+  const float em = ImGui::GetFontSize();
+  height = std::max(std::min(height, ImGui::GetContentRegionAvail().y), em * 2.0f);
+
   const std::vector<analysis::Instance>& all = *m_result->instances;
-  const ThemePalette& pal = currentPalette();
+  const ThemePalette& pal = paletteOf(context);
+  if (m_scaleResult != m_result || m_scaleClip != m_clip || m_scaleLog != m_log) {
+    std::vector<uint64_t> durations;
+    durations.reserve(all.size());
+    for (const analysis::Instance& i : all) durations.push_back(i.end - i.begin);
+    m_instanceScale = st::makeInstanceScale(durations, m_clip, m_log);
+    m_scaleResult = m_result;
+    m_scaleClip = m_clip;
+    m_scaleLog = m_log;
+  }
+  const st::InstanceScale& scale = m_instanceScale;
+  uint64_t threshold = 0;
+  if (m_thresholdUs > 0.0)
+    threshold = std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(m_thresholdUs * 1e-6 * m_clockHz)));
+
   const float width = std::max(ImGui::GetContentRegionAvail().x, 20.0f);
   const ImVec2 p0 = ImGui::GetCursorScreenPos();
   ImGui::InvisibleButton("##instbars", ImVec2(width, height));
@@ -847,43 +974,127 @@ void FunctionStatsPanel::drawInstanceBars(const PanelContext& context, float hei
   const bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
   ImDrawList* dl = ImGui::GetWindowDrawList();
   dl->AddRectFilled(p0, ImVec2(p0.x + width, p0.y + height), pal.laneBg);
+  const float plotH = height - 2.0f;
+  const float baseY = p0.y + height;
+  const auto yForTicks = [&](uint64_t t) {
+    return baseY - std::max(1.0f, plotH * static_cast<float>(st::barFraction(scale, t)));
+  };
+
+  // The threshold line: hit-test and drag.
+  const float mouseX = ImGui::GetIO().MousePos.x, mouseY = ImGui::GetIO().MousePos.y;
+  float lineY = std::numeric_limits<float>::quiet_NaN();
+  if (threshold > 0) lineY = yForTicks(threshold);
+  const bool nearLine = threshold > 0 && hovered && std::fabs(mouseY - lineY) <= 4.0f;
+  if (clicked && nearLine) m_draggingThreshold = true;
+  if (m_draggingThreshold) {
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+      const double f = std::clamp(static_cast<double>((baseY - mouseY) / plotH), 0.0, 1.0);
+      threshold = std::max<uint64_t>(1, st::ticksAtFraction(scale, f));
+      m_thresholdUs = static_cast<double>(threshold) / m_clockHz * 1e6;
+      lineY = yForTicks(threshold);
+    } else {
+      m_draggingThreshold = false;
+      setThresholdUs(context, m_thresholdUs);
+    }
+  }
+  const bool lineActive = nearLine || m_draggingThreshold;
+  if (lineActive) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+
   const size_t n = all.size();
   const size_t columns = std::max<size_t>(1, std::min(n, static_cast<size_t>(width / 2.0f)));
-  uint64_t maxDuration = 1;
-  for (const analysis::Instance& i : all) maxDuration = std::max(maxDuration, i.end - i.begin);
   const float colW = width / static_cast<float>(columns);
-  const float mouseX = ImGui::GetIO().MousePos.x;
   const size_t hotColumn =
-      hovered ? static_cast<size_t>(std::clamp((mouseX - p0.x) / colW, 0.0f, static_cast<float>(columns - 1)))
-              : columns;
-  size_t hotInstance = SIZE_MAX;
+      hovered && !lineActive
+          ? static_cast<size_t>(std::clamp((mouseX - p0.x) / colW, 0.0f, static_cast<float>(columns - 1)))
+          : columns;
+  size_t hotInstance = SIZE_MAX, hotFirst = 0, hotCount = 0;
+  bool hotClipped = false;
+  m_instanceBars.reserve(columns);
+  const float capH = std::clamp(em * 0.45f, 4.0f, 8.0f);
   for (size_t c = 0; c < columns; ++c) {
     const size_t first = c * n / columns, last = std::max(first + 1, (c + 1) * n / columns);
     size_t best = first;
     uint64_t bestDuration = 0;
     for (size_t i = first; i < last && i < n; ++i) {
       const uint64_t d = all[i].end - all[i].begin;
+      if (threshold > 0 && d > threshold) ++m_aboveThreshold;
       if (d >= bestDuration) {
         bestDuration = d;
         best = i;
       }
     }
     const bool current = m_current && *m_current >= first && *m_current < last;
-    const float h =
-        std::max(1.0f, (height - 2.0f) * static_cast<float>(bestDuration) / static_cast<float>(maxDuration));
-    ImU32 color = current ? pal.highlight : pal.barFill;
+    const bool clipped = st::barClipped(scale, bestDuration);
+    const bool above = threshold > 0 && bestDuration > threshold;
+    const float h = std::max(1.0f, plotH * static_cast<float>(st::barFraction(scale, bestDuration)));
+    ImU32 color = above ? pal.highlight : pal.barFill;
     if (c == hotColumn) {
       color = pal.accent;
       hotInstance = best;
+      hotFirst = first;
+      hotCount = std::min(last, n) - first;
+      hotClipped = clipped;
     }
-    dl->AddRectFilled(
-        ImVec2(p0.x + static_cast<float>(c) * colW, p0.y + height - h),
-        ImVec2(p0.x + static_cast<float>(c + 1) * colW - (colW > 3.0f ? 1.0f : 0.0f), p0.y + height), color);
+    const float x0 = p0.x + static_cast<float>(c) * colW;
+    const float x1 = p0.x + static_cast<float>(c + 1) * colW - (colW > 3.0f ? 1.0f : 0.0f);
+    dl->AddRectFilled(ImVec2(x0, baseY - h), ImVec2(x1, baseY), color);
+    if (current) dl->AddRect(ImVec2(x0 - 1.0f, baseY - h - 1.0f), ImVec2(x1 + 1.0f, baseY), pal.overlay);
+    if (clipped) {
+      const float cx = (x0 + x1) * 0.5f, hw = std::max(colW * 0.5f, 3.0f);
+      dl->AddTriangleFilled(ImVec2(cx - hw, p0.y + capH + 1.0f), ImVec2(cx + hw, p0.y + capH + 1.0f),
+                            ImVec2(cx, p0.y + 1.0f), pal.error);
+    }
+    m_instanceBars.push_back({x0, baseY - h, x1, baseY, static_cast<uint32_t>(std::min(last, n) - first),
+                              bestDuration, clipped, above});
   }
-  if (hotInstance != SIZE_MAX) {
+
+  if (threshold > 0) {
+    const float y = std::clamp(lineY, p0.y + 1.0f, baseY);
+    m_thresholdY = y;
+    dl->AddLine(ImVec2(p0.x, y), ImVec2(p0.x + width, y), pal.highlight, lineActive ? 2.5f : 1.5f);
+  }
+
+  // Scale legend, right-aligned over the plot.
+  {
+    char line1[128];
+    const std::string top = st::formatDuration(static_cast<double>(scale.top), m_clockHz);
+    if (scale.clipping)
+      std::snprintf(line1, sizeof line1, "%s scale: %s (p99), max %s clipped", scale.log ? "Log" : "Linear",
+                    top.c_str(), st::formatDuration(static_cast<double>(scale.maxTicks), m_clockHz).c_str());
+    else
+      std::snprintf(line1, sizeof line1, "%s scale: %s (max)", scale.log ? "Log" : "Linear", top.c_str());
+    const float pad = 3.0f;
+    float y = p0.y + pad;
+    const auto put = [&](const char* text, ImU32 col) {
+      const ImVec2 sz = ImGui::CalcTextSize(text);
+      const float x = p0.x + width - sz.x - pad * 2.0f;
+      dl->AddRectFilled(ImVec2(x - pad, y - 1.0f), ImVec2(x + sz.x + pad, y + sz.y + 1.0f),
+                        (pal.laneBg & 0x00FFFFFFu) | 0xC8000000u);
+      dl->AddText(ImVec2(x, y), col, text);
+      y += sz.y + 2.0f;
+    };
+    put(line1, pal.textMuted);
+    if (threshold > 0) {
+      char line2[96];
+      std::snprintf(line2, sizeof line2, "%u above threshold", m_aboveThreshold);
+      put(line2, pal.text);
+    }
+  }
+
+  if (lineActive && hovered) {
+    ImGui::SetTooltip("Threshold %s (%u above) - drag to change",
+                      st::formatDuration(static_cast<double>(threshold), m_clockHz).c_str(),
+                      m_aboveThreshold);
+  } else if (hotInstance != SIZE_MAX) {
     const analysis::Instance& inst = all[hotInstance];
-    ImGui::SetTooltip("Instance %zu of %zu: %s", hotInstance + 1, n,
-                      st::formatDuration(static_cast<double>(inst.end - inst.begin), m_clockHz).c_str());
+    const std::string longest = st::formatDuration(static_cast<double>(inst.end - inst.begin), m_clockHz);
+    const char* clip = hotClipped ? "\nclipped: taller than the scale" : "";
+    if (hotCount > 1) {
+      ImGui::SetTooltip("%zu instances in this column (%zu-%zu)\nlongest: %s%s", hotCount, hotFirst + 1,
+                        hotFirst + hotCount, longest.c_str(), clip);
+    } else {
+      ImGui::SetTooltip("Instance %zu of %zu: %s%s", hotInstance + 1, n, longest.c_str(), clip);
+    }
     if (clicked) goToInstance(context, static_cast<uint32_t>(hotInstance));
   }
 }

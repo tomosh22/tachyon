@@ -34,6 +34,7 @@
 #include "viewer/stats/stats_model.h"
 
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -147,6 +148,32 @@ class FunctionStatsPanel final : public IPanel {
   const ButtonRect& previousButton() const { return m_prevButton; }
   const ButtonRect& nextButton() const { return m_nextButton; }
   const ButtonRect& populateButton() const { return m_populateButton; }
+  // WP-67f: the per-instance chart. Geometry of the last frame (tests) and the toolbar's state.
+  struct DrawnInstanceBar {
+    float x0, y0, x1, y1;
+    uint32_t count;       // instances bucketed into this column
+    uint64_t longest;     // the longest duration in the column (ticks)
+    bool clipped;         // longer than the scale: drawn at full height with a marker
+    bool aboveThreshold;  // longest > threshold
+  };
+  const std::vector<DrawnInstanceBar>& drawnInstanceBars() const { return m_instanceBars; }
+  const stats::InstanceScale& instanceScale() const { return m_instanceScale; }
+  bool clipOutliers() const { return m_clip; }
+  bool logScale() const { return m_log; }
+  void setClipOutliers(const PanelContext& context, bool on);
+  void setLogScale(const PanelContext& context, bool on);
+  // Threshold in microseconds (0 = off); persisted like the toggles.
+  double thresholdUs() const { return m_thresholdUs; }
+  void setThresholdUs(const PanelContext& context, double us);
+  // Instances longer than the threshold among those shown (0 without a threshold).
+  uint32_t aboveThreshold() const { return m_aboveThreshold; }
+  const ButtonRect& clipButton() const { return m_clipButton; }
+  const ButtonRect& logButton() const { return m_logButton; }
+  // Screen y of the threshold line in the last frame (NaN when none is drawn).
+  float thresholdLineY() const { return m_thresholdY; }
+  // Tests: replaces the instance list of the delivered result (keeps its statistics and the timeline
+  // overlay).
+  void injectInstancesForTest(std::vector<analysis::Instance> instances);
   // Tests: forget the symbol-burst throttle.
   void disableThrottle() { m_throttle = false; }
 
@@ -175,6 +202,8 @@ class FunctionStatsPanel final : public IPanel {
   // duration bars | histogram | statistics, side by side.
   void drawWide(const PanelContext& context);
   void drawInstanceBars(const PanelContext& context, float height);
+  void adoptPreferences(const PanelContext& context);
+  void drawChartToolbar(const PanelContext& context);
   void drawStatisticsBox(double clockHz);
   void drawBoxPlot(double clockHz);
   void drawInstanceNav(const PanelContext& context);
@@ -220,6 +249,22 @@ class FunctionStatsPanel final : public IPanel {
   stats::BoxPlotLayout m_boxPlot;
   std::vector<DrawnRow> m_drawnRows;
   ButtonRect m_prevButton, m_nextButton, m_populateButton;
+  // WP-67f: per-user preferences (mirrored into Settings when the context has them) and the last frame's
+  // chart.
+  bool m_prefsAdopted = false;
+  bool m_clip = true;
+  bool m_log = false;
+  double m_thresholdUs = 0.0;
+  std::string m_thresholdText;
+  bool m_thresholdTextActive = false;
+  bool m_draggingThreshold = false;
+  stats::InstanceScale m_instanceScale;
+  std::shared_ptr<const StatsResult> m_scaleResult;  // what m_instanceScale was computed for
+  bool m_scaleClip = false, m_scaleLog = false;
+  std::vector<DrawnInstanceBar> m_instanceBars;
+  uint32_t m_aboveThreshold = 0;
+  ButtonRect m_clipButton, m_logButton;
+  float m_thresholdY = std::numeric_limits<float>::quiet_NaN();
 };
 
 }  // namespace tachyon::viewer

@@ -231,6 +231,12 @@ PanelContext App::panelContext() const {
   c.document = m_document.get();
   c.selection = const_cast<SelectionBus*>(&m_selection);
   c.settings = &m_settings;
+  c.mutableSettings = const_cast<Settings*>(&m_settings);
+  c.saveSettingsFn = [](void* app) {
+    App* a = static_cast<App*>(app);
+    if (a->m_options.persist) a->saveSettings();
+  };
+  c.saveSettingsUser = const_cast<App*>(this);
   c.jobs = const_cast<JobQueue*>(&m_jobs);
   c.queryExecutor = m_queryExecutor.get();
   c.documentGeneration = m_documentGeneration;
